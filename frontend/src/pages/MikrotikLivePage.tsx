@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
-import { PrimaryButton } from "@/components/ui/Buttons";
+import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { PageHeader } from "@/components/ui/DetailGrid";
 import { FormField } from "@/components/ui/FormField";
 import { TunnelNotification } from "@/components/ui/TunnelNotification";
@@ -56,6 +56,8 @@ type LiveState = {
 type HealthRange = "live" | "days" | "weeks" | "month" | "year";
 
 type TrendPoint = { label: string; date: string; minutes: number; drops: number };
+
+const REBOOT_GRANT = '/user group set [find where name="isp-centric-api"] policy=read,write,api,test,ftp,reboot';
 
 const healthRanges: { id: HealthRange; label: string; caption: string }[] = [
   { id: "live", label: "Live", caption: "Last hour" },
@@ -173,6 +175,10 @@ export function MikrotikLivePage() {
   const [healthRange, setHealthRange] = useState<HealthRange>("live");
   const [healthTrends, setHealthTrends] = useState<Partial<Record<HealthRange, TrendPoint[]>>>({});
   const [tunnelStatus, setTunnelStatus] = useState<"up" | "down" | "unknown">("unknown");
+  const [confirmRestart, setConfirmRestart] = useState(false);
+  const [restarting, setRestarting] = useState(false);
+  const [restartNote, setRestartNote] = useState("");
+  const [grantCopied, setGrantCopied] = useState(false);
   usePageMeta("MikroTik live — ISP CENTRIC", "Live running state read from the router.");
 
   useEffect(() => {
@@ -265,6 +271,26 @@ export function MikrotikLivePage() {
       setError(cause instanceof Error ? cause.message : "The API password could not be saved.");
     } finally {
       setSaving(false);
+    }
+  }
+
+  async function restartRouter() {
+    setRestarting(true);
+    setError("");
+    setRestartNote("");
+    setGrantCopied(false);
+    try {
+      const body = await apiRequest<{ rebooting: boolean; message: string }>(`/api/mikrotiks/${deviceId}/reboot`, {
+        method: "POST",
+        body: "{}",
+      });
+      setRestartNote(body.message || "The router is restarting.");
+      setTunnelStatus("down");
+    } catch (cause) {
+      setRestartNote(cause instanceof Error ? cause.message : "The router could not be restarted.");
+    } finally {
+      setRestarting(false);
+      setConfirmRestart(false);
     }
   }
 
@@ -461,6 +487,53 @@ export function MikrotikLivePage() {
                 </div>
               ))}
             </dl>
+            <div className="mt-5 border-t border-border pt-4">
+              {confirmRestart ? (
+                <div className="grid gap-2">
+                  <p className="text-xs text-muted-foreground">Restarting drops every connected session for a minute or two.</p>
+                  <div className="flex flex-wrap gap-2">
+                    <SecondaryButton type="button" disabled={restarting} onClick={() => void restartRouter()}>
+                      {restarting ? "Restarting…" : "Confirm restart"}
+                    </SecondaryButton>
+                    <SecondaryButton type="button" disabled={restarting} onClick={() => setConfirmRestart(false)}>
+                      Keep running
+                    </SecondaryButton>
+                  </div>
+                </div>
+              ) : (
+                <SecondaryButton
+                  type="button"
+                  onClick={() => {
+                    setConfirmRestart(true);
+                    setRestartNote("");
+                  }}
+                >
+                  Restart router
+                </SecondaryButton>
+              )}
+              {restartNote ? (
+                <div className="mt-3 grid gap-2" role="alert">
+                  <p className="text-xs leading-5 text-muted-foreground">{restartNote}</p>
+                  {/cannot restart this router/i.test(restartNote) ? (
+                    <div className="grid gap-2">
+                      <p className="text-xs text-muted-foreground">Paste this once into WinBox Terminal as admin, then restart again.</p>
+                      <pre className="overflow-x-auto rounded-lg bg-surface-muted p-3 text-xs leading-5">{REBOOT_GRANT}</pre>
+                      <SecondaryButton
+                        type="button"
+                        onClick={() => {
+                          navigator.clipboard.writeText(REBOOT_GRANT).then(
+                            () => setGrantCopied(true),
+                            () => setGrantCopied(false),
+                          );
+                        }}
+                      >
+                        {grantCopied ? "Copied" : "Copy the update"}
+                      </SecondaryButton>
+                    </div>
+                  ) : null}
+                </div>
+              ) : null}
+            </div>
           </aside>
         </div>
       ) : null}

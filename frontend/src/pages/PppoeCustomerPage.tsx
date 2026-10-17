@@ -42,7 +42,7 @@ export type Subscriber = {
   live: { connection: string; ip: string; mac: string; uptime: string; router: string; lastSeen: string | null; rates?: { rxBps: number; txBps: number } | null };
   usage: { days: { day: string; bytesIn: number; bytesOut: number }[]; monthBytesIn: number; monthBytesOut: number };
   sessions: { login: string | null; logout: string | null; duration: number; ip: string; bytesIn: number; bytesOut: number; cause: string }[];
-  devices: { mac: string; ip: string; sessions: number; seconds: number; bytesIn: number; bytesOut: number; online: boolean; onlineFor: string; lastSeen: string | null }[];
+  devices: { mac: string; ip: string; name?: string; kind?: "router" | "gadget"; via?: string; sessions: number; seconds: number; bytesIn: number; bytesOut: number; online: boolean; onlineFor: string; lastSeen: string | null }[];
   billing: {
     invoices: { id: string; amount: string; purpose: string; status: string; reference: string; createdAt: string }[];
     payments: { id: string; amount: string; method: string; reference: string; createdAt: string }[];
@@ -484,7 +484,7 @@ export function PppoeCustomerPage() {
 
   const totalOnline = (usageTrend ?? []).reduce((sum, point) => sum + point.minutes, 0);
   const totalDown = (healthTrend ?? []).reduce((sum, point) => sum + point.minutes, 0);
-  const devices = subscriber.devices ?? [];
+  const devices = (subscriber.devices ?? []).filter((device) => device.kind !== "router");
   const devicesOnline = devices.filter((device) => device.online).length;
   const home = (path: string) => (user ? clientPage(user, path) : path);
   const status = labelFor(subscriber.status);
@@ -864,7 +864,7 @@ export function PppoeCustomerPage() {
                 </p>
               </div>
               {devices.length === 0 ? (
-                <p className="mt-3 text-sm text-muted-foreground">No devices have connected yet.</p>
+                <p className="mt-3 text-sm text-muted-foreground">No gadgets have connected yet.</p>
               ) : (
                 <div className="mt-3 overflow-x-auto">
                   <table className="w-full min-w-[34rem] text-left text-sm">
@@ -881,7 +881,10 @@ export function PppoeCustomerPage() {
                     <tbody>
                       {devices.map((device) => (
                         <tr key={device.mac} className="border-t border-border">
-                          <td className="py-2"><code className="text-xs">{device.mac}</code></td>
+                          <td className="py-2">
+                            {device.name ? <span className="block font-medium">{device.name}</span> : null}
+                            <code className="text-xs text-muted-foreground">{device.mac}</code>
+                          </td>
                           <td className="py-2">
                             {device.online ? (
                               <span className="font-medium text-success">Online{device.ip ? ` · ${device.ip}` : ""}</span>

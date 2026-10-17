@@ -543,7 +543,7 @@ export function buildRecoveryScripts(input: { backup: string; password: string }
     ? script(
         [
           "# Recreates the API user that can change PPPoE enforcement, and allows WinBox only from the management tunnel.",
-          ':if ([:len [/user group find where name="isp-centric-api"]] = 0) do={ /user group add name=isp-centric-api policy=read,write,api,winbox,test,ftp } else={ /user group set [find where name="isp-centric-api"] policy=read,write,api,winbox,test,ftp };',
+          ':if ([:len [/user group find where name="isp-centric-api"]] = 0) do={ /user group add name=isp-centric-api policy=read,write,api,winbox,test,ftp,reboot } else={ /user group set [find where name="isp-centric-api"] policy=read,write,api,winbox,test,ftp,reboot };',
           `:if ([:len [/user find where name="isp-centric"]] = 0) do={ /user add name=isp-centric group=isp-centric-api password="${password}" } else={ /user set [find where name="isp-centric"] group=isp-centric-api password="${password}" };`,
           "/ip service set winbox disabled=no;",
           ':local inAnchor ""; :do { :set inAnchor [:pick [/ip firewall filter find where chain=input action=drop] 0] } on-error={};',

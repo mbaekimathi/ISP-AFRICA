@@ -1172,6 +1172,30 @@ def ensure_schema():
                     cursor.execute(f"ALTER TABLE hotspot_purchases ADD COLUMN {definition}")
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS hotspot_vouchers (
+                  id CHAR(36) NOT NULL PRIMARY KEY,
+                  client_id CHAR(36) NOT NULL,
+                  purchase_id CHAR(36) NOT NULL,
+                  device_id CHAR(36) NOT NULL,
+                  package_id CHAR(36) NOT NULL,
+                  code VARCHAR(20) NOT NULL,
+                  username VARCHAR(40) NOT NULL DEFAULT '',
+                  password VARCHAR(40) NOT NULL DEFAULT '',
+                  seconds INT NOT NULL DEFAULT 0,
+                  status ENUM('issued','used','void') NOT NULL DEFAULT 'issued',
+                  redeemed_ip VARCHAR(45) NOT NULL DEFAULT '',
+                  redeemed_mac VARCHAR(20) NOT NULL DEFAULT '',
+                  issued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  used_at TIMESTAMP NULL,
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  UNIQUE KEY uq_hs_voucher_code (code),
+                  KEY idx_hs_voucher_purchase (purchase_id),
+                  KEY idx_hs_voucher_username (username)
+                )
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS isp_communication_settings (
                   client_id CHAR(36) NOT NULL,
                   channel ENUM('sms', 'whatsapp', 'email') NOT NULL,
@@ -1661,6 +1685,9 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST" and path.startswith("/api/mikrotiks/") and path.endswith("/unsuspend"):
             device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/unsuspend").strip("/")
             return {"device": self.set_mikrotik_suspended(cursor, device_id, token.get("isp_client_session"), False)}, None
+        if method == "POST" and path.startswith("/api/mikrotiks/") and path.endswith("/reboot"):
+            device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/reboot").strip("/")
+            return self.reboot_mikrotik(cursor, device_id, token.get("isp_client_session")), None
         if method == "GET" and path == "/api/packages":
             client_token = token.get("isp_client_session")
             return {
@@ -2634,6 +2661,35 @@ class Handler(BaseHTTPRequestHandler):
             raise routeros_api.RouterError("Router access is not saved yet, so nothing was changed on the router.")
         password = routeros_api.open_password(row["api_secret"])
         routeros_api.apply_hotspot_access(row["tunnel_ip"], password, enabled)
+
+    def reboot_mikrotik(self, cursor, device_id, token):
+        client_id = self.require_client(cursor, token)
+        if not router_jobs.allow_job(client_id):
+            raise ApiError(429, "Too many router checks were requested. Wait a moment and try again.")
+        self.mikrotik_row(cursor, device_id, client_id)
+        cursor.execute(
+            "SELECT tunnel_ip, api_secret FROM isp_mikrotik_devices WHERE id = %s AND client_id = %s",
+            (device_id, client_id),
+        )
+        row = cursor.fetchone()
+        if not row or not row.get("api_secret") or not row.get("tunnel_ip"):
+            raise ApiError(400, "Router access is not saved yet, so the router cannot be restarted.")
+        password = None
+        try:
+            password = routeros_api.open_password(row["api_secret"])
+            routeros_api.reboot_router(row["tunnel_ip"], password)
+        except routeros_api.RouterError as error:
+            message = str(error)
+            if message == "The management tunnel did not answer.":
+                if os.environ.get("ISP_ENV", "development") != "production" and password == routeros_api.DEV_PASSWORD:
+                    return {"rebooting": True, "message": "Development mode: no router is connected, so nothing was restarted."}
+                raise ApiError(502, "The router did not answer, so it was not restarted.")
+            raise ApiError(502, routeros_api.router_change_message(error))
+        cursor.execute(
+            "UPDATE isp_mikrotik_devices SET tunnel_status = 'down' WHERE id = %s AND client_id = %s",
+            (device_id, client_id),
+        )
+        return {"rebooting": True, "message": "The router is restarting. It will answer again in a minute or two."}
 
     def apply_selection(self, cursor, device_id, token, payload):
         client_id = self.require_client(cursor, token)

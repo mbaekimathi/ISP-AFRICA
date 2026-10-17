@@ -96,6 +96,10 @@ button:disabled{background:#c7d2e0;box-shadow:none;cursor:default;transform:none
 .done svg{width:30px;height:30px}
 .spin{display:inline-block;width:26px;height:26px;border-radius:50%;border:3px solid #dbe7f6;border-top-color:#1d4ed8;animation:rot .8s linear infinite}
 @keyframes rot{to{transform:rotate(360deg)}}
+.voucher{margin-top:16px;padding:14px 16px;background:#f8fafc;border:1.5px dashed #cbd5e1;border-radius:12px;text-align:center}
+.voucher small{display:block;font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:#64748b;margin-bottom:6px}
+.voucher code{display:inline-block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:21px;font-weight:800;letter-spacing:.12em;color:#1d4ed8;background:#eef2f7;padding:4px 12px;border-radius:8px}
+.vcode{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;font-weight:700;letter-spacing:.08em;color:#1d4ed8}
 .foot{margin-top:16px;text-align:center;font-size:11px;font-weight:600;letter-spacing:.08em;color:rgba(255,255,255,.5)}
 @media(max-width:420px){body{padding:14px}.card{padding:22px 18px;border-radius:20px}h1{font-size:19px}}
 """
@@ -416,11 +420,15 @@ function pickpkg(){{
 function paid(){{
  document.querySelector('.card').innerHTML=BRAND+'<div class=okpage>'+DONE+'<span class="badge ok">Paid</span><h1>You are back online</h1><p class=sub>Payment received — your internet is reconnecting now.</p><p class=hint>This window can be closed.</p></div>';
 }}
+function thanks(b){{
+ if(b&&b.voucher){{location.href='/thank-you?code='+encodeURIComponent(b.voucher);return;}}
+ paid();
+}}
 async function poll(){{
  if(!cid)return;
  const r=await fetch('/pay/status?id='+encodeURIComponent(cid));
  const b=await r.json();
- if(b.state==='paid'){{cid=null;paid();return;}}
+ if(b.state==='paid'){{cid=null;thanks(b);return;}}
  if(b.state==='failed'){{cid=null;document.getElementById('msg').innerHTML='<div class=err>'+(b.reason||'Payment was not completed.')+'</div>';const btn=document.getElementById('paybtn');if(btn)btn.disabled=false;refresh();return;}}
  setTimeout(poll,4000);
 }}
@@ -466,6 +474,77 @@ def unknown_page():
     )
 
 
+def thankyou_page(voucher):
+    if not voucher:
+        return page(
+            "Thank you",
+            f"""<div class=okpage>{DONE_ICON}
+<span class="badge ok">Paid</span>
+<h1>Thank you for your payment</h1>
+<p class=sub>Your payment was received and your internet is reconnecting now.</p>
+<p class=hint>You can close this window and start browsing.</p></div>""",
+        )
+    name = esc(f"{voucher['first_name']} {voucher['last_name']}".strip()) or "Customer"
+    used = voucher["status"] == "used"
+    state = (
+        "Already used — this voucher was spent once you started surfing and cannot be used again."
+        if used
+        else "Single use — the voucher is spent as soon as you start surfing and cannot be used again."
+    )
+    badge = '<span class="badge warn">Voucher used</span>' if used else '<span class="badge ok">Payment successful</span>'
+    return page(
+        "Thank you",
+        f"""<div class=okpage>{DONE_ICON}
+{badge}
+<h1>Thank you, {name}!</h1>
+<p class=sub>Your subscription is active and your internet is reconnecting now.</p></div>
+<div class=voucher><small>Voucher code</small><code>{esc(voucher['code'])}</code></div>
+<p class=sect>Receipt</p>
+<div class=row><span>Package</span><span>{esc(voucher['package_name'])}</span></div>
+<div class=row><span>Amount paid</span><span>KSh {esc(ksh(voucher['amount']))}</span></div>
+<div class=row><span>Account</span><span>{esc(voucher['pppoe_username'])}</span></div>
+<p class=note>{state} Keep it as your receipt.</p>
+<p class=hint style="text-align:center">You can close this window and start browsing.</p>""",
+    )
+
+
+def thankyou_hotspot_page(receipt):
+    if not receipt:
+        return page(
+            "Thank you",
+            f"""<div class=okpage>{DONE_ICON}
+<span class="badge ok">Paid</span>
+<h1>Thank you for your payment</h1>
+<p class=sub>Your payment was received and this device is connected.</p>
+<p class=hint>You can close this window and start browsing.</p></div>""",
+        )
+    vouchers = receipt["vouchers"]
+    listing = "".join(
+        f'<div class=row><span><b class=vcode>{esc(voucher["code"])}</b></span>'
+        f'<span>{"Used" if voucher["status"] == "used" else "Ready"}</span></div>'
+        for voucher in vouchers
+    ) or "<p class=note>No vouchers were issued for this purchase.</p>"
+    share = ""
+    if len(vouchers) > 1:
+        share = (
+            "<p class=note>Share the ready codes — each one connects one more device. On that device, open this "
+            "Wi-Fi page and enter the code under <b>Have a voucher?</b></p>"
+        )
+    return page(
+        "Thank you",
+        f"""<div class=okpage>{DONE_ICON}
+<span class="badge ok">Payment successful</span>
+<h1>Thank you — you're online</h1>
+<p class=sub>Your Wi-Fi bundle is active on this device.</p></div>
+<div class=row><span>Package</span><span>{esc(receipt['package_name'])}</span></div>
+<div class=row><span>Amount paid</span><span>KSh {esc(ksh(receipt['amount']))}</span></div>
+<p class=sect>Voucher{'' if len(vouchers) == 1 else 's'} for this purchase</p>
+{listing}
+{share}
+<p class=note>A voucher is spent once its device starts surfing and cannot be used again.</p>""",
+    )
+
+
 HOTSPOT_CSS = """
 .tabs{display:flex;gap:4px;padding:4px;background:#eef2f7;border-radius:14px;margin-bottom:14px}
 .tab{flex:1;margin-top:0;padding:9px 10px;border:0;border-radius:10px;background:transparent;color:#64748b;font-size:13.5px;font-weight:600;box-shadow:none;cursor:pointer}
@@ -494,6 +573,10 @@ HOTSPOT_CSS = """
 .crow.total b{font-size:15px;color:#1d4ed8}
 .creds{margin-top:16px;padding:13px 15px;background:#f8fafc;border:1.5px dashed #cbd5e1;border-radius:12px;font-size:13px;line-height:1.7;text-align:left;color:#334155}
 .creds b{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#eef2f7;padding:1px 6px;border-radius:6px}
+.creds i{color:#94a3b8;font-style:normal;font-size:11px}
+.redeem{display:flex;gap:8px}
+.redeem input{flex:1;min-width:0;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:15px;letter-spacing:.08em}
+.redeem button{width:auto;margin-top:0;padding:12px 18px;white-space:nowrap}
 """
 
 
@@ -729,9 +812,7 @@ def hotspot_page(device, offers, ctx, payment):
             "orig": ctx.get("orig") or "",
         }
     )
-    script = ""
-    if offers:
-        script = f"""<script>
+    script = f"""<script>
 const CTX={ctx_json};
 const BRAND={json.dumps(BRAND)};
 const DONE={json.dumps(DONE_ICON)};
@@ -782,15 +863,37 @@ async function poll(){{
  if(b.state==='failed'){{cid=null;err(b.reason||'Payment was not completed.');const btn=document.getElementById('paybtn');if(btn)btn.disabled=false;refresh();return;}}
  setTimeout(poll,4000);
 }}
+function vlist(b){{
+ if(!b.vouchers||!b.vouchers.length)return '';
+ let h='<div class=creds>Voucher'+(b.vouchers.length>1?'s':'')+' for this purchase — enter a code under "Have a voucher?" to connect another device:<br>';
+ b.vouchers.forEach(function(v){{h+='<b>'+v.code+'</b> <i>('+(v.status==='used'?'used':'ready')+')</i><br>';}});
+ return h+'</div>';
+}}
 function paid(b){{
  const card=document.querySelector('.card');
- if(b.warning){{card.innerHTML=BRAND+'<div class=okpage>'+WARNI+'<span class="badge warn">Received</span><h1>Payment received</h1><p class=sub>'+b.warning+'</p></div>';return;}}
+ if(b.warning){{card.innerHTML=BRAND+'<div class=okpage>'+WARNI+'<span class="badge warn">Received</span><h1>Payment received</h1><p class=sub>'+b.warning+'</p>'+vlist(b)+'</div>';return;}}
  let html='<div class=okpage>'+DONE+'<span class="badge ok">Paid</span><h1>You are online</h1>';
  html+='<p class=sub>Internet is switched on for this device.</p>';
- if(b.username)html+='<div class=creds>Other devices on the same package? Open the hotspot page and sign in with<br>Username: <b>'+b.username+'</b><br>Password: <b>'+b.password+'</b></div>';
- html+='<p class=hint>This window can be closed.</p></div>';
+ html+=vlist(b);
+ html+='<p class=hint>Taking you to your receipt…</p></div>';
  card.innerHTML=BRAND+html;
- if(b.loginUrl){{setTimeout(function(){{location.href=b.loginUrl;}},2500);}}
+ if(b.loginUrl){{setTimeout(function(){{location.href=b.loginUrl;}},1600);}}
+ else if(b.purchase){{setTimeout(function(){{location.href='/thank-you?purchase='+encodeURIComponent(b.purchase);}},1600);}}
+}}
+async function redeem(){{
+ const code=document.getElementById('vcode').value.trim();
+ const rmsg=document.getElementById('rmsg');
+ if(!code){{rmsg.innerHTML='<div class=err>Enter the voucher code.</div>';return;}}
+ const btn=document.getElementById('redeembtn');
+ btn.disabled=true;btn.textContent='Connecting…';
+ rmsg.innerHTML='<div class=note>Connecting this device…</div>';
+ try{{
+  const r=await fetch('/hotspot/redeem',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{device:CTX.device,ip:CTX.ip,mac:CTX.mac,code:code}})}});
+  const b=await r.json();
+  if(b.state==='connected'){{location.href='/thank-you?purchase='+encodeURIComponent(b.purchase);return;}}
+  rmsg.innerHTML='<div class=err>'+(b.error||'That voucher could not be used.')+'</div>';
+ }}catch(e){{rmsg.innerHTML='<div class=err>Could not reach the router — try again.</div>';}}
+ btn.disabled=false;btn.textContent='Connect';
 }}
 async function pay(){{
  const pkg=sel();
@@ -808,6 +911,13 @@ document.querySelectorAll('input[name=pkg]').forEach(function(r){{r.addEventList
 document.querySelectorAll('.cust input').forEach(function(i){{i.addEventListener('input',refresh);}});
 refresh();
 </script>"""
+    redeem = """
+<p class=sect>Have a voucher?</p>
+<div class=redeem>
+<input id=vcode placeholder="XXXX-XXXX-XXXX" autocomplete=off spellcheck=false>
+<button id=redeembtn type=button onclick="redeem()">Connect</button>
+</div>
+<div id=rmsg aria-live=polite></div>"""
     body = f"""<span class="ic blue">{ICON_WIFI}</span>
 <span class="badge blue">Wi-Fi hotspot</span>
 <h1>Choose a bundle to get online</h1>
@@ -815,6 +925,7 @@ refresh();
 <p class=sect>Wi-Fi bundles</p>
 {picker}
 {stk}
+{redeem}
 {script}"""
     return page("Get online", body).replace(b"</style>", HOTSPOT_CSS.encode() + b"</style>")
 
@@ -823,8 +934,8 @@ def hotspot_pending_for(cursor, checkout_id):
     """Load a purchase with the router and package details needed to finish it."""
     cursor.execute(
         """
-        SELECT pu.id AS purchase_id, pu.client_id, pu.mac, pu.ip, pu.devices, pu.periods,
-               pu.status, pu.username, pu.password, pu.login_url, pu.orig_url, pu.created_at,
+        SELECT pu.id AS purchase_id, pu.client_id, pu.device_id, pu.mac, pu.ip, pu.devices, pu.periods,
+               pu.status, pu.username, pu.password, pu.login_url, pu.orig_url, pu.paid_at, pu.created_at,
                d.tunnel_ip, d.api_secret,
                COALESCE(p.download_mbps, c.download_mbps, 0) AS download_mbps,
                COALESCE(p.upload_mbps, c.upload_mbps, 0) AS upload_mbps,
@@ -847,6 +958,7 @@ def hotspot_pending_from_row(row):
     return {
         "purchase_id": row["purchase_id"],
         "client_id": row["client_id"],
+        "device_id": row.get("device_id") or "",
         "tunnel_ip": row.get("tunnel_ip") or "",
         "api_secret": row.get("api_secret") or "",
         "package_id": row["package_id"],
@@ -862,35 +974,131 @@ def hotspot_pending_from_row(row):
     }
 
 
-def hotspot_paid_result(row):
+def hotspot_login_url(pending, username, password, dst=""):
+    login = str(pending.get("login") or "")
+    if not login.startswith("http"):
+        return ""
+    separator = "&" if "?" in login else "?"
+    url = f"{login}{separator}username={quote(username, safe='')}&password={quote(password, safe='')}"
+    orig = str(dst or pending.get("orig") or "")
+    if orig.startswith("http"):
+        url += f"&dst={quote(orig, safe='')}"
+    return url
+
+
+def thankyou_url(purchase_id):
+    return f"{portal_base()}/thank-you?purchase={quote(str(purchase_id), safe='')}"
+
+
+def normalize_voucher_code(value):
+    """Accept a voucher code typed with or without dashes, in any case."""
+    raw = re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()
+    if len(raw) != 12:
+        return raw
+    return "-".join((raw[:4], raw[4:8], raw[8:12]))
+
+
+def issue_hotspot_vouchers(cursor, pending):
+    """One single-use voucher per paid device slot; idempotent per purchase."""
+    cursor.execute(
+        "SELECT id, code, username, password, status FROM hotspot_vouchers WHERE purchase_id = %s ORDER BY issued_at, id",
+        (pending["purchase_id"],),
+    )
+    existing = cursor.fetchall()
+    if existing:
+        return existing
+    rows = []
+    for _slot in range(max(1, int(pending.get("devices") or 1))):
+        code = pppoe_store.voucher_code()
+        for _attempt in range(5):
+            cursor.execute("SELECT id FROM hotspot_vouchers WHERE code = %s", (code,))
+            if not cursor.fetchone():
+                break
+            code = pppoe_store.voucher_code()
+        voucher_id = str(uuid.uuid4())
+        username = f"hs-{secrets.token_hex(4)}"
+        secret = secrets.token_hex(4)
+        cursor.execute(
+            """
+            INSERT INTO hotspot_vouchers
+              (id, client_id, purchase_id, device_id, package_id, code, username, password, seconds)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                voucher_id,
+                pending["client_id"],
+                pending["purchase_id"],
+                str(pending.get("device_id") or "")[:36],
+                str(pending.get("package_id") or "")[:36],
+                code,
+                username,
+                secret,
+                int(pending.get("seconds") or 0),
+            ),
+        )
+        rows.append({"id": voucher_id, "code": code, "username": username, "password": secret, "status": "issued"})
+    return rows
+
+
+def hotspot_voucher_list(cursor, purchase_id):
+    cursor.execute(
+        "SELECT code, status FROM hotspot_vouchers WHERE purchase_id = %s ORDER BY issued_at, id",
+        (purchase_id,),
+    )
+    return cursor.fetchall()
+
+
+def hotspot_receipt(cursor, purchase_id):
+    """Thank-you receipt for a hotspot purchase with all of its vouchers."""
+    cursor.execute(
+        """
+        SELECT pu.id, pu.amount, pu.devices,
+               COALESCE(p.name, c.name, 'Wi-Fi bundle') AS package_name
+        FROM hotspot_purchases pu
+        LEFT JOIN isp_packages p ON p.id = pu.package_id
+        LEFT JOIN company_packages c ON c.id = p.company_package_id
+        WHERE pu.id = %s
+        """,
+        (str(purchase_id or "")[:36],),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return None
+    row["vouchers"] = hotspot_voucher_list(cursor, row["id"])
+    return row
+
+
+def hotspot_paid_result(cursor, row):
     """Credentials for a paid purchase, or pending while they are still being issued."""
+    vouchers = [{"code": voucher["code"], "status": voucher["status"]} for voucher in hotspot_voucher_list(cursor, row["purchase_id"])]
     if not row["username"]:
         paid_at = row.get("paid_at")
         if paid_at and (datetime.now() - paid_at).total_seconds() < 60:
             return {"state": "pending"}
         return {
             "state": "paid",
+            "purchase": row["purchase_id"],
+            "vouchers": vouchers,
             "username": "",
             "password": "",
             "warning": "Payment was received but the router did not answer. Show this page to the provider.",
         }
-    body = {"state": "paid", "username": row["username"], "password": row["password"] or ""}
-    login_url = hotspot_login_url({"login": row.get("login_url"), "orig": row.get("orig_url")}, body["username"], body["password"])
+    body = {
+        "state": "paid",
+        "purchase": row["purchase_id"],
+        "vouchers": vouchers,
+        "username": row["username"],
+        "password": row["password"] or "",
+    }
+    login_url = hotspot_login_url(
+        {"login": row.get("login_url"), "orig": row.get("orig_url")},
+        body["username"],
+        body["password"],
+        thankyou_url(row["purchase_id"]),
+    )
     if login_url:
         body["loginUrl"] = login_url
     return body
-
-
-def hotspot_login_url(pending, username, password):
-    login = str(pending.get("login") or "")
-    if not login.startswith("http"):
-        return ""
-    separator = "&" if "?" in login else "?"
-    url = f"{login}{separator}username={quote(username, safe='')}&password={quote(password, safe='')}"
-    orig = str(pending.get("orig") or "")
-    if orig.startswith("http"):
-        url += f"&dst={quote(orig, safe='')}"
-    return url
 
 
 class PortalHandler(BaseHTTPRequestHandler):
@@ -919,6 +1127,8 @@ class PortalHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         if path == "/pay/status":
             return self.pay_status(parse_qs(urlparse(self.path).query).get("id", [""])[0])
+        if path == "/thank-you":
+            return self.thank_you(parse_qs(urlparse(self.path).query))
         if path.startswith("/hotspot"):
             return self.hotspot_get(path, parse_qs(urlparse(self.path).query))
         row = self._subscriber()
@@ -968,6 +1178,8 @@ class PortalHandler(BaseHTTPRequestHandler):
         self._send(hotspot_page(device, offers, ctx, payment))
 
     def do_POST(self):
+        if urlparse(self.path).path == "/hotspot/redeem":
+            return self.hotspot_redeem()
         if urlparse(self.path).path == "/hotspot/pay":
             return self.hotspot_pay()
         if urlparse(self.path).path != "/pay":
@@ -1053,6 +1265,42 @@ class PortalHandler(BaseHTTPRequestHandler):
             db.close()
         self._send(json.dumps({"checkoutId": checkout}).encode(), 200, "application/json")
 
+    def paid_body(self, cursor, db, request):
+        """Paid-state response carrying the single-use voucher for this payment."""
+        body = {"state": "paid"}
+        try:
+            voucher = pppoe_store.issue_voucher(
+                cursor,
+                request["client_id"],
+                request["subscriber_id"],
+                {
+                    "checkoutId": request["checkout_id"],
+                    "stkRequestId": request["id"],
+                    "packageId": request["package_id"],
+                    "packageName": request.get("package_name") or "",
+                    "amount": format(request["amount"], ".2f"),
+                },
+            )
+            db.commit()
+            body["voucher"] = voucher["code"]
+        except Exception:
+            db.rollback()
+        return json.dumps(body).encode()
+
+    def thank_you(self, query):
+        code = query.get("code", [""])[0]
+        purchase = query.get("purchase", [""])[0]
+        db = self.server.connect()
+        try:
+            with db.cursor() as cursor:
+                receipt = hotspot_receipt(cursor, purchase) if purchase else None
+                voucher = pppoe_store.voucher_detail(cursor, code) if code else None
+        finally:
+            db.close()
+        if purchase:
+            return self._send(thankyou_hotspot_page(receipt))
+        return self._send(thankyou_page(voucher))
+
     def pay_status(self, checkout_id):
         """Poll Daraja, then credit the subscriber exactly once per paid request."""
         db = self.server.connect()
@@ -1060,8 +1308,12 @@ class PortalHandler(BaseHTTPRequestHandler):
             with db.cursor() as cursor:
                 cursor.execute(
                     """
-                    SELECT id, client_id, subscriber_id, package_id, package_price, amount, status, last_error, created_at
-                    FROM pppoe_stk_requests WHERE checkout_id = %s
+                    SELECT r.id, r.client_id, r.subscriber_id, r.package_id, r.package_price,
+                           r.amount, r.checkout_id, r.status, r.last_error, r.created_at,
+                           p.name AS package_name
+                    FROM pppoe_stk_requests r
+                    LEFT JOIN isp_packages p ON p.id = r.package_id
+                    WHERE r.checkout_id = %s
                     """,
                     (checkout_id,),
                 )
@@ -1069,7 +1321,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 if not request:
                     return self._send(b'{"state":"failed","reason":"Unknown or expired payment request."}', 200, "application/json")
                 if request["status"] == "paid":
-                    return self._send(b'{"state":"paid"}', 200, "application/json")
+                    return self._send(self.paid_body(cursor, db, request), 200, "application/json")
                 if request["status"] == "processing":
                     return self._send(b'{"state":"pending"}', 200, "application/json")
                 if request["status"] == "failed":
@@ -1108,7 +1360,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     cursor.execute("SELECT status FROM pppoe_stk_requests WHERE checkout_id = %s", (checkout_id,))
                     claimed = (cursor.fetchone() or {}).get("status")
                     if claimed == "paid":
-                        return self._send(b'{"state":"paid"}', 200, "application/json")
+                        return self._send(self.paid_body(cursor, db, request), 200, "application/json")
                     return self._send(b'{"state":"pending"}', 200, "application/json")
                 try:
                     cursor.execute(
@@ -1147,7 +1399,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     except Exception:
                         db.rollback()
                     return self._send(b'{"state":"pending"}', 200, "application/json")
-                return self._send(b'{"state":"paid"}', 200, "application/json")
+                return self._send(self.paid_body(cursor, db, request), 200, "application/json")
         finally:
             db.close()
 
@@ -1230,6 +1482,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             HOTSPOT_PENDING[checkout] = {
                 "purchase_id": purchase_id,
                 "client_id": device["client_id"],
+                "device_id": device["id"],
                 "tunnel_ip": device["tunnel_ip"],
                 "api_secret": device["api_secret"],
                 "package_id": package["id"],
@@ -1245,12 +1498,12 @@ class PortalHandler(BaseHTTPRequestHandler):
             }
         self._send(json.dumps({"checkoutId": checkout}).encode(), 200, "application/json")
 
-    def hotspot_authorize(self, pending):
+    def hotspot_authorize(self, pending, voucher=None):
         if not pending.get("api_secret"):
             raise RuntimeError("the router has no saved API access")
         password = routeros_api.open_password(pending["api_secret"])
-        username = f"hs-{secrets.token_hex(4)}"
-        secret = secrets.token_hex(4)
+        username = (voucher or {}).get("username") or f"hs-{secrets.token_hex(4)}"
+        secret = (voucher or {}).get("password") or secrets.token_hex(4)
         profile = f"hs-{pending['package_id'][:8]}"
         rate = f"{pending['upload']}M/{pending['download']}M"
         report = routeros_api.authorize_hotspot_client(
@@ -1262,7 +1515,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             secret,
             profile,
             rate,
-            pending["devices"],
+            1,
             f"{pending['seconds']}s",
         )
         return {"username": username, "password": secret, "authorized": True, "online": bool(report.get("online"))}
@@ -1278,7 +1531,17 @@ class PortalHandler(BaseHTTPRequestHandler):
                     if not row:
                         return self._send(b'{"state":"failed","reason":"Unknown or expired payment request."}', 200, "application/json")
                     if row["status"] == "paid":
-                        return self._send(json.dumps(hotspot_paid_result(row)).encode(), 200, "application/json")
+                        try:
+                            late = issue_hotspot_vouchers(cursor, hotspot_pending_from_row(row))
+                            if late and row["username"]:
+                                cursor.execute(
+                                    "UPDATE hotspot_vouchers SET status = 'used', used_at = NOW() WHERE id = %s AND status = 'issued'",
+                                    (late[0]["id"],),
+                                )
+                            db.commit()
+                        except Exception:
+                            db.rollback()
+                        return self._send(json.dumps(hotspot_paid_result(cursor, row)).encode(), 200, "application/json")
                     if row["status"] == "failed":
                         return self._send(b'{"state":"failed","reason":"Payment was declined."}', 200, "application/json")
                     pending = hotspot_pending_from_row(row)
@@ -1315,12 +1578,28 @@ class PortalHandler(BaseHTTPRequestHandler):
                 if cursor.rowcount == 0:
                     row = hotspot_pending_for(cursor, checkout_id)
                     if row and row["status"] == "paid":
-                        return self._send(json.dumps(hotspot_paid_result(row)).encode(), 200, "application/json")
+                        return self._send(json.dumps(hotspot_paid_result(cursor, row)).encode(), 200, "application/json")
                     return self._send(b'{"state":"pending"}', 200, "application/json")
+                vouchers = []
                 try:
-                    grant = self.hotspot_authorize(pending)
+                    vouchers = issue_hotspot_vouchers(cursor, pending)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                try:
+                    grant = self.hotspot_authorize(pending, vouchers[0] if vouchers else None)
                 except Exception as error:
                     grant = {"username": "", "password": "", "authorized": False, "error": str(error)}
+                if vouchers and grant.get("online"):
+                    cursor.execute(
+                        """
+                        UPDATE hotspot_vouchers
+                        SET status = 'used', used_at = NOW(), redeemed_ip = %s, redeemed_mac = %s
+                        WHERE id = %s AND status = 'issued'
+                        """,
+                        (pending["ip"], pending["mac"], vouchers[0]["id"]),
+                    )
+                    vouchers[0]["status"] = "used"
                 cursor.execute(
                     """
                     UPDATE hotspot_purchases
@@ -1332,13 +1611,104 @@ class PortalHandler(BaseHTTPRequestHandler):
                 db.commit()
                 with HOTSPOT_LOCK:
                     HOTSPOT_PENDING.pop(checkout_id, None)
-                body = {"state": "paid", "username": grant["username"], "password": grant["password"]}
-                login_url = hotspot_login_url(pending, grant["username"], grant["password"])
+                body = {
+                    "state": "paid",
+                    "purchase": pending["purchase_id"],
+                    "username": grant["username"],
+                    "password": grant["password"],
+                    "vouchers": [{"code": voucher["code"], "status": voucher["status"]} for voucher in vouchers],
+                }
+                login_url = hotspot_login_url(pending, grant["username"], grant["password"], thankyou_url(pending["purchase_id"]))
                 if login_url:
                     body["loginUrl"] = login_url
                 if not grant.get("authorized"):
                     body["warning"] = "Payment was received but the router did not answer. Show this page to the provider."
                 return self._send(json.dumps(body).encode(), 200, "application/json")
+        finally:
+            db.close()
+
+    def hotspot_redeem(self):
+        """Spend an issued hotspot voucher: create its login and connect this device."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(min(length, 8192)) or b"{}")
+        except (ValueError, OSError):
+            return self._send(b'{"error":"Bad request."}', 400, "application/json")
+        code = normalize_voucher_code(payload.get("code"))
+        if not code:
+            return self._send(b'{"error":"Enter the voucher code."}', 400, "application/json")
+        ip = str(payload.get("ip") or "").strip()[:45]
+        mac = str(payload.get("mac") or "").strip().upper()[:20]
+        db = self.server.connect()
+        try:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT v.id, v.client_id, v.purchase_id, v.device_id, v.package_id, v.code,
+                           v.username, v.password, v.seconds, v.status,
+                           d.tunnel_ip, d.api_secret,
+                           COALESCE(p.download_mbps, c.download_mbps, 0) AS download_mbps,
+                           COALESCE(p.upload_mbps, c.upload_mbps, 0) AS upload_mbps
+                    FROM hotspot_vouchers v
+                    JOIN isp_mikrotik_devices d ON d.id = v.device_id
+                    LEFT JOIN isp_packages p ON p.id = v.package_id
+                    LEFT JOIN company_packages c ON c.id = p.company_package_id
+                    WHERE v.code = %s
+                    """,
+                    (code,),
+                )
+                voucher = cursor.fetchone()
+                if not voucher:
+                    return self._send(b'{"error":"That voucher code was not recognised."}', 404, "application/json")
+                if voucher["status"] != "issued":
+                    return self._send(b'{"error":"That voucher was already used."}', 400, "application/json")
+                cursor.execute(
+                    """
+                    UPDATE hotspot_vouchers
+                    SET status = 'used', used_at = NOW(), redeemed_ip = %s, redeemed_mac = %s
+                    WHERE id = %s AND status = 'issued'
+                    """,
+                    (ip, mac, voucher["id"]),
+                )
+                db.commit()
+                if cursor.rowcount == 0:
+                    return self._send(b'{"error":"That voucher was already used."}', 400, "application/json")
+                try:
+                    secret = routeros_api.open_password(voucher["api_secret"] or "")
+                    profile = f"hs-{str(voucher['package_id'])[:8]}"
+                    rate = f"{int(voucher['upload_mbps'] or 0)}M/{int(voucher['download_mbps'] or 0)}M"
+                    routeros_api.authorize_hotspot_client(
+                        voucher["tunnel_ip"],
+                        secret,
+                        ip,
+                        mac,
+                        voucher["username"],
+                        voucher["password"],
+                        profile,
+                        rate,
+                        1,
+                        f"{max(1, int(voucher['seconds'] or 0))}s",
+                    )
+                except Exception:
+                    cursor.execute(
+                        """
+                        UPDATE hotspot_vouchers
+                        SET status = 'issued', used_at = NULL, redeemed_ip = '', redeemed_mac = ''
+                        WHERE id = %s
+                        """,
+                        (voucher["id"],),
+                    )
+                    db.commit()
+                    return self._send(
+                        b'{"error":"The router did not answer - try again in a moment."}',
+                        502,
+                        "application/json",
+                    )
+                return self._send(
+                    json.dumps({"state": "connected", "purchase": voucher["purchase_id"]}).encode(),
+                    200,
+                    "application/json",
+                )
         finally:
             db.close()
 

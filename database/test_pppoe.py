@@ -55,6 +55,75 @@ class MemoryCursor:
         self.statements.append((" ".join(sql.split()), args))
 
 
+class VoucherCursor:
+    """Minimal fake covering the pppoe_vouchers queries the helpers run."""
+
+    def __init__(self):
+        self.vouchers = {}
+        self.subscribers = {
+            "sub-1": {"pppoe_username": "0712345678", "first_name": "Amina", "last_name": "Wanjiku"},
+        }
+        self.rowcount = 0
+        self._result = []
+        self.statements = []
+
+    def execute(self, sql, args=None):
+        args = list(args or [])
+        flat = " ".join(sql.split())
+        self.statements.append(flat)
+        self._result = []
+        if flat.startswith("UPDATE pppoe_vouchers"):
+            wanted = set(args)
+            count = 0
+            for voucher in self.vouchers.values():
+                owner = self.subscribers.get(voucher["subscriber_id"], {})
+                if voucher["status"] == "issued" and owner.get("pppoe_username") in wanted:
+                    voucher["status"] = "used"
+                    count += 1
+            self.rowcount = count
+        elif flat.startswith("INSERT INTO pppoe_vouchers"):
+            vid, client_id, subscriber_id, stk_id, package_id, package_name, code, amount, checkout = args
+            self.vouchers[vid] = {
+                "id": vid,
+                "subscriber_id": subscriber_id,
+                "package_name": package_name,
+                "code": code,
+                "amount": amount,
+                "checkout_id": checkout,
+                "status": "issued",
+            }
+        elif flat.startswith("SELECT id FROM pppoe_vouchers WHERE code"):
+            self._result = [{"id": v["id"]} for v in self.vouchers.values() if v["code"] == args[0]]
+        elif flat.startswith("SELECT id, code, status FROM pppoe_vouchers"):
+            self._result = [
+                {"id": v["id"], "code": v["code"], "status": v["status"]}
+                for v in self.vouchers.values()
+                if v["checkout_id"] == args[0]
+            ]
+        elif flat.startswith("SELECT v.code, v.amount, v.status, v.issued_at, v.used_at"):
+            self._result = [
+                {
+                    "code": v["code"],
+                    "amount": v["amount"],
+                    "status": v["status"],
+                    "issued_at": None,
+                    "used_at": None,
+                    "package_name": v["package_name"] or "Subscription",
+                    "first_name": self.subscribers[v["subscriber_id"]]["first_name"],
+                    "last_name": self.subscribers[v["subscriber_id"]]["last_name"],
+                    "pppoe_username": self.subscribers[v["subscriber_id"]]["pppoe_username"],
+                }
+                for v in self.vouchers.values()
+                if v["code"] == args[0]
+            ]
+
+    def fetchone(self):
+        return self._result[0] if self._result else None
+
+    def fetchall(self):
+        return list(self._result)
+
+
 class PppoeValidationTests(unittest.TestCase):
     def test_phone_and_username_are_normalized(self):
         self.assertEqual(pppoe_service.normalize_phone("+254712345678"), "254712345678")
@@ -225,6 +294,42 @@ class PppoeValidationTests(unittest.TestCase):
             pppoe_store.send_disconnect = original
         self.assertEqual(result, "sent")
         self.assertEqual(sent, [("10.88.0.9", "router-secret", "254795606115")])
+
+
+class VoucherTests(unittest.TestCase):
+    def test_voucher_code_is_readable_and_unambiguous(self):
+        code = pppoe_store.voucher_code()
+        self.assertRegex(code, r"^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$")
+        self.assertNotIn("0", code)
+        self.assertNotIn("1", code)
+        self.assertNotEqual(code, pppoe_store.voucher_code())
+
+    def test_issue_voucher_is_idempotent_per_checkout(self):
+        cursor = VoucherCursor()
+        first = pppoe_store.issue_voucher(
+            cursor,
+            "client-1",
+            "sub-1",
+            {"checkoutId": "ws_1", "stkRequestId": "stk-1", "packageId": "pkg-1", "packageName": "Home 10", "amount": "500.00"},
+        )
+        again = pppoe_store.issue_voucher(cursor, "client-1", "sub-1", {"checkoutId": "ws_1", "amount": "500.00"})
+        self.assertEqual(first["code"], again["code"])
+        self.assertEqual(first["status"], "issued")
+        inserts = [sql for sql in cursor.statements if sql.startswith("INSERT INTO pppoe_vouchers")]
+        self.assertEqual(len(inserts), 1)
+
+    def test_voucher_is_spent_once_the_subscriber_is_online(self):
+        cursor = VoucherCursor()
+        voucher = pppoe_store.issue_voucher(cursor, "client-1", "sub-1", {"checkoutId": "ws_2", "amount": "500.00"})
+        self.assertEqual(pppoe_store.mark_vouchers_used(cursor, ["someone-else@isp"]), 0)
+        self.assertEqual(pppoe_store.voucher_for_checkout(cursor, "ws_2")["status"], "issued")
+        self.assertEqual(pppoe_store.mark_vouchers_used(cursor, ["0712345678@isp", "0712345678"]), 1)
+        # A spent voucher can never be consumed again.
+        self.assertEqual(pppoe_store.mark_vouchers_used(cursor, ["0712345678"]), 0)
+        detail = pppoe_store.voucher_detail(cursor, voucher["code"])
+        self.assertEqual(detail["status"], "used")
+        self.assertEqual(detail["package_name"], "Subscription")
+        self.assertIsNone(pppoe_store.voucher_detail(cursor, "ZZZZ-ZZZZ-ZZZZ"))
 
 
 if __name__ == "__main__":

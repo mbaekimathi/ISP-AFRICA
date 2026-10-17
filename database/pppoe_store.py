@@ -141,6 +141,28 @@ def ensure_schema(cursor):
     )
     cursor.execute(
         """
+        CREATE TABLE IF NOT EXISTS pppoe_vouchers (
+          id CHAR(36) NOT NULL PRIMARY KEY,
+          client_id CHAR(36) NOT NULL,
+          subscriber_id CHAR(36) NOT NULL,
+          stk_request_id CHAR(36) NULL,
+          package_id CHAR(36) NULL,
+          package_name VARCHAR(80) NOT NULL DEFAULT '',
+          code VARCHAR(20) NOT NULL,
+          amount DECIMAL(10,2) NOT NULL,
+          checkout_id VARCHAR(64) NULL,
+          status ENUM('issued','used','void') NOT NULL DEFAULT 'issued',
+          issued_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          used_at TIMESTAMP NULL,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE KEY uq_voucher_code (code),
+          UNIQUE KEY uq_voucher_checkout (checkout_id),
+          KEY idx_voucher_subscriber (subscriber_id, status)
+        )
+        """
+    )
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS pppoe_events (
           id CHAR(36) NOT NULL PRIMARY KEY,
           client_id CHAR(36) NOT NULL,
@@ -523,6 +545,122 @@ def create_payment(cursor, client_id, subscriber_id, invoice_id, amount, method,
         """,
         (str(uuid.uuid4()), client_id, subscriber_id, invoice_id, amount, method, reference or None),
     )
+
+
+VOUCHER_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+
+
+def voucher_code():
+    """Human-readable one-time voucher code, without look-alike characters."""
+    return "-".join("".join(secrets.choice(VOUCHER_ALPHABET) for _ in range(4)) for _ in range(3))
+
+
+def issue_voucher(cursor, client_id, subscriber_id, payload):
+    """Record the one-time voucher a successful recharge bought.
+
+    Keyed by the Daraja checkout id so repeated calls for the same payment
+    return the same voucher instead of minting duplicates.
+    """
+    checkout_id = str(payload.get("checkoutId") or "").strip()[:64] or None
+    if checkout_id:
+        cursor.execute(
+            "SELECT id, code, status FROM pppoe_vouchers WHERE checkout_id = %s",
+            (checkout_id,),
+        )
+        existing = cursor.fetchone()
+        if existing:
+            return existing
+    amount = Decimal(str(payload.get("amount") or "0"))
+    code = voucher_code()
+    for _attempt in range(5):
+        cursor.execute("SELECT id FROM pppoe_vouchers WHERE code = %s", (code,))
+        if not cursor.fetchone():
+            break
+        code = voucher_code()
+    voucher_id = str(uuid.uuid4())
+    cursor.execute(
+        """
+        INSERT INTO pppoe_vouchers
+          (id, client_id, subscriber_id, stk_request_id, package_id, package_name, code, amount, checkout_id)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+        """,
+        (
+            voucher_id,
+            client_id,
+            subscriber_id,
+            str(payload.get("stkRequestId") or "")[:36] or None,
+            str(payload.get("packageId") or "")[:36] or None,
+            str(payload.get("packageName") or "")[:80],
+            code,
+            format(amount, ".2f"),
+            checkout_id,
+        ),
+    )
+    return {"id": voucher_id, "code": code, "status": "issued"}
+
+
+def voucher_for_checkout(cursor, checkout_id):
+    cursor.execute(
+        "SELECT id, code, status FROM pppoe_vouchers WHERE checkout_id = %s",
+        (str(checkout_id or "")[:64],),
+    )
+    return cursor.fetchone()
+
+
+def voucher_detail(cursor, code):
+    """Receipt details for the thank-you page, or None for an unknown code."""
+    cursor.execute(
+        """
+        SELECT v.code, v.amount, v.status, v.issued_at, v.used_at,
+               COALESCE(NULLIF(v.package_name, ''), p.name, 'Subscription') AS package_name,
+               s.first_name, s.last_name, s.pppoe_username
+        FROM pppoe_vouchers v
+        JOIN pppoe_subscribers s ON s.id = v.subscriber_id
+        LEFT JOIN isp_packages p ON p.id = v.package_id
+        WHERE v.code = %s
+        """,
+        (str(code or "").strip().upper()[:20],),
+    )
+    return cursor.fetchone()
+
+
+def mark_vouchers_used(cursor, usernames):
+    """Consume a subscriber's issued vouchers once their session is live.
+
+    A voucher is single-use by design: once RADIUS accounting shows the
+    subscriber online it flips to 'used' and can never be applied again.
+    """
+    names = [str(name) for name in usernames if str(name or "").strip()]
+    if not names:
+        return 0
+    marks = ", ".join(["%s"] * len(names))
+    cursor.execute(
+        f"""
+        UPDATE pppoe_vouchers v
+        JOIN pppoe_subscribers s ON s.id = v.subscriber_id
+        SET v.status = 'used', v.used_at = NOW()
+        WHERE v.status = 'issued' AND s.pppoe_username IN ({marks})
+        """,
+        names,
+    )
+    return cursor.rowcount
+
+
+def mark_hotspot_vouchers_used(cursor, usernames):
+    """Consume issued hotspot vouchers whose login shows a live session."""
+    names = [str(name) for name in usernames if str(name or "").strip()]
+    if not names:
+        return 0
+    marks = ", ".join(["%s"] * len(names))
+    cursor.execute(
+        f"""
+        UPDATE hotspot_vouchers
+        SET status = 'used', used_at = NOW()
+        WHERE status = 'issued' AND username IN ({marks})
+        """,
+        names,
+    )
+    return cursor.rowcount
 
 
 def register_subscriber(cursor, client_id, payload):
@@ -947,6 +1085,40 @@ def live_rates(cursor, row):
         return None
 
 
+def purchase_gadgets(cursor, client_id, device_id, phone):
+    """Gadget MACs this subscriber paid for on their router: hotspot bundle
+    purchases and redeemed vouchers are recorded against the buyer's phone."""
+    variants = sorted(pppoe_service.phone_variants(phone or ""))
+    if not variants or not device_id:
+        return []
+    marks = ", ".join(["%s"] * len(variants))
+    gadgets = []
+    cursor.execute(
+        f"""
+        SELECT mac, ip, MAX(COALESCE(paid_at, created_at)) AS at_time
+        FROM hotspot_purchases
+        WHERE client_id = %s AND device_id = %s AND status = 'paid' AND mac <> '' AND phone IN ({marks})
+        GROUP BY mac, ip
+        """,
+        (client_id, device_id, *variants),
+    )
+    for item in cursor.fetchall():
+        gadgets.append({"mac": item["mac"], "ip": item.get("ip") or "", "lastSeen": stamp(item.get("at_time")), "via": "purchase"})
+    cursor.execute(
+        f"""
+        SELECT v.redeemed_mac AS mac, v.redeemed_ip AS ip, v.used_at
+        FROM hotspot_vouchers v
+        JOIN hotspot_purchases h ON h.id = v.purchase_id
+        WHERE h.client_id = %s AND h.device_id = %s AND h.phone IN ({marks})
+          AND v.status = 'used' AND v.redeemed_mac <> ''
+        """,
+        (client_id, device_id, *variants),
+    )
+    for item in cursor.fetchall():
+        gadgets.append({"mac": item["mac"], "ip": item.get("ip") or "", "lastSeen": stamp(item.get("used_at")), "via": "voucher"})
+    return gadgets
+
+
 def device_rows(cursor, row):
     """Per-device view of a subscriber's sessions, keyed by the dialing MAC.
 
@@ -954,6 +1126,13 @@ def device_rows(cursor, row):
     radacct provides per-device history and lifetime totals. When the router
     is reachable it is the authority on which devices are online — a stale
     open radacct row is not enough to mark a device connected.
+
+    Gadgets behind the subscriber's router are merged in from the LAN side
+    (DHCP leases, ARP, bridge and hotspot hosts). With an access interface
+    saved on the subscriber only gadgets learned on that port count; without
+    one, LAN reads just enrich devices we already know about, so one client
+    never absorbs another's gadgets. The MAC holding the open session is
+    flagged kind=router — it is the dialing CPE, not an end device.
     """
     username = row.get("pppoe_username") or ""
     devices = []
@@ -982,16 +1161,25 @@ def device_rows(cursor, row):
     )
     rows = cursor.fetchall()
     live = {}
+    lan = {}
+    lan_scoped = bool(str(row.get("access_interface") or "").strip())
     router_seen = False
     host, secret = session_device(cursor, row)
     if host and secret:
         try:
-            for session in routeros_api.live_sessions(host, routeros_api.open_password(secret), username):
+            password = routeros_api.open_password(secret)
+            for session in routeros_api.live_sessions(host, password, username):
                 live[routeros_api.norm_mac(session["mac"])] = session
+            for gadget in routeros_api.lan_gadgets(host, password, row.get("access_interface") or ""):
+                lan[routeros_api.norm_mac(gadget["mac"])] = gadget
             router_seen = True
         except Exception:
             live = {}
+            lan = {}
+    current = current_session(cursor, username) or {}
+    router_key = routeros_api.norm_mac(current.get("mac"))
     now = datetime.now()
+    index = {}
     seen = set()
     for item in rows:
         mac = item.get("mac") or ""
@@ -1021,36 +1209,86 @@ def device_rows(cursor, row):
             seconds += max(int(item.get("open_seconds") or 0), int((now - since).total_seconds()))
             bytes_in += int(item.get("open_bytes_in") or 0)
             bytes_out += int(item.get("open_bytes_out") or 0)
-        devices.append(
-            {
-                "mac": mac,
-                "ip": ip,
-                "sessions": int(item.get("sessions") or 0),
-                "seconds": seconds,
-                "bytesIn": bytes_in,
-                "bytesOut": bytes_out,
-                "online": online,
-                "onlineFor": online_for,
-                "lastSeen": stamp(last_seen),
-            }
-        )
+        gadget = lan.get(key) or {}
+        device = {
+            "mac": mac,
+            "ip": ip or gadget.get("ip") or "",
+            "name": gadget.get("name") or "",
+            "kind": "router" if key and key == router_key else "gadget",
+            "via": "pppoe",
+            "sessions": int(item.get("sessions") or 0),
+            "seconds": seconds,
+            "bytesIn": bytes_in,
+            "bytesOut": bytes_out,
+            "online": online or bool(gadget.get("online")),
+            "onlineFor": online_for or gadget.get("uptime") or "",
+            "lastSeen": stamp(last_seen),
+        }
+        index[key] = device
+        devices.append(device)
     for key, current in live.items():
         if key in seen:
             continue
-        devices.insert(
-            0,
-            {
-                "mac": current.get("mac") or "",
-                "ip": current.get("ip") or "",
-                "sessions": 1,
-                "seconds": int(current.get("seconds") or 0),
-                "bytesIn": int(current.get("bytesIn") or 0),
-                "bytesOut": int(current.get("bytesOut") or 0),
-                "online": True,
-                "onlineFor": current.get("uptime") or "",
-                "lastSeen": stamp(now),
-            },
-        )
+        seen.add(key)
+        device = {
+            "mac": current.get("mac") or "",
+            "ip": current.get("ip") or "",
+            "name": (lan.get(key) or {}).get("name") or "",
+            "kind": "router" if key and key == router_key else "gadget",
+            "via": "pppoe",
+            "sessions": 1,
+            "seconds": int(current.get("seconds") or 0),
+            "bytesIn": int(current.get("bytesIn") or 0),
+            "bytesOut": int(current.get("bytesOut") or 0),
+            "online": True,
+            "onlineFor": current.get("uptime") or "",
+            "lastSeen": stamp(now),
+        }
+        index[key] = device
+        devices.insert(0, device)
+    for gadget in purchase_gadgets(cursor, row["client_id"], row.get("router_id"), row.get("phone")):
+        key = routeros_api.norm_mac(gadget["mac"])
+        if not key or key in index:
+            continue
+        seen.add(key)
+        sighting = lan.get(key) or {}
+        device = {
+            "mac": gadget["mac"],
+            "ip": sighting.get("ip") or gadget["ip"],
+            "name": sighting.get("name") or "",
+            "kind": "gadget",
+            "via": gadget["via"],
+            "sessions": 0,
+            "seconds": int(sighting.get("seconds") or 0),
+            "bytesIn": int(sighting.get("bytesIn") or 0),
+            "bytesOut": int(sighting.get("bytesOut") or 0),
+            "online": bool(sighting.get("online")),
+            "onlineFor": sighting.get("uptime") or "",
+            "lastSeen": stamp(now) if sighting.get("online") else gadget["lastSeen"],
+        }
+        index[key] = device
+        devices.append(device)
+    if lan_scoped:
+        # The access interface pins gadgets to this subscriber's router.
+        for key, gadget in lan.items():
+            if key in index:
+                continue
+            devices.append(
+                {
+                    "mac": gadget["mac"],
+                    "ip": gadget["ip"],
+                    "name": gadget["name"],
+                    "kind": "router" if key and key == router_key else "gadget",
+                    "via": gadget["via"],
+                    "sessions": 0,
+                    "seconds": int(gadget.get("seconds") or 0),
+                    "bytesIn": int(gadget.get("bytesIn") or 0),
+                    "bytesOut": int(gadget.get("bytesOut") or 0),
+                    "online": bool(gadget.get("online")),
+                    "onlineFor": gadget.get("uptime") or "",
+                    "lastSeen": gadget.get("lastSeen") or (stamp(now) if gadget.get("online") else None),
+                }
+            )
     return devices
 
 
@@ -1773,6 +2011,190 @@ def sessions_export(cursor, client_id, subscriber_id, query):
     return page
 
 
+def list_transactions(cursor, client_id, query):
+    """Merged billing ledger for one client.
+
+    Every row is a distinct record so the same money is never listed twice:
+    a paid STK request or paid invoice already shows up as its payment row,
+    so only open/failed requests and unlinked invoices are listed on their own.
+    """
+    service = str((query.get("service") or ["all"])[0] or "all").strip().lower()
+    if service not in {"all", "pppoe", "hotspot"}:
+        raise PppoeError(400, "Choose PPPoE, hotspot, or all services.")
+    raw_from = str((query.get("from") or [""])[0]).strip()
+    raw_to = str((query.get("to") or [""])[0]).strip()
+    start = as_day(raw_from) if raw_from else None
+    finish = as_day(raw_to) if raw_to else None
+    if raw_from and start is None:
+        raise PppoeError(400, "Enter a valid start date.")
+    if raw_to and finish is None:
+        raise PppoeError(400, "Enter a valid end date.")
+    if start and finish and finish < start:
+        raise PppoeError(400, "The end date cannot be before the start date.")
+
+    def window(column):
+        clause, args = "", []
+        if start:
+            clause += f" AND {column} >= %s"
+            args.append(start.isoformat())
+        if finish:
+            clause += f" AND {column} < %s"
+            args.append((finish + timedelta(days=1)).isoformat())
+        return clause, args
+
+    scope = "" if service == "all" else " AND s.service = %s"
+    scope_args = [] if service == "all" else [service]
+    rows = []
+    collected = Decimal("0")
+    outstanding = Decimal("0")
+
+    def subscriber_fields(item):
+        return {
+            "customer": f"{item['first_name']} {item['last_name']}".strip(),
+            "contact": item.get("phone") or item.get("pppoe_username") or "",
+            "service": item["service"],
+        }
+
+    clause, args = window("p.created_at")
+    cursor.execute(
+        f"""
+        SELECT p.id, p.amount, p.method, p.mpesa_reference, p.created_at,
+               s.first_name, s.last_name, s.phone, s.pppoe_username, s.service,
+               pkg.name AS package_name
+        FROM pppoe_payments p
+        JOIN pppoe_subscribers s ON s.id = p.subscriber_id
+        LEFT JOIN isp_packages pkg ON pkg.id = s.package_id
+        WHERE p.client_id = %s{scope}{clause}
+        """,
+        [client_id, *scope_args, *args],
+    )
+    for item in cursor.fetchall():
+        collected += Decimal(item["amount"])
+        rows.append(
+            {
+                "id": f"pay-{item['id']}",
+                "kind": "payment",
+                "detail": item.get("package_name") or item["method"],
+                "reference": item["mpesa_reference"] or "",
+                "amount": format(Decimal(item["amount"]), ".2f"),
+                "status": "paid",
+                "createdAt": stamp(item["created_at"]),
+                **subscriber_fields(item),
+            }
+        )
+
+    clause, args = window("i.created_at")
+    cursor.execute(
+        f"""
+        SELECT i.id, i.amount, i.purpose, i.status, i.mpesa_reference, i.created_at,
+               s.first_name, s.last_name, s.phone, s.pppoe_username, s.service,
+               pkg.name AS package_name
+        FROM pppoe_invoices i
+        JOIN pppoe_subscribers s ON s.id = i.subscriber_id
+        LEFT JOIN isp_packages pkg ON pkg.id = s.package_id
+        WHERE i.client_id = %s{scope}{clause}
+          AND NOT EXISTS (SELECT 1 FROM pppoe_payments p WHERE p.invoice_id = i.id)
+        """,
+        [client_id, *scope_args, *args],
+    )
+    for item in cursor.fetchall():
+        if item["status"] == "pending":
+            outstanding += Decimal(item["amount"])
+        detail = (item["purpose"] or "invoice").capitalize()
+        if item.get("package_name"):
+            detail += f" · {item['package_name']}"
+        rows.append(
+            {
+                "id": f"inv-{item['id']}",
+                "kind": "invoice",
+                "detail": detail,
+                "reference": item["mpesa_reference"] or "",
+                "amount": format(Decimal(item["amount"]), ".2f"),
+                "status": item["status"],
+                "createdAt": stamp(item["created_at"]),
+                **subscriber_fields(item),
+            }
+        )
+
+    clause, args = window("r.created_at")
+    cursor.execute(
+        f"""
+        SELECT r.id, r.amount, r.phone, r.checkout_id, r.status, r.created_at,
+               s.first_name, s.last_name, s.pppoe_username, s.service,
+               pkg.name AS package_name
+        FROM pppoe_stk_requests r
+        JOIN pppoe_subscribers s ON s.id = r.subscriber_id
+        LEFT JOIN isp_packages pkg ON pkg.id = r.package_id
+        WHERE r.client_id = %s{scope}{clause} AND r.status <> 'paid'
+        """,
+        [client_id, *scope_args, *args],
+    )
+    for item in cursor.fetchall():
+        detail = "M-Pesa prompt"
+        if item.get("package_name"):
+            detail += f" · {item['package_name']}"
+        rows.append(
+            {
+                "id": f"stk-{item['id']}",
+                "kind": "stk",
+                "customer": f"{item['first_name']} {item['last_name']}".strip(),
+                "contact": item["phone"] or item["pppoe_username"],
+                "service": item["service"],
+                "detail": detail,
+                "reference": item["checkout_id"],
+                "amount": format(Decimal(item["amount"]), ".2f"),
+                "status": item["status"],
+                "createdAt": stamp(item["created_at"]),
+            }
+        )
+
+    if service != "pppoe":
+        clause, args = window("h.created_at")
+        cursor.execute(
+            f"""
+            SELECT h.id, h.amount, h.phone, h.checkout_id, h.mac, h.status, h.devices, h.periods, h.created_at,
+                   d.name AS router_name, pkg.name AS package_name
+            FROM hotspot_purchases h
+            LEFT JOIN isp_mikrotik_devices d ON d.id = h.device_id
+            LEFT JOIN isp_packages pkg ON pkg.id = h.package_id
+            WHERE h.client_id = %s{clause}
+            """,
+            [client_id, *args],
+        )
+        for item in cursor.fetchall():
+            if item["status"] == "paid":
+                collected += Decimal(item["amount"])
+            detail_parts = [item.get("package_name") or "Hotspot package"]
+            if int(item["devices"] or 1) > 1:
+                detail_parts.append(f"{item['devices']} devices")
+            if int(item["periods"] or 1) > 1:
+                detail_parts.append(f"{item['periods']} periods")
+            if item.get("router_name"):
+                detail_parts.append(item["router_name"])
+            rows.append(
+                {
+                    "id": f"hot-{item['id']}",
+                    "kind": "purchase",
+                    "customer": "Hotspot guest",
+                    "contact": item["phone"] or item["mac"],
+                    "service": "hotspot",
+                    "detail": " · ".join(detail_parts),
+                    "reference": item["checkout_id"],
+                    "amount": format(Decimal(item["amount"]), ".2f"),
+                    "status": item["status"],
+                    "createdAt": stamp(item["created_at"]),
+                }
+            )
+
+    rows.sort(key=lambda item: item["createdAt"] or "", reverse=True)
+    return {
+        "transactions": rows[:2000],
+        "total": len(rows),
+        "collected": format(collected, ".2f"),
+        "outstanding": format(outstanding, ".2f"),
+    }
+
+
 def dispatch(cursor, method, path, payload, token, query):
     if path == "/api/routers" and method == "GET":
         return {"routers": list_routers(cursor, client_id_from(cursor, token))}, None
@@ -1784,6 +2206,8 @@ def dispatch(cursor, method, path, payload, token, query):
         return list_subscribers(cursor, client_id_from(cursor, token), query, "hotspot"), None
     if path == "/api/hotspot/usage" and method == "GET":
         return general_usage(cursor, client_id_from(cursor, token), "hotspot"), None
+    if path == "/api/billings/transactions" and method == "GET":
+        return list_transactions(cursor, client_id_from(cursor, token), query), None
     if not path.startswith("/api/pppoe"):
         return None
     client_id = client_id_from(cursor, token)

@@ -18,6 +18,7 @@ import threading
 import pymysql
 
 import pppoe_service
+import pppoe_store
 
 AUTH_PORT = 1812
 ACCT_PORT = 1813
@@ -613,6 +614,14 @@ def accounting(cursor, packet, source_ip):
                     framed,
                 ),
             )
+    if username:
+        # A live accounting session means the subscriber is surfing — spend
+        # any single-use voucher their last payment issued.
+        try:
+            pppoe_store.mark_vouchers_used(cursor, _username_roots(username))
+            pppoe_store.mark_hotspot_vouchers_used(cursor, _username_roots(username))
+        except Exception:
+            pass
     return build_response(ACCOUNTING_RESPONSE, packet["id"], packet["auth"], secret, b"", True)
 
 

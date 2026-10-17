@@ -5,6 +5,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import portal_server
+import pppoe_store
 import routeros_api
 
 
@@ -58,6 +59,78 @@ class FakeCursor:
 
     def fetchone(self):
         return self.rows[0] if self.rows else None
+
+
+class HsVoucherCursor:
+    """Minimal fake covering the hotspot_vouchers queries the portal runs."""
+
+    def __init__(self):
+        self.vouchers = {}
+        self.rowcount = 0
+        self._result = []
+        self.statements = []
+
+    def execute(self, sql, args=None):
+        args = list(args or [])
+        flat = " ".join(sql.split())
+        self.statements.append(flat)
+        self._result = []
+        if flat.startswith("UPDATE hotspot_vouchers"):
+            self.rowcount = 0
+            if "username IN" in flat:
+                wanted = set(args)
+                for voucher in self.vouchers.values():
+                    if voucher["status"] == "issued" and voucher["username"] in wanted:
+                        voucher["status"] = "used"
+                        self.rowcount += 1
+            else:
+                target = self.vouchers.get(args[-1])
+                self.rowcount = 0
+                if target and target["status"] == "issued":
+                    target["status"] = "used"
+                    self.rowcount = 1
+        elif flat.startswith("INSERT INTO hotspot_vouchers"):
+            vid, client_id, purchase_id, device_id, package_id, code, username, secret, seconds = args
+            self.vouchers[vid] = {
+                "id": vid,
+                "purchase_id": purchase_id,
+                "code": code,
+                "username": username,
+                "password": secret,
+                "seconds": seconds,
+                "status": "issued",
+            }
+        elif flat.startswith("SELECT id FROM hotspot_vouchers WHERE code"):
+            self._result = [{"id": v["id"]} for v in self.vouchers.values() if v["code"] == args[0]]
+        elif flat.startswith("SELECT id, code, username, password, status FROM hotspot_vouchers"):
+            self._result = [v for v in self.vouchers.values() if v["purchase_id"] == args[0]]
+        elif flat.startswith("SELECT code, status FROM hotspot_vouchers"):
+            self._result = [
+                {"code": v["code"], "status": v["status"]}
+                for v in self.vouchers.values()
+                if v["purchase_id"] == args[0]
+            ]
+
+    def fetchone(self):
+        return self._result[0] if self._result else None
+
+    def fetchall(self):
+        return list(self._result)
+
+
+def pending_purchase(**extra):
+    pending = {
+        "purchase_id": "pu-1",
+        "client_id": "client-1",
+        "device_id": "router-1",
+        "package_id": "pkg-1",
+        "seconds": 86400,
+        "devices": 2,
+        "ip": "10.5.50.10",
+        "mac": "AA:BB:CC:DD:EE:FF",
+    }
+    pending.update(extra)
+    return pending
 
 
 class HotspotRouterTests(unittest.TestCase):
@@ -177,6 +250,147 @@ class PortalHelperTests(unittest.TestCase):
         self.assertIn("dst=http%3A%2F%2Fexample.com%2F", url)
         self.assertEqual(portal_server.hotspot_login_url({"login": "javascript:alert(1)"}, "u", "p"), "")
         self.assertEqual(portal_server.hotspot_login_url({"login": ""}, "u", "p"), "")
+
+    def test_pay_page_redirects_paid_users_to_thank_you(self):
+        row = {
+            "first_name": "Amina",
+            "last_name": "Wanjiku",
+            "phone": "0712345678",
+            "package_id": "pkg-1",
+            "package_name": "Home 10",
+            "pppoe_username": "0712345678",
+            "price": "500.00",
+            "cycle_days": 30,
+        }
+        offers = [
+            {
+                "id": "pkg-1",
+                "name": "Home 10",
+                "price": "500.00",
+                "download_mbps": 10,
+                "upload_mbps": 5,
+                "simultaneous_devices": 1,
+                "image_data_url": None,
+                "period": "1 month",
+            }
+        ]
+        html = portal_server.pay_page(row, offers, {"account_type": "paybill", "short_code": "123456"}).decode()
+        self.assertIn("/thank-you?code=", html)
+
+    def test_thankyou_page_shows_voucher_receipt(self):
+        body = portal_server.thankyou_page(
+            {
+                "code": "ABCD-2345-WXYZ",
+                "amount": "500.00",
+                "status": "issued",
+                "package_name": "Home 10",
+                "first_name": "Amina",
+                "last_name": "Wanjiku",
+                "pppoe_username": "0712345678",
+            }
+        ).decode()
+        self.assertIn("ABCD-2345-WXYZ", body)
+        self.assertIn("Home 10", body)
+        self.assertIn("0712345678", body)
+        self.assertIn("Thank you, Amina Wanjiku!", body)
+        self.assertIn("cannot be used again", body)
+
+    def test_thankyou_page_marks_spent_voucher(self):
+        body = portal_server.thankyou_page(
+            {
+                "code": "ABCD-2345-WXYZ",
+                "amount": "500.00",
+                "status": "used",
+                "package_name": "Home 10",
+                "first_name": "Amina",
+                "last_name": "Wanjiku",
+                "pppoe_username": "0712345678",
+            }
+        ).decode()
+        self.assertIn("Voucher used", body)
+        self.assertIn("Already used", body)
+
+    def test_thankyou_page_handles_unknown_code(self):
+        body = portal_server.thankyou_page(None).decode()
+        self.assertIn("Thank you for your payment", body)
+
+
+class HotspotVoucherTests(unittest.TestCase):
+    def test_issue_hotspot_vouchers_one_per_device_slot(self):
+        cursor = HsVoucherCursor()
+        vouchers = portal_server.issue_hotspot_vouchers(cursor, pending_purchase(devices=3))
+        self.assertEqual(len(vouchers), 3)
+        self.assertEqual(len({v["code"] for v in vouchers}), 3)
+        self.assertEqual(len({v["username"] for v in vouchers}), 3)
+        # Idempotent: polling again returns the same vouchers, no extra inserts.
+        again = portal_server.issue_hotspot_vouchers(cursor, pending_purchase(devices=3))
+        self.assertEqual([v["code"] for v in again], [v["code"] for v in vouchers])
+        inserts = [sql for sql in cursor.statements if sql.startswith("INSERT INTO hotspot_vouchers")]
+        self.assertEqual(len(inserts), 3)
+
+    def test_normalize_voucher_code(self):
+        self.assertEqual(portal_server.normalize_voucher_code("abcd-2345-wxyz"), "ABCD-2345-WXYZ")
+        self.assertEqual(portal_server.normalize_voucher_code("abcd2345wxyz"), "ABCD-2345-WXYZ")
+        self.assertEqual(portal_server.normalize_voucher_code(" ab-cd 2345 wx-yz "), "ABCD-2345-WXYZ")
+
+    def test_hotspot_voucher_is_spent_once_online(self):
+        cursor = HsVoucherCursor()
+        vouchers = portal_server.issue_hotspot_vouchers(cursor, pending_purchase())
+        self.assertEqual(pppoe_store.mark_hotspot_vouchers_used(cursor, ["someone-else"]), 0)
+        self.assertEqual(pppoe_store.mark_hotspot_vouchers_used(cursor, [vouchers[0]["username"]]), 1)
+        # A spent voucher can never be consumed again.
+        self.assertEqual(pppoe_store.mark_hotspot_vouchers_used(cursor, [vouchers[0]["username"]]), 0)
+
+    def test_paid_result_lists_vouchers_and_thank_you_target(self):
+        cursor = HsVoucherCursor()
+        vouchers = portal_server.issue_hotspot_vouchers(cursor, pending_purchase())
+        row = {
+            "purchase_id": "pu-1",
+            "username": vouchers[0]["username"],
+            "password": vouchers[0]["password"],
+            "login_url": "http://10.5.50.1/login",
+            "orig_url": "http://example.com/",
+            "paid_at": None,
+        }
+        body = portal_server.hotspot_paid_result(cursor, row)
+        self.assertEqual(body["purchase"], "pu-1")
+        self.assertEqual([v["code"] for v in body["vouchers"]], [v["code"] for v in vouchers])
+        # The router login hands off to the thank-you page once connected.
+        self.assertIn("username=", body["loginUrl"])
+        self.assertIn("dst=", body["loginUrl"])
+        self.assertIn("thank-you", body["loginUrl"])
+
+    def test_hotspot_page_offers_voucher_redemption(self):
+        device = {"id": "router-1", "name": "Shop", "site": "CBD"}
+        html = portal_server.hotspot_page(
+            device, [], {"ip": "10.5.50.2", "mac": "AA:BB:CC:DD:EE:FF"}, None
+        ).decode()
+        self.assertIn("/hotspot/redeem", html)
+        self.assertIn("Have a voucher?", html)
+        self.assertIn("id=vcode", html)
+
+    def test_thankyou_hotspot_page_lists_every_voucher(self):
+        receipt = {
+            "id": "pu-1",
+            "amount": "1500.00",
+            "devices": 2,
+            "package_name": "Weekend bundle",
+            "vouchers": [
+                {"code": "AAAA-2345-BBBB", "status": "used"},
+                {"code": "CCCC-2345-DDDD", "status": "issued"},
+            ],
+        }
+        body = portal_server.thankyou_hotspot_page(receipt).decode()
+        self.assertIn("AAAA-2345-BBBB", body)
+        self.assertIn("CCCC-2345-DDDD", body)
+        self.assertIn("Used", body)
+        self.assertIn("Ready", body)
+        self.assertIn("Weekend bundle", body)
+        self.assertIn("cannot be used again", body)
+
+    def test_thankyou_hotspot_page_handles_unknown_purchase(self):
+        body = portal_server.thankyou_hotspot_page(None).decode()
+        self.assertIn("Thank you for your payment", body)
 
 
 if __name__ == "__main__":

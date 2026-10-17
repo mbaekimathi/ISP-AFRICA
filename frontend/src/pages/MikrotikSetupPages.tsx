@@ -109,7 +109,7 @@ function SetupFrame({
   );
 }
 
-const WRITE_GRANT = '/user group set [find where name="isp-centric-api"] policy=read,write,api,test,ftp';
+const WRITE_GRANT = '/user group set [find where name="isp-centric-api"] policy=read,write,api,test,ftp,reboot';
 
 function RouterWriteNotice({ note }: { note: string }) {
   const [copied, setCopied] = useState(false);

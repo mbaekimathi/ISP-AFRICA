@@ -91,7 +91,7 @@ export function buildWinboxScript(device: ScriptDevice, apiPassword: string) {
       ':local outAnchor ""; :do { :set outAnchor [:pick [/ip firewall filter find where chain=output action=drop] 0] } on-error={};',
       ':local natAnchor ""; :do { :set natAnchor [:pick [/ip firewall nat find where chain=srcnat] 0] } on-error={};',
       ':put "[ISP CENTRIC] Step 2/8 management";',
-      ':if ([:len [/user group find where name="isp-centric-api"]] = 0) do={ /user group add name=isp-centric-api policy=read,write,api,test,ftp } else={ /user group set [find where name="isp-centric-api"] policy=read,write,api,test,ftp };',
+      ':if ([:len [/user group find where name="isp-centric-api"]] = 0) do={ /user group add name=isp-centric-api policy=read,write,api,test,ftp,reboot } else={ /user group set [find where name="isp-centric-api"] policy=read,write,api,test,ftp,reboot };',
       `:if ([:len [/user find where name="isp-centric"]] = 0) do={ /user add name=isp-centric group=isp-centric-api password="${password}" } else={ /user set [find where name="isp-centric"] group=isp-centric-api password="${password}" };`,
       ':do { /ip service set [find where name="api"] disabled=no port=8728 address=10.0.0.0/8,172.16.0.0/12,192.168.0.0/16 } on-error={:put "[ISP CENTRIC FAIL] Could not enable the API service"};',
       ':if ([:len [/ip service find where name="api" and disabled=no and port=8728]] > 0) do={:put "[ISP CENTRIC OK] API enabled on port 8728 for private addresses"} else={:put "[ISP CENTRIC FAIL] API is still disabled"};',

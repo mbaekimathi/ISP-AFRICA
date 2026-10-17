@@ -641,6 +641,130 @@ def live_sessions(host, password, username, timeout=4, port=API_PORT, opener=Non
     return sessions
 
 
+def lan_gadgets(host, password, interface="", timeout=4, port=API_PORT, opener=None):
+    """End devices the router can see on its LAN.
+
+    Sources: ARP, DHCP leases, bridge hosts, and hotspot hosts/actives.
+    When interface is set (the subscriber's access VLAN or port) only
+    gadgets learned on that interface are kept — they sit behind that
+    subscriber's router. A router doing its own NAT hides its LAN, so
+    only bridged devices ever appear here.
+    """
+    connect = opener or socket.create_connection
+    try:
+        sock = connect((host, port), timeout)
+    except OSError as error:
+        raise RouterError("The management tunnel did not answer.") from error
+    try:
+        sock.settimeout(timeout)
+        reader = ByteReader(sock)
+        login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
+        if any(row.get("ret") for row in login):
+            raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
+        arp = optional_rows(sock, reader, "/ip/arp/print")
+        leases = optional_rows(sock, reader, "/ip/dhcp-server/lease/print")
+        bridge_hosts = optional_rows(sock, reader, "/interface/bridge/host/print")
+        hotspot_hosts = optional_rows(sock, reader, "/ip/hotspot/host/print")
+        hotspot_active = optional_rows(sock, reader, "/ip/hotspot/active/print")
+    finally:
+        sock.close()
+
+    scoped = set()
+    if interface:
+        for row in arp:
+            if row.get("interface") == interface:
+                scoped.add(norm_mac(row.get("mac-address")))
+        for row in bridge_hosts:
+            if row.get("on-interface") == interface:
+                scoped.add(norm_mac(row.get("mac-address")))
+        scoped.discard("")
+
+    def allowed(mac):
+        return bool(norm_mac(mac)) and (not interface or norm_mac(mac) in scoped)
+
+    gadgets = {}
+
+    def entry(mac):
+        key = norm_mac(mac)
+        if not key:
+            return None
+        return gadgets.setdefault(
+            key,
+            {
+                "mac": mac,
+                "ip": "",
+                "name": "",
+                "interface": "",
+                "online": False,
+                "authorized": False,
+                "uptime": "",
+                "seconds": 0,
+                "bytesIn": 0,
+                "bytesOut": 0,
+                "lastSeen": "",
+                "via": "lan",
+            },
+        )
+
+    for row in bridge_hosts:
+        if not allowed(row.get("mac-address")):
+            continue
+        item = entry(row.get("mac-address"))
+        if item:
+            item["interface"] = row.get("on-interface") or item["interface"]
+            item["online"] = True
+    for row in arp:
+        if not allowed(row.get("mac-address")):
+            continue
+        item = entry(row.get("mac-address"))
+        if item:
+            item["ip"] = row.get("address") or item["ip"]
+            item["interface"] = row.get("interface") or item["interface"]
+            if row.get("complete") == "true" and row.get("invalid") != "true":
+                item["online"] = True
+    for row in leases:
+        if not allowed(row.get("mac-address")):
+            continue
+        item = entry(row.get("mac-address"))
+        if item:
+            item["ip"] = row.get("address") or item["ip"]
+            item["name"] = row.get("host-name") or item["name"]
+            item["lastSeen"] = row.get("last-seen") or item["lastSeen"]
+            if row.get("status") == "bound" and row.get("disabled") != "true":
+                item["online"] = True
+            item["via"] = "dhcp"
+    for row in hotspot_hosts:
+        if not allowed(row.get("mac-address")):
+            continue
+        item = entry(row.get("mac-address"))
+        if item:
+            item["ip"] = row.get("to-address") or row.get("address") or item["ip"]
+            item["online"] = True
+            item["authorized"] = item["authorized"] or row.get("authorized") == "true"
+            uptime = row.get("uptime") or ""
+            item["uptime"] = item["uptime"] or uptime
+            item["seconds"] = max(item["seconds"], uptime_seconds(uptime))
+            item["bytesIn"] += byte_count(row.get("bytes-in"))
+            item["bytesOut"] += byte_count(row.get("bytes-out"))
+            item["via"] = "hotspot"
+    for row in hotspot_active:
+        if not allowed(row.get("mac-address")):
+            continue
+        item = entry(row.get("mac-address"))
+        if item:
+            item["ip"] = row.get("address") or item["ip"]
+            item["name"] = row.get("user") or item["name"]
+            item["online"] = True
+            item["authorized"] = True
+            uptime = row.get("uptime") or ""
+            item["uptime"] = uptime or item["uptime"]
+            item["seconds"] = max(item["seconds"], uptime_seconds(uptime))
+            item["bytesIn"] += byte_count(row.get("bytes-in"))
+            item["bytesOut"] += byte_count(row.get("bytes-out"))
+            item["via"] = "hotspot"
+    return sorted(gadgets.values(), key=lambda item: (not item["online"], item["name"] or item["mac"]))[:40]
+
+
 def disabled_flag(row):
     return row.get("disabled") == "true"
 
@@ -1670,14 +1794,12 @@ def _hotspot_server(sock, reader, name, iface, pool, profile):
             talk(sock, reader, ["/ip/hotspot/set", f"=.id={_row_id(row)}", "=disabled=yes"])
 
 
-def _portal_group(sock, reader):
-    """The fetch tool needs the ftp policy to save the portal pages."""
+def _ensure_group_policy(sock, reader, wanted):
     groups = talk(sock, reader, ["/user/group/print"])
     matched = [row for row in groups if row.get("name") == API_GROUP and _row_id(row)]
     if not matched:
         return
     policy = {part for part in (matched[0].get("policy") or "").split(",") if part}
-    wanted = {"read", "write", "api", "test", "ftp"}
     if wanted <= policy:
         return
     talk(
@@ -1685,6 +1807,42 @@ def _portal_group(sock, reader):
         reader,
         ["/user/group/set", f"=.id={_row_id(matched[0])}", f"=policy={','.join(sorted(policy | wanted))}"],
     )
+
+
+def _portal_group(sock, reader):
+    """The fetch tool needs the ftp policy to save the portal pages."""
+    _ensure_group_policy(sock, reader, {"read", "write", "api", "test", "ftp"})
+
+
+def reboot_router(host, password, timeout=6, port=API_PORT, opener=None):
+    """Restart the router. RouterOS answers !done, then drops the API session as it reboots."""
+    connect = opener or socket.create_connection
+    try:
+        sock = connect((host, port), timeout)
+    except OSError as error:
+        raise RouterError("The management tunnel did not answer.") from error
+    try:
+        sock.settimeout(timeout)
+        reader = ByteReader(sock)
+        login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
+        if any(row.get("ret") for row in login):
+            raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
+        try:
+            _ensure_group_policy(sock, reader, {"reboot"})
+        except RouterError:
+            pass
+        try:
+            talk(sock, reader, ["/system/reboot"])
+        except RouterError as error:
+            message = str(error)
+            if "closed" in message:
+                return {"rebooting": True}
+            if "not enough permissions" in message.lower():
+                raise RouterError("The API user cannot restart this router. Grant the reboot policy to the isp-centric-api group.") from error
+            raise
+    finally:
+        sock.close()
+    return {"rebooting": True}
 
 
 def _portal_nat(sock, reader):
