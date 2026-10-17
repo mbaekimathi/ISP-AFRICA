@@ -131,10 +131,10 @@ class PppoeValidationTests(unittest.TestCase):
         # An open radacct session is proof the tunnel works — a flapping
         # management check must not mask a live session as disconnected.
         self.assertEqual(pppoe_service.router_status("active", 1, later, TODAY, "", "down"), "surfing")
-        self.assertEqual(pppoe_service.router_status("suspended", 0, later, TODAY, "", "down"), "disconnected")
+        self.assertEqual(pppoe_service.router_status("suspended", 0, later, TODAY, "", "down"), "suspended")
         self.assertEqual(pppoe_service.router_status("expired", 0, earlier, TODAY, "", "down"), "expired")
         self.assertEqual(pppoe_service.router_status("pending_activation", 0, None, TODAY), "pending_activation")
-        self.assertEqual(pppoe_service.router_status("suspended", 0, later, TODAY), "disconnected")
+        self.assertEqual(pppoe_service.router_status("suspended", 0, later, TODAY), "suspended")
         self.assertEqual(pppoe_service.router_status("suspended", 1, later, TODAY), "suspended_online")
         self.assertEqual(pppoe_service.router_status("disconnected", 0, later, TODAY), "expired")
         self.assertEqual(pppoe_service.router_status("disconnected", 1, later, TODAY), "expired_online")

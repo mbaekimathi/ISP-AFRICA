@@ -711,7 +711,7 @@ def list_subscribers(cursor, client_id, query, service="pppoe"):
     if package:
         where.append("s.package_id = %s")
         args.append(package)
-    router_states = {"surfing", "not_surfing", "expired", "expired_online", "suspended_online", "disconnecting", "disconnected", "pending_activation"}
+    router_states = {"surfing", "not_surfing", "expired", "expired_online", "suspended", "suspended_online", "disconnecting", "disconnected", "pending_activation"}
     if status in router_states or status in {"online", "offline", "unknown"}:
         pass
     elif status:
@@ -746,7 +746,7 @@ def list_subscribers(cursor, client_id, query, service="pppoe"):
     cursor.execute(sql, args)
     rows = [public_row(row) for row in cursor.fetchall()]
     if status in router_states:
-        wanted = {"expired", "expired_online"} if status == "expired" else {status}
+        wanted = {"expired", "expired_online"} if status == "expired" else {"suspended", "suspended_online"} if status == "suspended" else {status}
         rows = [row for row in rows if row["routerStatus"] in wanted]
     elif status in {"online", "offline", "unknown"}:
         rows = [row for row in rows if row["connection"] == status]

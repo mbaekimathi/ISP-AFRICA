@@ -522,6 +522,10 @@ export function PppoeCustomerPage() {
     statusLabel = "Expired";
     statusHint = seenFor ? `Offline for ${seenFor}` : "Access ended";
     statusTone = "text-warning";
+  } else if (suspended) {
+    statusLabel = "Paused";
+    statusHint = seenFor ? `Offline for ${seenFor}` : "Access paused";
+    statusTone = "text-warning";
   } else {
     statusLabel = "Not surfing";
     statusHint = seenFor ? `Not surfing for ${seenFor}` : "Never connected";

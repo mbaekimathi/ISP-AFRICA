@@ -17,7 +17,7 @@ type Subscriber = {
   packageName: string;
   status: string;
   connection: "online" | "offline" | "unknown";
-  routerStatus: "surfing" | "not_surfing" | "expired" | "expired_online" | "suspended_online" | "disconnecting" | "disconnected" | "pending_activation";
+  routerStatus: "surfing" | "not_surfing" | "expired" | "expired_online" | "suspended" | "suspended_online" | "disconnecting" | "disconnected" | "pending_activation";
   billingStatus: string;
   expiry: string | null;
 };
@@ -34,6 +34,7 @@ const routerStatusLabel = {
   not_surfing: "Not surfing",
   expired: "Expired",
   expired_online: "Expired",
+  suspended: "Suspended",
   suspended_online: "Suspended",
   disconnecting: "Disconnecting",
   disconnected: "Disconnected",
@@ -45,6 +46,7 @@ const routerStatusTone = {
   not_surfing: "paused",
   expired: "critical",
   expired_online: "due",
+  suspended: "due",
   suspended_online: "due",
   disconnecting: "due",
   disconnected: "paused",
