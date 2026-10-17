@@ -70,7 +70,6 @@ function bytes(value: number) {
   return `${value} B`;
 }
 
-const SURFING_BPS = 64_000;
 
 function rateLabel(bps: number) {
   if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
@@ -306,7 +305,6 @@ export function PppoeCustomerPage() {
   const [usageTrend, setUsageTrend] = useState<TrendPoint[] | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
   const surfSinceRef = useRef<number | null>(null);
-  const idleSinceRef = useRef<number | null>(null);
   const navigate = useNavigate();
 
   usePageMeta("PPPoE customer — ISP CENTRIC", "Connection, usage, and billing for one PPPoE client.");
@@ -325,23 +323,16 @@ export function PppoeCustomerPage() {
   useEffect(() => {
     load();
     surfSinceRef.current = null;
-    idleSinceRef.current = null;
     const refresh = () => {
       apiRequest<{ connection: Subscriber["connection"]; live: Subscriber["live"] | null; status: string; billingStatus: string; rates?: { rxBps: number; txBps: number } | null; devices?: Subscriber["devices"] }>(
         `/api/pppoe/subscribers/${subscriberId}/status`,
       )
         .then((body) => {
           const now = Date.now();
-          const total = body.rates ? body.rates.rxBps + body.rates.txBps : null;
-          if (body.connection === "online" && total !== null && total >= SURFING_BPS) {
+          if (body.connection === "online") {
             if (surfSinceRef.current === null) surfSinceRef.current = now;
-            idleSinceRef.current = null;
-          } else if (body.connection === "online" && total !== null) {
-            surfSinceRef.current = null;
-            if (idleSinceRef.current === null) idleSinceRef.current = now;
           } else {
             surfSinceRef.current = null;
-            idleSinceRef.current = null;
           }
           setSubscriber((current) => current ? { ...current, connection: body.connection, live: { ...current.live, ...body.live, connection: body.connection, rates: body.rates ?? null }, status: body.status, billingStatus: body.billingStatus, devices: body.devices ?? current.devices } : current);
         })
@@ -489,19 +480,11 @@ export function PppoeCustomerPage() {
       <span className="text-primary">↑</span> {rateLabel(rates.rxBps)}
     </>
   ) : subscriber.connection === "online" ? "—" : "Offline";
-  const totalBps = rates ? rates.rxBps + rates.txBps : null;
   let statusHint: string;
   let statusTone = "";
   if (subscriber.connection === "online") {
-    if (totalBps !== null && totalBps >= SURFING_BPS) {
-      statusHint = `Surfing for ${elapsedLabel(surfSinceRef.current ?? Date.now())}`;
-      statusTone = "text-success";
-    } else if (totalBps !== null) {
-      statusHint = `Not surfing for ${elapsedLabel(idleSinceRef.current ?? Date.now())}`;
-      statusTone = "text-warning";
-    } else {
-      statusHint = `IP ${subscriber.live.ip || "—"}`;
-    }
+    statusHint = `Surfing for ${elapsedLabel(surfSinceRef.current ?? Date.now())}`;
+    statusTone = "text-success";
   } else if (subscriber.connection === "offline") {
     const lastSeen = stampMs(subscriber.live.lastSeen);
     statusHint = lastSeen ? `Disconnected for ${elapsedLabel(lastSeen)}` : "Last seen never";
