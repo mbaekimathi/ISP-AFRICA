@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import * as Dialog from "@radix-ui/react-dialog";
-import { ArrowLeft, ChevronDown, X } from "lucide-react";
+import { ArrowLeft, ChevronDown } from "lucide-react";
 import { DetailGrid, PageHeader } from "@/components/ui/DetailGrid";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -576,6 +576,39 @@ export function PppoeCustomerPage() {
           </div>
         </div>
 
+        <div className="grid gap-4 border-t border-border px-5 py-4 sm:grid-cols-2">
+          <div>
+            <p className="text-xs text-muted-foreground">PPPoE username</p>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <code className="text-sm font-semibold">{subscriber.username}</code>
+              <SecondaryButton type="button" className="min-h-7 px-2 text-xs" onClick={() => void navigator.clipboard.writeText(subscriber.username)}>
+                Copy
+              </SecondaryButton>
+            </div>
+          </div>
+          <div>
+            <p className="text-xs text-muted-foreground">PPPoE password</p>
+            <div className="mt-1 flex flex-wrap items-center gap-2">
+              <code className="text-sm font-semibold">{password || "••••••••••"}</code>
+              {password ? (
+                <>
+                  <SecondaryButton type="button" className="min-h-7 px-2 text-xs" onClick={() => void navigator.clipboard.writeText(password)}>
+                    Copy
+                  </SecondaryButton>
+                  <SecondaryButton type="button" className="min-h-7 px-2 text-xs" onClick={() => setPassword("")}>
+                    Hide
+                  </SecondaryButton>
+                </>
+              ) : (
+                <SecondaryButton type="button" className="min-h-7 px-2 text-xs" onClick={() => void post("reveal", {})}>
+                  Show
+                </SecondaryButton>
+              )}
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">Enter these on the customer's router or CPE.</p>
+          </div>
+        </div>
+
         <Section title="Payments &amp; billing" open={openSection === "billing"} onToggle={toggleSection("billing")}>
           <div className="grid gap-6 lg:grid-cols-2">
             <form
@@ -801,19 +834,6 @@ export function PppoeCustomerPage() {
       </section>
 
       {message ? <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{message}</p> : null}
-      {password ? (
-        <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-surface px-4 py-3 text-sm">
-          <span>
-            PPPoE password: <code className="font-semibold">{password}</code>
-          </span>
-          <SecondaryButton type="button" className="min-h-9 px-3" onClick={() => void navigator.clipboard.writeText(password)}>
-            Copy
-          </SecondaryButton>
-          <button type="button" className="ml-auto rounded-sm text-muted-foreground hover:text-foreground" aria-label="Dismiss" onClick={() => setPassword("")}>
-            <X className="h-4 w-4" />
-          </button>
-        </div>
-      ) : null}
 
       <ActionDialog
         open={dialog === "suspend"}
