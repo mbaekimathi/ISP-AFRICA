@@ -2484,6 +2484,21 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
             "lastSeen": stamp(totals[0]["last_seen"]),
         }
 
+    day_rows = radacct_for_usernames(
+        cursor,
+        usernames,
+        f"""
+        SELECT DATE(a.acctstarttime) AS day, COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
+               COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
+        FROM radacct a WHERE a.username IN ({{marks}}) AND a.acctstarttime >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
+        GROUP BY DATE(a.acctstarttime) ORDER BY day
+        """,
+    )
+    usage["days"] = [
+        {"day": stamp(day["day"]), "bytesIn": int(day["bytes_in"]), "bytesOut": int(day["bytes_out"])}
+        for day in day_rows
+    ]
+
     open_sessions = radacct_for_usernames(
         cursor,
         usernames,
