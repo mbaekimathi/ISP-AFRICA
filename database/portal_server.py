@@ -663,7 +663,7 @@ HOTSPOT_CSS = """
 .crow.total{border-top:1px dashed #cbd5e1;margin-top:6px;padding-top:10px;font-weight:700;color:#0b1220}
 .crow.total b{font-size:15px;color:#1d4ed8}
 .creds{margin-top:16px;padding:13px 15px;background:#f8fafc;border:1.5px dashed #cbd5e1;border-radius:12px;font-size:13px;line-height:1.7;text-align:left;color:#334155}
-.creds b{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#eef2f7;padding:1px 6px;border-radius:6px}
+.creds b{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;background:#eef2f7;padding:1px 6px;border-radius:6px;user-select:all;-webkit-user-select:all;cursor:pointer}
 .creds i{color:#94a3b8;font-style:normal;font-size:11px}
 .redeem{display:flex;gap:8px}
 .redeem input{flex:1;min-width:0;text-transform:uppercase;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:15px;letter-spacing:.08em}
@@ -984,22 +984,44 @@ async function poll(){{
  if(b.state==='failed'){{cid=null;err(b.reason||'Payment was not completed.');const btn=document.getElementById('paybtn');if(btn)btn.disabled=false;refresh();return;}}
  setTimeout(poll,2500);
 }}
+let paidBody=null;
 function vlist(b){{
  if(!b.vouchers||!b.vouchers.length)return '';
  let h='<div class=creds>Voucher'+(b.vouchers.length>1?'s':'')+' for this purchase — enter a code under "Have a voucher?" to connect another device:<br>';
  b.vouchers.forEach(function(v){{h+='<b>'+v.code+'</b> <i>('+(v.status==='used'?'used':'ready')+')</i><br>';}});
  return h+'</div>';
 }}
+function copycodes(){{
+ const codes=[].map.call(document.querySelectorAll('.creds b'),function(x){{return x.textContent;}}).join('  ');
+ const done=function(){{const c=document.getElementById('copied');if(c)c.textContent='Copied — paste them somewhere safe.';}};
+ if(navigator.clipboard&&navigator.clipboard.writeText){{navigator.clipboard.writeText(codes).then(done,function(){{legacy(codes);done();}});return;}}
+ legacy(codes);done();
+}}
+function legacy(t){{
+ const ta=document.createElement('textarea');ta.value=t;ta.style.position='fixed';ta.style.opacity='0';
+ document.body.appendChild(ta);ta.select();
+ try{{document.execCommand('copy');}}catch(e){{}}
+ document.body.removeChild(ta);
+}}
+function go(){{
+ const b=paidBody||{{}};
+ if(b.loginUrl){{location.href=b.loginUrl;return;}}
+ if(b.purchase){{location.href='/thank-you?purchase='+encodeURIComponent(b.purchase);return;}}
+}}
 function paid(b){{
+ paidBody=b;
  const card=document.querySelector('.card');
- if(b.warning){{card.innerHTML=BRAND+'<div class=okpage>'+WARNI+'<span class="badge warn">Received</span><h1>Payment received</h1><p class=sub>'+b.warning+'</p>'+vlist(b)+'</div>';return;}}
- let html='<div class=okpage>'+DONE+'<span class="badge ok">Paid</span><h1>You are online</h1>';
- html+='<p class=sub>Internet is switched on for this device.</p>';
+ let html='<div class=okpage>';
+ if(b.warning)html+=WARNI+'<span class="badge warn">Received</span><h1>Payment received</h1><p class=sub>'+b.warning+'</p>';
+ else html+=DONE+'<span class="badge ok">Paid</span><h1>You are online</h1><p class=sub>Internet is switched on for this device.</p>';
  html+=vlist(b);
- html+='<p class=hint>Taking you to your receipt…</p></div>';
+ if(b.vouchers&&b.vouchers.length){{
+  html+='<p class=note>Copy these codes before leaving — each connects one device and cannot be used twice.</p>';
+  html+='<button type=button onclick="copycodes()">Copy voucher code'+(b.vouchers.length>1?'s':'')+'</button>';
+  html+='<p class=hint id=copied></p>';
+ }}
+ html+='<button type=button onclick="go()">Done — continue</button></div>';
  card.innerHTML=BRAND+html;
- if(b.loginUrl){{setTimeout(function(){{location.href=b.loginUrl;}},1600);}}
- else if(b.purchase){{setTimeout(function(){{location.href='/thank-you?purchase='+encodeURIComponent(b.purchase);}},1600);}}
 }}
 async function redeem(){{
  const code=document.getElementById('vcode').value.trim();
