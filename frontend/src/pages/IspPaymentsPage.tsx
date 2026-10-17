@@ -18,6 +18,11 @@ type PaymentDraft = {
   consumerKey: string;
   consumerSecret: string;
   passkey: string;
+  callbackUrl: string;
+  confirmationUrl: string;
+  validationUrl: string;
+  initiatorName: string;
+  securityCredential: string;
 };
 
 type PaymentRecord = {
@@ -27,6 +32,11 @@ type PaymentRecord = {
   consumerKey: string;
   consumerSecret: string;
   passkey: string;
+  callbackUrl: string;
+  confirmationUrl: string;
+  validationUrl: string;
+  initiatorName: string;
+  securityCredential: string;
   updatedAt: string | null;
 };
 
@@ -45,6 +55,11 @@ const emptyDraft: PaymentDraft = {
   consumerKey: "",
   consumerSecret: "",
   passkey: "",
+  callbackUrl: "",
+  confirmationUrl: "",
+  validationUrl: "",
+  initiatorName: "",
+  securityCredential: "",
 };
 
 function draftFrom(record: PaymentRecord | null): PaymentDraft {
@@ -56,6 +71,11 @@ function draftFrom(record: PaymentRecord | null): PaymentDraft {
     consumerKey: "",
     consumerSecret: "",
     passkey: "",
+    callbackUrl: record.callbackUrl,
+    confirmationUrl: record.confirmationUrl,
+    validationUrl: record.validationUrl,
+    initiatorName: record.initiatorName,
+    securityCredential: "",
   };
 }
 
@@ -343,6 +363,88 @@ export function IspPaymentsPage() {
                 onChange={(event) => update("passkey", event.target.value)}
               />
             </FormField>
+          </div>
+          <div className="grid gap-4 border-t border-border pt-4">
+            <div className="grid gap-1">
+              <h3 className="text-sm font-semibold text-foreground">Payment URLs &amp; security</h3>
+              <p className="text-sm text-muted-foreground">
+                Optional — the callback URL receives STK push results, the confirmation and validation URLs receive
+                manual M-Pesa payments, and the initiator credentials are used for payouts and reversals.
+              </p>
+            </div>
+            <FormField
+              id="daraja-callback-url"
+              label="Callback URL"
+              hint="Where Daraja posts STK push results. Leave empty to use the portal's default URL."
+            >
+              <input
+                id="daraja-callback-url"
+                className="field"
+                inputMode="url"
+                placeholder="https://portal.example.com/callback"
+                value={draft.callbackUrl}
+                onChange={(event) => update("callbackUrl", event.target.value)}
+              />
+            </FormField>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <FormField
+                id="daraja-confirmation-url"
+                label="Confirmation URL"
+                hint="Receives completed Paybill or Till payments made directly."
+              >
+                <input
+                  id="daraja-confirmation-url"
+                  className="field"
+                  inputMode="url"
+                  placeholder="https://portal.example.com/c2b/confirmation"
+                  value={draft.confirmationUrl}
+                  onChange={(event) => update("confirmationUrl", event.target.value)}
+                />
+              </FormField>
+              <FormField
+                id="daraja-validation-url"
+                label="Validation URL"
+                hint="Optional — checks a payment before it is accepted."
+              >
+                <input
+                  id="daraja-validation-url"
+                  className="field"
+                  inputMode="url"
+                  placeholder="https://portal.example.com/c2b/validation"
+                  value={draft.validationUrl}
+                  onChange={(event) => update("validationUrl", event.target.value)}
+                />
+              </FormField>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <FormField
+                id="daraja-initiator-name"
+                label="Initiator name"
+                hint="The Daraja user allowed to send payouts or reversals."
+              >
+                <input
+                  id="daraja-initiator-name"
+                  className="field"
+                  autoComplete="off"
+                  value={draft.initiatorName}
+                  onChange={(event) => update("initiatorName", event.target.value)}
+                />
+              </FormField>
+              <FormField
+                id="daraja-security-credential"
+                label="Security credential"
+                hint={savedHint(record?.securityCredential ?? "") ?? "The encrypted initiator credential."}
+              >
+                <input
+                  id="daraja-security-credential"
+                  type="password"
+                  className="field"
+                  autoComplete="new-password"
+                  value={draft.securityCredential}
+                  onChange={(event) => update("securityCredential", event.target.value)}
+                />
+              </FormField>
+            </div>
           </div>
           <div className="flex flex-wrap items-center gap-3">
             <PrimaryButton type="submit" disabled={pending || !loaded}>

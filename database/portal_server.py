@@ -109,7 +109,7 @@ def normalize_phone(value):
 
 def daraja_settings(cursor, client_id):
     cursor.execute(
-        "SELECT scope, environment, account_type, short_code, consumer_key, consumer_secret, passkey FROM isp_payment_settings WHERE client_id = %s",
+        "SELECT scope, environment, account_type, short_code, consumer_key, consumer_secret, passkey, callback_url FROM isp_payment_settings WHERE client_id = %s",
         (client_id,),
     )
     rows = {row["scope"]: row for row in cursor.fetchall()}
@@ -165,7 +165,8 @@ def stk_push(row, phone, amount, reference):
         "PartyA": phone,
         "PartyB": shortcode,
         "PhoneNumber": phone,
-        "CallBackURL": os.environ.get("ISP_DARAJA_CALLBACK", "https://portal.ispcentric.local/callback"),
+        "CallBackURL": str(row.get("callback_url") or "").strip()
+        or os.environ.get("ISP_DARAJA_CALLBACK", "https://portal.ispcentric.local/callback"),
         "AccountReference": reference,
         "TransactionDesc": "Internet recharge",
     }

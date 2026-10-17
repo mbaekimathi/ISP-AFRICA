@@ -288,6 +288,35 @@ def keep_or_clean(value, existing, message, minimum, maximum):
     return text
 
 
+def keep_optional_secret(value, existing, message, minimum, maximum):
+    text = str(value or "").strip()
+    if not text or text.startswith("••••"):
+        return existing or ""
+    if any(ord(character) < 32 for character in text) or len(text) < minimum or len(text) > maximum:
+        raise ApiError(400, message)
+    return text
+
+
+def optional_url(value, message):
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    if (
+        len(text) > 255
+        or any(ord(character) < 32 or character.isspace() for character in text)
+        or not (text.startswith("https://") or text.startswith("http://"))
+    ):
+        raise ApiError(400, message)
+    return text
+
+
+def optional_text(value, message, maximum=128):
+    text = str(value or "").strip()
+    if len(text) > maximum or any(ord(character) < 32 for character in text):
+        raise ApiError(400, message)
+    return text
+
+
 def clean_daraja(payload, existing):
     environment = str(payload.get("environment", "")).strip()
     account_type = str(payload.get("accountType", "")).strip()
@@ -323,6 +352,23 @@ def clean_daraja(payload, existing):
             "Enter the Daraja passkey.",
             8,
             255,
+        ),
+        "callback_url": optional_url(
+            payload.get("callbackUrl"), "Enter a callback URL that starts with http:// or https://."
+        ),
+        "confirmation_url": optional_url(
+            payload.get("confirmationUrl"), "Enter a confirmation URL that starts with http:// or https://."
+        ),
+        "validation_url": optional_url(
+            payload.get("validationUrl"), "Enter a validation URL that starts with http:// or https://."
+        ),
+        "initiator_name": optional_text(payload.get("initiatorName"), "Enter the Daraja initiator name."),
+        "security_credential": keep_optional_secret(
+            payload.get("securityCredential"),
+            previous.get("security_credential"),
+            "Enter the Daraja security credential.",
+            8,
+            2048,
         ),
     }
 
@@ -436,6 +482,11 @@ def public_payment(row):
         "consumerKey": masked_secret(row["consumer_key"]),
         "consumerSecret": masked_secret(row["consumer_secret"]),
         "passkey": masked_secret(row["passkey"]),
+        "callbackUrl": row.get("callback_url") or "",
+        "confirmationUrl": row.get("confirmation_url") or "",
+        "validationUrl": row.get("validation_url") or "",
+        "initiatorName": row.get("initiator_name") or "",
+        "securityCredential": masked_secret(row.get("security_credential") or ""),
         "updatedAt": stamp(row["updated_at"]) or str(row["updated_at"]),
     }
 
@@ -1065,6 +1116,16 @@ def ensure_schema():
                 )
                 """
             )
+            for column, definition in (
+                ("callback_url", "callback_url VARCHAR(255) NOT NULL DEFAULT ''"),
+                ("confirmation_url", "confirmation_url VARCHAR(255) NOT NULL DEFAULT ''"),
+                ("validation_url", "validation_url VARCHAR(255) NOT NULL DEFAULT ''"),
+                ("initiator_name", "initiator_name VARCHAR(128) NOT NULL DEFAULT ''"),
+                ("security_credential", "security_credential TEXT NULL"),
+            ):
+                cursor.execute("SHOW COLUMNS FROM isp_payment_settings LIKE %s", (column,))
+                if cursor.fetchone() is None:
+                    cursor.execute(f"ALTER TABLE isp_payment_settings ADD COLUMN {definition}")
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS isp_payment_preferences (
@@ -3010,7 +3071,8 @@ class Handler(BaseHTTPRequestHandler):
     def payment_rows(self, cursor, client_id):
         cursor.execute(
             """
-            SELECT scope, environment, account_type, short_code, consumer_key, consumer_secret, passkey, updated_at
+            SELECT scope, environment, account_type, short_code, consumer_key, consumer_secret, passkey,
+                   callback_url, confirmation_url, validation_url, initiator_name, security_credential, updated_at
             FROM isp_payment_settings
             WHERE client_id = %s
             """,
@@ -3039,15 +3101,21 @@ class Handler(BaseHTTPRequestHandler):
         cursor.execute(
             """
             INSERT INTO isp_payment_settings (
-              client_id, scope, environment, account_type, short_code, consumer_key, consumer_secret, passkey
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+              client_id, scope, environment, account_type, short_code, consumer_key, consumer_secret, passkey,
+              callback_url, confirmation_url, validation_url, initiator_name, security_credential
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
               environment = VALUES(environment),
               account_type = VALUES(account_type),
               short_code = VALUES(short_code),
               consumer_key = VALUES(consumer_key),
               consumer_secret = VALUES(consumer_secret),
-              passkey = VALUES(passkey)
+              passkey = VALUES(passkey),
+              callback_url = VALUES(callback_url),
+              confirmation_url = VALUES(confirmation_url),
+              validation_url = VALUES(validation_url),
+              initiator_name = VALUES(initiator_name),
+              security_credential = VALUES(security_credential)
             """,
             (
                 client_id,
@@ -3058,6 +3126,11 @@ class Handler(BaseHTTPRequestHandler):
                 fields["consumer_key"],
                 fields["consumer_secret"],
                 fields["passkey"],
+                fields["callback_url"],
+                fields["confirmation_url"],
+                fields["validation_url"],
+                fields["initiator_name"],
+                fields["security_credential"],
             ),
         )
         cursor.execute(

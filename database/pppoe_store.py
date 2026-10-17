@@ -121,6 +121,26 @@ def ensure_schema(cursor):
     )
     cursor.execute(
         """
+        CREATE TABLE IF NOT EXISTS pppoe_stk_requests (
+          id CHAR(36) NOT NULL PRIMARY KEY,
+          client_id CHAR(36) NOT NULL,
+          subscriber_id CHAR(36) NOT NULL,
+          package_id CHAR(36) NOT NULL,
+          package_price DECIMAL(10,2) NOT NULL,
+          amount DECIMAL(10,2) NOT NULL,
+          phone VARCHAR(20) NOT NULL,
+          checkout_id VARCHAR(64) NOT NULL,
+          status ENUM('pending','processing','paid','failed') NOT NULL DEFAULT 'pending',
+          last_error VARCHAR(255) NOT NULL DEFAULT '',
+          paid_at TIMESTAMP NULL,
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          UNIQUE KEY uq_stk_checkout (checkout_id),
+          KEY idx_stk_subscriber (subscriber_id, status)
+        )
+        """
+    )
+    cursor.execute(
+        """
         CREATE TABLE IF NOT EXISTS pppoe_events (
           id CHAR(36) NOT NULL PRIMARY KEY,
           client_id CHAR(36) NOT NULL,
