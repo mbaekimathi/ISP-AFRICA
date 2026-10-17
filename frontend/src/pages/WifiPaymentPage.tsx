@@ -56,6 +56,30 @@ function offerDetail(offer: Offer) {
   return count > 1 ? `Up to ${count} devices` : "1 device";
 }
 
+type HotspotPayment = {
+  id: string;
+  kind: string;
+  contact: string;
+  detail: string;
+  reference: string;
+  amount: string;
+  status: string;
+  createdAt: string;
+};
+
+type HotspotReport = {
+  transactions: HotspotPayment[];
+  total: number;
+  collected: string;
+};
+
+const paymentStatusTone: Record<string, "active" | "due" | "critical" | "neutral"> = {
+  paid: "active",
+  pending: "due",
+  processing: "due",
+  failed: "critical",
+};
+
 const copy = {
   pppoe: {
     title: "PPPoE-payment",
@@ -98,6 +122,8 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
   const [phoneError, setPhoneError] = useState("");
   const [formError, setFormError] = useState("");
   const [prompt, setPrompt] = useState<{ name: string; price: string; phone: string; detail?: string } | null>(null);
+  const [report, setReport] = useState<HotspotReport | null>(null);
+  const [reportError, setReportError] = useState("");
 
   useEffect(() => {
     let stopped = false;
@@ -127,6 +153,22 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
   }, []);
 
   const isHotspot = kind === "hotspot";
+
+  useEffect(() => {
+    if (!isHotspot) return;
+    let stopped = false;
+    apiRequest<HotspotReport>("/api/billings/transactions?service=hotspot")
+      .then((body) => {
+        if (!stopped) setReport(body);
+      })
+      .catch((cause: unknown) => {
+        if (!stopped) setReportError(cause instanceof Error ? cause.message : "Payments could not be loaded.");
+      });
+    return () => {
+      stopped = true;
+    };
+  }, [isHotspot]);
+
   const singleOffers = offers.filter((item) => deviceCount(item) === 1);
   const multiOffers = offers.filter((item) => deviceCount(item) !== 1);
   const visibleOffers = isHotspot ? (mode === "one" ? singleOffers : multiOffers) : offers;
@@ -386,6 +428,71 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
           </form>
         )}
       </div>
+
+      {isHotspot ? (
+        <section className="mx-auto mt-10 w-full max-w-5xl">
+          <div className="flex flex-wrap items-baseline justify-between gap-2">
+            <div>
+              <h2 className="text-base font-semibold tracking-tight sm:text-lg">Hotspot payments</h2>
+              <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                Every hotspot sale on this account — paid, pending, and failed M-Pesa requests.
+              </p>
+            </div>
+            {report ? (
+              <p className="text-xs text-muted-foreground">
+                {report.total} payments · Collected {money(report.collected)}
+              </p>
+            ) : null}
+          </div>
+          {reportError ? (
+            <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+              {reportError}
+            </p>
+          ) : null}
+          <div className="mt-4 overflow-x-auto rounded-xl border border-border bg-surface">
+            <table className="min-w-[56rem] w-full text-left text-sm">
+              <thead className="border-b border-border text-xs text-muted-foreground">
+                <tr>
+                  <th className="px-3 py-3 font-medium">Date</th>
+                  <th className="px-3 py-3 font-medium">Phone</th>
+                  <th className="px-3 py-3 font-medium">Package</th>
+                  <th className="px-3 py-3 font-medium">M-Pesa code</th>
+                  <th className="px-3 py-3 text-right font-medium">Amount</th>
+                  <th className="px-3 py-3 font-medium">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {!report && !reportError ? (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-6 text-muted-foreground">
+                      Loading payments…
+                    </td>
+                  </tr>
+                ) : null}
+                {report?.transactions.length === 0 ? (
+                  <tr>
+                    <td colSpan={6} className="px-3 py-6 text-muted-foreground">
+                      No hotspot payments yet — sales from the captive page appear here.
+                    </td>
+                  </tr>
+                ) : null}
+                {report?.transactions.map((item) => (
+                  <tr key={item.id} className="border-b border-border last:border-0">
+                    <td className="whitespace-nowrap px-3 py-3">{item.createdAt}</td>
+                    <td className="px-3 py-3">{item.contact || "—"}</td>
+                    <td className="px-3 py-3">{item.detail || "—"}</td>
+                    <td className="px-3 py-3 text-xs text-muted-foreground">{item.reference || "—"}</td>
+                    <td className="px-3 py-3 text-right font-semibold">{money(item.amount)}</td>
+                    <td className="px-3 py-3">
+                      <StatusBadge tone={paymentStatusTone[item.status] ?? "neutral"}>{item.status}</StatusBadge>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      ) : null}
     </div>
   );
 }
