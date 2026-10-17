@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
-import { PageHeader } from "@/components/ui/DetailGrid";
+import { useEffect, useState, type ReactNode } from "react";
+import { Link } from "react-router-dom";
+import { Clock, Search, Users, Wifi, WifiOff } from "lucide-react";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
@@ -57,6 +58,54 @@ const routerStatusTone = {
   pending_activation: "neutral",
 } as const;
 
+const billingTone: Record<string, "active" | "due" | "critical" | "paused" | "neutral"> = {
+  paid: "active",
+  active: "active",
+  pending: "due",
+  overdue: "critical",
+  failed: "critical",
+  suspended: "paused",
+  cancelled: "paused",
+};
+
+function connectionDot(connection: Subscriber["connection"]) {
+  return connection === "online" ? "bg-success" : connection === "offline" ? "bg-destructive" : "bg-warning";
+}
+
+function initials(client: Subscriber) {
+  return `${client.firstName.trim().charAt(0)}${client.lastName.trim().charAt(0)}`.toUpperCase() || "?";
+}
+
+function UsedMeter({ percent, detail }: { percent: number | null; detail: string }) {
+  if (percent == null) return <span className="text-muted-foreground">—</span>;
+  return (
+    <div title={detail || undefined} className="grid w-28 gap-1">
+      <span className="font-medium">{percent}%</span>
+      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+        <div
+          className={`h-full rounded-full ${percent >= 90 ? "bg-destructive" : percent >= 70 ? "bg-warning" : "bg-success"}`}
+          style={{ width: `${Math.min(100, percent)}%` }}
+        />
+      </div>
+      {detail ? <span className="text-[11px] text-muted-foreground">{detail}</span> : null}
+    </div>
+  );
+}
+
+function HeroStat({ label, value, icon, tint }: { label: string; value: number | string; icon: ReactNode; tint: string }) {
+  return (
+    <div className="flex items-center gap-3">
+      <span className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${tint}`} aria-hidden="true">
+        {icon}
+      </span>
+      <div className="min-w-0">
+        <p className="text-lg font-semibold leading-tight tracking-tight sm:text-xl">{value}</p>
+        <p className="text-[11px] font-medium uppercase tracking-wide text-primary-foreground/70">{label}</p>
+      </div>
+    </div>
+  );
+}
+
 export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
   usePageMeta(kind === "pppoe" ? "PPPoE-clients — ISP CENTRIC" : "Hotspot-clients — ISP CENTRIC", "ISP subscriber records.");
   const { user } = useAuth();
@@ -94,23 +143,51 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
   }, [kind, router, pkg, status, billing]);
 
   const home = (path: string) => (user ? clientPage(user, path) : path);
+  const viewPath = (client: Subscriber) => home(kind === "hotspot" ? `/hotspot/${client.id}` : `/pppoe/${client.id}`);
+
+  const clients = page?.subscribers ?? [];
+  const surfing = clients.filter((client) => client.routerStatus === "surfing").length;
+  const idle = clients.filter((client) => client.routerStatus === "connected" || client.routerStatus === "not_surfing").length;
+  const lapsed = clients.filter((client) =>
+    ["expired", "expired_online", "suspended", "suspended_online", "disconnecting", "disconnected"].includes(client.routerStatus),
+  ).length;
 
   return (
     <div className="page-shell py-8">
-      <div className="flex flex-wrap items-end justify-between gap-3">
-        <PageHeader
-          title={kind === "pppoe" ? "PPPoE-clients" : "Hotspot-clients"}
-          description={kind === "pppoe" ? "Subscribers who connect with a PPPoE login." : "Subscribers who connect through the hotspot."}
-        />
-        {kind === "pppoe" ? <PrimaryButton to={home("/pppoe/register")}>+ Register PPPoE Client</PrimaryButton> : null}
-      </div>
+      <section className="overflow-hidden rounded-3xl bg-gradient-to-br from-primary via-primary/85 to-primary/60 text-primary-foreground shadow-card">
+        <div className="flex flex-wrap items-center justify-between gap-4 px-5 pb-5 pt-6 sm:px-7">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-primary-foreground/70">{label} network</p>
+            <h1 className="mt-1 text-2xl font-semibold tracking-tight sm:text-3xl">{label} clients</h1>
+            <p className="mt-1 text-sm text-primary-foreground/75">
+              {kind === "pppoe" ? "Subscribers who connect with a PPPoE login." : "Subscribers who connect through the hotspot."}
+            </p>
+          </div>
+          {kind === "pppoe" ? (
+            <Link
+              to={home("/pppoe/register")}
+              className="inline-flex min-h-10 items-center justify-center rounded-xl bg-white px-4 text-sm font-semibold text-primary shadow-sm transition hover:bg-white/90"
+            >
+              + Register PPPoE client
+            </Link>
+          ) : null}
+        </div>
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4 border-t border-white/15 px-5 py-4 sm:grid-cols-4 sm:px-7">
+          <HeroStat label="Clients" value={page?.total ?? "…"} icon={<Users className="h-4 w-4" />} tint="bg-white/15" />
+          <HeroStat label="Surfing" value={surfing} icon={<Wifi className="h-4 w-4" />} tint="bg-success/80" />
+          <HeroStat label="Idle" value={idle} icon={<WifiOff className="h-4 w-4" />} tint="bg-warning/80" />
+          <HeroStat label="Expired / off" value={lapsed} icon={<Clock className="h-4 w-4" />} tint="bg-destructive/70" />
+        </div>
+      </section>
+
       {message ? (
         <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
           {message}
         </p>
       ) : null}
+
       <form
-        className="mt-6 grid gap-3 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-5"
+        className="mt-4 grid gap-3 rounded-2xl border border-border bg-surface p-4 shadow-card sm:grid-cols-2 lg:grid-cols-[1.5fr_1fr_1fr_1fr_1fr_auto] lg:items-end"
         onSubmit={(event) => {
           event.preventDefault();
           load();
@@ -118,7 +195,10 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
       >
         <label className="grid gap-1.5 text-sm font-medium">
           Search
-          <input className="field" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name, phone, username, serial" />
+          <div className="relative">
+            <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
+            <input className="field pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name, phone, username, serial" />
+          </div>
         </label>
         <label className="grid gap-1.5 text-sm font-medium">
           Router
@@ -152,9 +232,6 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
             <option value="pending_activation">Pending activation</option>
           </select>
         </label>
-        <div className="flex items-end">
-          <SecondaryButton type="submit">Search</SecondaryButton>
-        </div>
         <label className="grid gap-1.5 text-sm font-medium">
           Billing
           <select className="field" value={billing} onChange={(event) => setBilling(event.target.value)}>
@@ -167,74 +244,120 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
             {kind === "pppoe" ? <option value="cancelled">Cancelled</option> : null}
           </select>
         </label>
+        <PrimaryButton type="submit">Filter</PrimaryButton>
       </form>
-      <div className="mt-4 overflow-x-auto rounded-xl border border-border bg-surface">
+
+      <div className="mt-4 hidden overflow-hidden rounded-2xl border border-border bg-surface shadow-card md:block">
         <table className="min-w-[64rem] w-full text-left text-sm">
-          <thead className="border-b border-border text-xs text-muted-foreground">
+          <thead className="bg-surface-muted text-xs uppercase tracking-wide text-muted-foreground">
             <tr>
-              <th className="px-3 py-3 font-medium">Name</th>
-              <th className="px-3 py-3 font-medium">Phone / username</th>
-              <th className="px-3 py-3 font-medium">Router</th>
-              <th className="px-3 py-3 font-medium">Package</th>
-              <th className="px-3 py-3 font-medium">Router status</th>
-              <th className="px-3 py-3 font-medium">Used</th>
-              <th className="px-3 py-3 font-medium">Billing</th>
-              <th className="px-3 py-3 font-medium">Expiry</th>
-              <th className="px-3 py-3 font-medium">Actions</th>
+              <th className="px-4 py-3 font-medium">Client</th>
+              <th className="px-4 py-3 font-medium">Phone / username</th>
+              <th className="px-4 py-3 font-medium">Router</th>
+              <th className="px-4 py-3 font-medium">Package</th>
+              <th className="px-4 py-3 font-medium">Status</th>
+              <th className="px-4 py-3 font-medium">Used</th>
+              <th className="px-4 py-3 font-medium">Billing</th>
+              <th className="px-4 py-3 font-medium">Expiry</th>
+              <th className="px-4 py-3 font-medium"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody>
             {!page && !message ? (
               <tr>
-                <td colSpan={9} className="px-3 py-6 text-muted-foreground">Loading {label} clients…</td>
+                <td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">Loading {label} clients…</td>
               </tr>
             ) : null}
-            {page?.subscribers.length === 0 ? (
+            {page && clients.length === 0 ? (
               <tr>
-                <td colSpan={9} className="px-3 py-6 text-muted-foreground">No {label} clients match these filters.</td>
+                <td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">No {label} clients match these filters.</td>
               </tr>
             ) : null}
-            {page?.subscribers.map((client) => (
-              <tr key={client.id} className="border-b border-border last:border-0">
-                <td className="px-3 py-3 font-medium">{client.firstName} {client.lastName}</td>
-                <td className="px-3 py-3">
+            {clients.map((client) => (
+              <tr key={client.id} className="border-t border-border transition hover:bg-surface-muted/60">
+                <td className="px-4 py-3">
+                  <div className="flex items-center gap-3">
+                    <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary to-primary/60 text-xs font-bold text-primary-foreground">
+                      {initials(client)}
+                      <span className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-surface ${connectionDot(client.connection)}`} />
+                    </span>
+                    <span className="font-medium">{client.firstName} {client.lastName}</span>
+                  </div>
+                </td>
+                <td className="px-4 py-3">
                   <div>{client.phone}</div>
                   <div className="text-xs text-muted-foreground">{client.username}</div>
                 </td>
-                <td className="px-3 py-3">{client.routerName}</td>
-                <td className="px-3 py-3">{client.packageName}</td>
-                <td className="px-3 py-3">
+                <td className="px-4 py-3">{client.routerName}</td>
+                <td className="px-4 py-3">{client.packageName}</td>
+                <td className="px-4 py-3">
                   <StatusBadge tone={routerStatusTone[client.routerStatus]}>{routerStatusLabel[client.routerStatus]}</StatusBadge>
                 </td>
-                <td className="px-3 py-3">
-                  {client.usedPercent == null ? (
-                    <span className="text-muted-foreground">—</span>
-                  ) : (
-                    <div title={client.usedDetail || undefined} className="grid w-28 gap-1">
-                      <div className="flex items-baseline justify-between gap-2">
-                        <span className="font-medium">{client.usedPercent}%</span>
-                      </div>
-                      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
-                        <div
-                          className={`h-full rounded-full ${client.usedPercent >= 90 ? "bg-destructive" : client.usedPercent >= 70 ? "bg-warning" : "bg-success"}`}
-                          style={{ width: `${Math.min(100, client.usedPercent)}%` }}
-                        />
-                      </div>
-                      {client.usedDetail ? <span className="text-[11px] text-muted-foreground">{client.usedDetail}</span> : null}
-                    </div>
-                  )}
+                <td className="px-4 py-3">
+                  <UsedMeter percent={client.usedPercent} detail={client.usedDetail} />
                 </td>
-                <td className="px-3 py-3">{client.billingStatus}</td>
-                <td className="px-3 py-3">{client.expiry ?? "—"}</td>
-                <td className="px-3 py-3">
-                  <SecondaryButton to={home(kind === "hotspot" ? `/hotspot/${client.id}` : `/pppoe/${client.id}`)}>View</SecondaryButton>
+                <td className="px-4 py-3">
+                  <StatusBadge tone={billingTone[client.billingStatus] ?? "neutral"}>{client.billingStatus}</StatusBadge>
+                </td>
+                <td className="px-4 py-3">{client.expiry ?? "—"}</td>
+                <td className="px-4 py-3 text-right">
+                  <SecondaryButton to={viewPath(client)}>View</SecondaryButton>
                 </td>
               </tr>
             ))}
           </tbody>
         </table>
       </div>
-      {page ? <p className="mt-3 text-xs text-muted-foreground">{page.total} clients</p> : null}
+
+      <div className="mt-4 grid gap-3 md:hidden">
+        {!page && !message ? <p className="py-8 text-center text-sm text-muted-foreground">Loading {label} clients…</p> : null}
+        {page && clients.length === 0 ? (
+          <p className="rounded-2xl border border-border bg-surface px-4 py-8 text-center text-sm text-muted-foreground shadow-card">
+            No {label} clients match these filters.
+          </p>
+        ) : null}
+        {clients.map((client) => (
+          <article key={client.id} className="rounded-2xl border border-border bg-surface p-4 shadow-card">
+            <div className="flex items-start justify-between gap-3">
+              <div className="flex min-w-0 items-center gap-3">
+                <span className="relative flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary to-primary/60 text-sm font-bold text-primary-foreground">
+                  {initials(client)}
+                  <span className={`absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-surface ${connectionDot(client.connection)}`} />
+                </span>
+                <div className="min-w-0">
+                  <p className="truncate font-medium">{client.firstName} {client.lastName}</p>
+                  <p className="truncate text-xs text-muted-foreground">{client.phone} · {client.username}</p>
+                </div>
+              </div>
+              <StatusBadge tone={routerStatusTone[client.routerStatus]}>{routerStatusLabel[client.routerStatus]}</StatusBadge>
+            </div>
+            <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
+              <div className="flex items-baseline justify-between gap-2 border-b border-border/60 pb-1.5">
+                <dt className="text-muted-foreground">Router</dt>
+                <dd className="truncate font-medium">{client.routerName || "—"}</dd>
+              </div>
+              <div className="flex items-baseline justify-between gap-2 border-b border-border/60 pb-1.5">
+                <dt className="text-muted-foreground">Package</dt>
+                <dd className="truncate font-medium">{client.packageName || "—"}</dd>
+              </div>
+              <div className="flex items-baseline justify-between gap-2 border-b border-border/60 pb-1.5">
+                <dt className="text-muted-foreground">Billing</dt>
+                <dd><StatusBadge tone={billingTone[client.billingStatus] ?? "neutral"}>{client.billingStatus}</StatusBadge></dd>
+              </div>
+              <div className="flex items-baseline justify-between gap-2 border-b border-border/60 pb-1.5">
+                <dt className="text-muted-foreground">Expiry</dt>
+                <dd className="truncate font-medium">{client.expiry ?? "—"}</dd>
+              </div>
+            </dl>
+            <div className="mt-3 flex items-center justify-between gap-3">
+              <UsedMeter percent={client.usedPercent} detail={client.usedDetail} />
+              <SecondaryButton to={viewPath(client)}>View</SecondaryButton>
+            </div>
+          </article>
+        ))}
+      </div>
+
+      {page ? <p className="mt-3 text-xs text-muted-foreground">{page.total} clients · sorted by usage</p> : null}
     </div>
   );
 }
