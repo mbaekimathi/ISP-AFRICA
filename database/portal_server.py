@@ -82,7 +82,8 @@ def identify(cursor, ip):
     cursor.execute(
         """
         SELECT s.id AS subscriber_id, s.client_id, s.first_name, s.last_name, s.phone,
-               s.pppoe_username, s.status, p.name AS package_name, p.download_mbps, p.upload_mbps,
+               s.pppoe_username, s.status, s.router_id, s.package_id,
+               p.name AS package_name, p.download_mbps, p.upload_mbps,
                sub.price, sub.billing_cycle, sub.cycle_days, sub.grace_days
         FROM radacct r
         JOIN pppoe_subscribers s ON s.pppoe_username = r.username
@@ -182,6 +183,69 @@ def stk_query(row, checkout_id):
     return daraja_request(row, "/mpesa/stkpushquery/v1/query", payload)
 
 
+def pppoe_packages(cursor, client_id, router_id):
+    cursor.execute(
+        """
+        SELECT p.id, p.name, p.price, p.download_mbps, p.upload_mbps, p.availability_routers,
+               COALESCE(p.service_type, c.service_type, 'pppoe') AS service_type,
+               COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
+               COALESCE(p.validity_unit, c.validity_unit, 'months') AS validity_unit,
+               COALESCE(p.image_data_url, c.image_data_url) AS image_data_url
+        FROM isp_packages p
+        LEFT JOIN company_packages c ON c.id = p.company_package_id
+        WHERE p.client_id = %s AND p.status = 'active'
+        ORDER BY p.price, p.name
+        """,
+        (client_id,),
+    )
+    offers = []
+    for row in cursor.fetchall():
+        if row["service_type"] != "pppoe":
+            continue
+        routers = json_list(row.get("availability_routers"))
+        if routers and router_id not in routers:
+            continue
+        row["period"] = validity_label(row["validity_amount"], row["validity_unit"])
+        offers.append(row)
+    return offers
+
+
+def pppoe_offers(cursor, row):
+    """Active PPPoE packages for this router, with the subscriber's own
+    package kept on the list even after it is suspended or archived."""
+    offers = pppoe_packages(cursor, row["client_id"], str(row.get("router_id") or ""))
+    if not any(str(offer["id"]) == str(row["package_id"]) for offer in offers):
+        offers.insert(
+            0,
+            {
+                "id": row["package_id"],
+                "name": row["package_name"],
+                "price": row["price"],
+                "download_mbps": row["download_mbps"],
+                "upload_mbps": row["upload_mbps"],
+                "image_data_url": None,
+                "period": f"{int(row['cycle_days'] or 30)} days",
+            },
+        )
+    return offers
+
+
+def pppoe_pick(offer, checked):
+    price = Decimal(offer["price"] or 0)
+    image = str(offer.get("image_data_url") or "")
+    thumb = (
+        f'<img class=pi src="{esc(image)}" alt="">'
+        if image.startswith("data:image/")
+        else '<span class="pi noimg">Wi-Fi</span>'
+    )
+    return f"""<label class="pick">
+<input type="radio" name="pkg" value="{esc(offer['id'])}"{' checked' if checked else ''}>
+{thumb}
+<span class=pd><span class="nm">{esc(offer['name'])}</span><br>
+<span class="sp">{int(offer['download_mbps'])}↓ / {int(offer['upload_mbps'])}↑ Mbps · {esc(offer['period'])}</span></span>
+<span class="pr">KSh {esc(ksh(price))}</span></label>"""
+
+
 def paused_page(row):
     name = esc(f"{row['first_name']} {row['last_name']}".strip()) or "Customer"
     return page(
@@ -195,24 +259,35 @@ def paused_page(row):
     )
 
 
-def pay_page(row, payment):
+def pay_page(row, offers, payment):
     name = esc(f"{row['first_name']} {row['last_name']}".strip()) or "Customer"
-    price = Decimal(row["price"] or 0)
-    cycle = int(row["cycle_days"] or 30)
     phone = esc(row["phone"])
-    daily = (price / cycle).quantize(Decimal("0.01")) if cycle else Decimal("0")
+    own = str(row["package_id"] or "")
+    own_listed = any(str(offer["id"]) == own for offer in offers)
+    picks = "".join(
+        pppoe_pick(offer, str(offer["id"]) == own or (not own_listed and index == 0))
+        for index, offer in enumerate(offers)
+    )
+    if not picks:
+        picks = "<p class=note>No packages are on sale right now. Contact the provider to recharge your line.</p>"
+    pkg_js = {str(offer["id"]): cents(offer["price"]) for offer in offers}
     stk = ""
     if payment:
         stk = f"""
 <label for=phone>M-Pesa number</label>
 <input id=phone inputmode=tel value="{phone}">
-<label for=amount>Amount (KSh) — {esc(str(daily))}/day on {esc(row['package_name'])}</label>
-<input id=amount inputmode=decimal value="{esc(str(price))}">
 <button id=paybtn onclick="pay()">Pay with M-Pesa</button>
 <div id=msg></div>
 <p class=hint>You'll get a prompt on the phone to approve. This page updates itself when payment lands.</p>
 <script>
+const PKG={json.dumps(pkg_js)};
 let cid=null;
+function money(cents){{return 'KSh '+(cents%100?(cents/100).toFixed(2):String(cents/100));}}
+function sel(){{const p=document.querySelector('input[name=pkg]:checked');return p?p.value:'';}}
+function refresh(){{
+ document.querySelectorAll('.pick').forEach(function(x){{const r=x.querySelector('input[name=pkg]');x.classList.toggle('on',!!(r&&r.checked));}});
+ const b=document.getElementById('paybtn');const p=PKG[sel()];if(b&&p)b.textContent='Pay '+money(p)+' with M-Pesa';
+}}
 async function poll(){{
  if(!cid)return;
  const r=await fetch('/pay/status?id='+encodeURIComponent(cid));
@@ -222,12 +297,16 @@ async function poll(){{
  setTimeout(poll,4000);
 }}
 async function pay(){{
+ const pkg=sel();
+ if(!pkg){{document.getElementById('msg').innerHTML='<div class=err>Pick a package first.</div>';return;}}
  const btn=document.getElementById('paybtn');
- const r=await fetch('/pay',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{phone:document.getElementById('phone').value,amount:document.getElementById('amount').value}})}});
+ const r=await fetch('/pay',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{phone:document.getElementById('phone').value,packageId:pkg}})}});
  const b=await r.json();
  if(b.checkoutId){{cid=b.checkoutId;btn.disabled=true;document.getElementById('msg').innerHTML='<div class=note>Check the phone and approve the M-Pesa prompt…</div>';poll();}}
  else document.getElementById('msg').innerHTML='<div class=err>'+(b.error||'Could not start the payment.')+'</div>';
 }}
+document.querySelectorAll('input[name=pkg]').forEach(function(r){{r.addEventListener('change',refresh);}});
+refresh();
 </script>"""
     manual = ""
     if payment:
@@ -239,12 +318,10 @@ async function pay(){{
         "Recharge internet",
         f"""<span class="badge bad">Offline</span>
 <h1>Hi {name}, your subscription needs a top-up</h1>
-<p class=sub>Pay below and your internet comes back on its own — no call needed.</p>
-<div class=row><span>Package</span><span>{esc(row['package_name'])}</span></div>
-<div class=row><span>Speed</span><span>{int(row['download_mbps'])}↓ / {int(row['upload_mbps'])}↑ Mbps</span></div>
-<div class=row><span>Price</span><span>KSh {esc(str(price))} / {cycle} days</span></div>
+<p class=sub>Pick a package and pay — your internet comes back on its own, no call needed.</p>
+{picks}
 {stk}{manual}""",
-    )
+    ).replace(b"</style>", HOTSPOT_CSS.encode() + b"</style>")
 
 
 def unknown_page():
@@ -258,12 +335,23 @@ def unknown_page():
 
 
 HOTSPOT_CSS = """
+.tabs{display:flex;gap:8px;margin-bottom:14px}
+.tab{flex:1;margin-top:0;padding:10px;border:1px solid #e2e8f0;background:#fff;color:#334155;border-radius:10px;font-size:14px;font-weight:600;cursor:pointer}
+.tab.on{border-color:#1d4ed8;background:#eff6ff;color:#1d4ed8}
 .pick{border:1px solid #e2e8f0;border-radius:12px;padding:10px 12px;margin-bottom:8px;cursor:pointer;display:flex;gap:10px;align-items:center}
 .pick input{margin:0}
 .pick.on{border-color:#1d4ed8;background:#eff6ff}
+.pick .pi{width:56px;height:40px;border-radius:8px;object-fit:cover;flex-shrink:0}
+.pick .noimg{display:flex;align-items:center;justify-content:center;background:#f1f5f9;color:#94a3b8;font-size:10px;font-weight:600}
+.pick .pd{flex:1;min-width:0}
 .pick .nm{font-size:14px;font-weight:600}
 .pick .sp{font-size:12px;color:#64748b}
 .pick .pr{margin-left:auto;font-size:14px;font-weight:700;white-space:nowrap}
+.cust{display:none;margin:-8px 0 10px;padding:10px 12px;border:1px solid #1d4ed8;border-top:0;border-radius:0 0 12px 12px;background:#eff6ff}
+.crow{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px;padding:4px 0}
+.crow input{width:80px;padding:6px 8px;font-size:14px;text-align:right}
+.crow i{color:#64748b;font-style:normal;font-size:11px}
+.crow.total{border-top:1px solid #cbd5e1;margin-top:6px;padding-top:8px;font-weight:600}
 .okpage{text-align:center}
 .creds{margin-top:14px;padding:10px 12px;background:#f8fafc;border:1px solid #e2e8f0;border-radius:10px;font-size:13px;text-align:left}
 .creds b{font-family:ui-monospace,monospace}
@@ -319,7 +407,10 @@ def hotspot_packages(cursor, client_id, device_id):
                COALESCE(p.service_type, c.service_type, 'pppoe') AS service_type,
                COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
                COALESCE(p.validity_unit, c.validity_unit, 'days') AS validity_unit,
-               COALESCE(p.simultaneous_devices, c.simultaneous_devices, 1) AS devices
+               COALESCE(p.simultaneous_devices, c.simultaneous_devices, 1) AS devices,
+               COALESCE(p.extra_device_price, c.extra_device_price) AS extra_device_price,
+               COALESCE(p.extra_period_price, c.extra_period_price) AS extra_period_price,
+               COALESCE(p.image_data_url, c.image_data_url) AS image_data_url
         FROM isp_packages p
         LEFT JOIN company_packages c ON c.id = p.company_package_id
         WHERE p.client_id = %s AND p.status = 'active'
@@ -350,21 +441,120 @@ def validity_seconds(amount, unit):
     return int(amount or 1) * VALIDITY_SECONDS.get(str(unit or "days"), 86400)
 
 
+def ksh(value):
+    return format(Decimal(str(value or "0")).quantize(Decimal("0.01")).normalize(), "f")
+
+
+def cents(value):
+    return int((Decimal(str(value or "0")) * 100).quantize(Decimal("1")))
+
+
+def unit_label(amount, unit):
+    unit = str(unit or "days")
+    if int(amount or 1) == 1 and unit.endswith("s"):
+        return unit[:-1]
+    return f"{int(amount or 1)} {unit}"
+
+
+def hotspot_offer_detail(offer):
+    devices = int(offer["devices"] or 0)
+    period = validity_label(offer["validity_amount"], offer["validity_unit"])
+    if devices > 1:
+        return f"Up to {devices} devices · {period}"
+    if devices:
+        return "1 device"
+    each = unit_label(offer["validity_amount"], offer["validity_unit"])
+    extra_device = ksh(offer["extra_device_price"])
+    extra_period = ksh(offer["extra_period_price"])
+    return f"1 device · {period} included — +KSh {extra_device} each extra device · +KSh {extra_period} each extra {each}"
+
+
+def hotspot_pick(offer, checked, customize):
+    price = Decimal(offer["price"] or 0)
+    image = str(offer.get("image_data_url") or "")
+    thumb = (
+        f'<img class=pi src="{esc(image)}" alt="">'
+        if image.startswith("data:image/")
+        else '<span class="pi noimg">Wi-Fi</span>'
+    )
+    row = f"""<label class="pick">
+<input type="radio" name="pkg" value="{esc(offer['id'])}"{' checked' if checked else ''}>
+{thumb}
+<span class=pd><span class="nm">{esc(offer['name'])}</span><br>
+<span class="sp">{int(offer['download_mbps'])}↓ / {int(offer['upload_mbps'])}↑ Mbps · {esc(validity_label(offer['validity_amount'], offer['validity_unit']))}</span><br>
+<span class="sp">{esc(hotspot_offer_detail(offer))}</span></span>
+<span class="pr">KSh {esc(ksh(price))}</span></label>"""
+    if customize:
+        each = unit_label(offer["validity_amount"], offer["validity_unit"])
+        row += f"""<div class="cust" id="cust-{esc(offer['id'])}">
+<div class=crow><span>Devices</span><input id="dev-{esc(offer['id'])}" type=number min=1 max=50 value=2 inputmode=numeric></div>
+<div class=crow><span>Periods <i>(1 = {esc(each)})</i></span><input id="per-{esc(offer['id'])}" type=number min=1 max=60 value=1 inputmode=numeric></div>
+<div class="crow total"><span>Total</span><b id="tot-{esc(offer['id'])}"></b></div>
+</div>"""
+    return row
+
+
+def bounded_int(value, minimum, maximum):
+    try:
+        number = int(str(value or "").strip())
+    except (TypeError, ValueError):
+        return None
+    if number < minimum or number > maximum:
+        return None
+    return number
+
+
+def hotspot_quote(package, payload):
+    """Resolve the devices, periods, and amount a purchase covers."""
+    base = Decimal(package["price"] or 0)
+    seconds = validity_seconds(package["validity_amount"], package["validity_unit"])
+    fixed = int(package["devices"] or 0)
+    if fixed:
+        return {"devices": fixed, "periods": 1, "amount": base, "seconds": seconds}
+    devices = bounded_int(payload.get("devices"), 1, 50)
+    periods = bounded_int(payload.get("periods"), 1, 60)
+    if not devices or not periods:
+        return None
+    amount = base + (devices - 1) * Decimal(package["extra_device_price"] or 0) + (periods - 1) * Decimal(
+        package["extra_period_price"] or 0
+    )
+    return {"devices": devices, "periods": periods, "amount": amount, "seconds": periods * seconds}
+
+
 def hotspot_page(device, offers, ctx, payment):
-    rows = []
-    for index, offer in enumerate(offers):
-        price = Decimal(offer["price"] or 0)
-        rows.append(
-            f"""<label class="pick" data-id="{esc(offer['id'])}">
-<input type="radio" name="pkg" value="{esc(offer['id'])}"{' checked' if index == 0 else ''}>
-<span><span class="nm">{esc(offer['name'])}</span><br>
-<span class="sp">{int(offer['download_mbps'])}↓ / {int(offer['upload_mbps'])}↑ Mbps · {esc(validity_label(offer['validity_amount'], offer['validity_unit']))}</span></span>
-<span class="pr">KSh {esc(str(price))}</span></label>"""
-        )
-    if rows:
-        picker = "".join(rows)
-    else:
+    single = [offer for offer in offers if int(offer["devices"] or 0) <= 1]
+    multi = [offer for offer in offers if int(offer["devices"] or 0) != 1]
+    mode = "one" if single else "multi"
+    pkg_js = {}
+    for offer in offers:
+        custom = not int(offer["devices"] or 0)
+        pkg_js[str(offer["id"])] = {
+            "b": cents(offer["price"]),
+            "d": cents(offer["extra_device_price"]),
+            "p": cents(offer["extra_period_price"]),
+            "c": 1 if custom else 0,
+            "def": int(offer["devices"] or 0) or 1,
+        }
+    single_rows = "".join(
+        hotspot_pick(offer, mode == "one" and index == 0, False) for index, offer in enumerate(single)
+    )
+    multi_rows = "".join(
+        hotspot_pick(offer, mode == "multi" and index == 0, not int(offer["devices"] or 0))
+        for index, offer in enumerate(multi)
+    )
+    if not offers:
         picker = """<p class=note>No hotspot packages are on sale for this router yet. The provider adds them under Packages → Hotspot.</p>"""
+        tabs = ""
+    else:
+        tabs = ""
+        if single and multi:
+            tabs = f"""<div class=tabs>
+<button type=button id=tabone class="tab{' on' if mode == 'one' else ''}" onclick="pick_mode('one')">One device</button>
+<button type=button id=tabmulti class="tab{' on' if mode == 'multi' else ''}" onclick="pick_mode('multi')">Multiple devices</button>
+</div>"""
+        picker = f"""{tabs}
+<div id="list-one"{'' if mode == 'one' else ' style="display:none"'}>{single_rows or '<p class=note>No single-device packages are on sale — try a multiple-device option.</p>'}</div>
+<div id="list-multi"{'' if mode == 'multi' else ' style="display:none"'}>{multi_rows or '<p class=note>No multiple-device packages are on sale — pick a single-device bundle.</p>'}</div>"""
     site = esc(f"{device['name']} · {device['site']}".strip(" ·"))
     stk = ""
     if payment:
@@ -389,10 +579,44 @@ def hotspot_page(device, offers, ctx, payment):
     if payment:
         script = f"""<script>
 const CTX={ctx_json};
+const PKG={json.dumps(pkg_js)};
+let MODE='{mode}';
 let cid=null;
+function money(cents){{return 'KSh '+(cents%100?(cents/100).toFixed(2):String(cents/100));}}
 function msg(html,ok){{document.getElementById('msg').innerHTML='<div class='+(ok?'ok':'note')+'>'+html+'</div>';}}
 function err(text){{document.getElementById('msg').innerHTML='<div class=err>'+text+'</div>';}}
-function sel(){{const p=document.querySelector('input[name=pkg]:checked');return p?p.value:'';}}
+function sel(){{const list=document.getElementById(MODE==='one'?'list-one':'list-multi');const p=list?list.querySelector('input[name=pkg]:checked'):null;return p?p.value:'';}}
+function num(id){{const e=document.getElementById(id);return e?e.value:'';}}
+function quote(){{
+ const id=sel();const p=PKG[id];
+ if(!p)return{{devices:1,periods:1,total:0}};
+ if(MODE==='one')return{{devices:1,periods:1,total:p.b}};
+ if(!p.c)return{{devices:p.def,periods:1,total:p.b}};
+ const dv=parseInt(num('dev-'+id),10);const pr=parseInt(num('per-'+id),10);
+ const d=isNaN(dv)?1:Math.min(50,Math.max(1,dv));
+ const n=isNaN(pr)?1:Math.min(60,Math.max(1,pr));
+ return{{devices:d,periods:n,total:p.b+(d-1)*p.d+(n-1)*p.p}};
+}}
+function refresh(){{
+ document.querySelectorAll('.cust').forEach(function(c){{c.style.display='none';}});
+ const id=sel();const q=quote();
+ if(id&&MODE==='multi'){{const c=document.getElementById('cust-'+id);if(c)c.style.display='block';}}
+ if(id){{const t=document.getElementById('tot-'+id);if(t)t.textContent=money(q.total);}}
+ const b=document.getElementById('paybtn');if(b)b.textContent='Pay '+money(q.total)+' with M-Pesa';
+ document.querySelectorAll('.pick').forEach(function(x){{const r=x.querySelector('input[name=pkg]');x.classList.toggle('on',!!(r&&r.checked));}});
+}}
+function pick_mode(m){{
+ MODE=m;
+ const one=document.getElementById('list-one');const multi=document.getElementById('list-multi');
+ if(one)one.style.display=m==='one'?'':'none';
+ if(multi)multi.style.display=m==='one'?'none':'';
+ const t1=document.getElementById('tabone');const t2=document.getElementById('tabmulti');
+ if(t1)t1.className='tab'+(m==='one'?' on':'');
+ if(t2)t2.className='tab'+(m==='one'?'':' on');
+ const list=document.getElementById(m==='one'?'list-one':'list-multi');
+ if(list&&!list.querySelector('input[name=pkg]:checked')){{const r=list.querySelector('input[name=pkg]');if(r)r.checked=true;}}
+ refresh();
+}}
 async function poll(){{
  if(!cid)return;
  const r=await fetch('/hotspot/status?id='+encodeURIComponent(cid));
@@ -418,13 +642,15 @@ async function pay(){{
  const phone=document.getElementById('phone').value.trim();
  if(!phone){{err('Enter the M-Pesa number that should approve the payment.');return;}}
  const btn=document.getElementById('paybtn');
- const r=await fetch('/hotspot/pay',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{device:CTX.device,ip:CTX.ip,mac:CTX.mac,login:CTX.login,orig:CTX.orig,packageId:pkg,phone:phone}})}});
+ const q=quote();
+ const r=await fetch('/hotspot/pay',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{device:CTX.device,ip:CTX.ip,mac:CTX.mac,login:CTX.login,orig:CTX.orig,packageId:pkg,phone:phone,devices:q.devices,periods:q.periods}})}});
  const b=await r.json();
  if(b.checkoutId){{cid=b.checkoutId;btn.disabled=true;msg('Check the phone and approve the M-Pesa prompt…');poll();}}
  else err(b.error||'Could not start the payment.');
 }}
-document.querySelectorAll('.pick').forEach(function(p){{p.addEventListener('change',function(){{document.querySelectorAll('.pick').forEach(function(x){{x.classList.remove('on');}});p.classList.add('on');}});}});
-const first=document.querySelector('.pick');if(first)first.classList.add('on');
+document.querySelectorAll('input[name=pkg]').forEach(function(r){{r.addEventListener('change',refresh);}});
+document.querySelectorAll('.cust input').forEach(function(i){{i.addEventListener('input',refresh);}});
+refresh();
 </script>"""
     body = f"""<span class="badge warn">Wi-Fi</span>
 <h1>Pick a bundle to get online</h1>
@@ -484,9 +710,10 @@ class PortalHandler(BaseHTTPRequestHandler):
         try:
             with db.cursor() as cursor:
                 payment = daraja_settings(cursor, row["client_id"])
+                offers = pppoe_offers(cursor, row)
         finally:
             db.close()
-        self._send(pay_page(row, payment))
+        self._send(pay_page(row, offers, payment))
 
     def hotspot_get(self, path, query):
         if path.startswith("/hotspot-page/"):
@@ -537,18 +764,22 @@ class PortalHandler(BaseHTTPRequestHandler):
         phone = normalize_phone(payload.get("phone"))
         if not phone:
             return self._send(b'{"error":"Enter a valid Safaricom number, like 0712345678."}', 400, "application/json")
-        try:
-            amount = Decimal(str(payload.get("amount") or row["price"] or "0")).quantize(Decimal("0.01"))
-        except Exception:
-            return self._send(b'{"error":"Enter a valid amount."}', 400, "application/json")
-        if amount <= 0:
-            return self._send(b'{"error":"Enter a valid amount."}', 400, "application/json")
         db = self.server.connect()
         try:
             with db.cursor() as cursor:
+                offers = pppoe_offers(cursor, row)
+                offer = next(
+                    (item for item in offers if str(item["id"]) == str(payload.get("packageId") or "")),
+                    None,
+                )
                 settings = daraja_settings(cursor, row["client_id"])
         finally:
             db.close()
+        if not offer:
+            return self._send(b'{"error":"Pick a package that is on sale."}', 400, "application/json")
+        amount = Decimal(offer["price"] or 0)
+        if amount <= 0:
+            return self._send(b'{"error":"That package has no price set."}', 400, "application/json")
         if not settings or not settings["passkey"]:
             return self._send(b'{"error":"M-Pesa prompts are not configured yet."}', 503, "application/json")
         try:
@@ -562,6 +793,7 @@ class PortalHandler(BaseHTTPRequestHandler):
             PENDING[checkout] = {
                 "subscriber_id": row["subscriber_id"],
                 "client_id": row["client_id"],
+                "package_id": str(offer["id"]),
                 "amount": format(amount, ".2f"),
                 "at": datetime.now(),
             }
@@ -593,6 +825,24 @@ class PortalHandler(BaseHTTPRequestHandler):
                     with PENDING_LOCK:
                         PENDING.pop(checkout_id, None)
                     try:
+                        cursor.execute(
+                            "SELECT package_id FROM pppoe_subscribers WHERE id = %s",
+                            (pending["subscriber_id"],),
+                        )
+                        current = cursor.fetchone()
+                        if (
+                            pending.get("package_id")
+                            and current
+                            and pending["package_id"] != str(current["package_id"])
+                        ):
+                            cursor.execute(
+                                "UPDATE pppoe_subscribers SET package_id = %s WHERE id = %s",
+                                (pending["package_id"], pending["subscriber_id"]),
+                            )
+                            cursor.execute(
+                                "UPDATE pppoe_subscriptions SET package_id = %s, price = %s WHERE subscriber_id = %s",
+                                (pending["package_id"], pending["amount"], pending["subscriber_id"]),
+                            )
                         pppoe_store.renew(
                             cursor,
                             pending["client_id"],
@@ -630,6 +880,13 @@ class PortalHandler(BaseHTTPRequestHandler):
                 )
                 if not package:
                     return self._send(b'{"error":"Pick a package that is on sale."}', 400, "application/json")
+                quote_result = hotspot_quote(package, payload)
+                if not quote_result:
+                    return self._send(
+                        b'{"error":"Choose between 1 and 50 devices and 1 and 60 periods."}',
+                        400,
+                        "application/json",
+                    )
                 settings = daraja_settings(cursor, device["client_id"])
         finally:
             db.close()
@@ -639,7 +896,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         if not phone:
             return self._send(b'{"error":"Enter a valid Safaricom number, like 0712345678."}', 400, "application/json")
         try:
-            result = stk_push(settings, phone, package["price"], str(package["name"] or "Hotspot")[:12])
+            result = stk_push(settings, phone, quote_result["amount"], str(package["name"] or "Hotspot")[:12])
         except Exception as error:
             return self._send(json.dumps({"error": f"M-Pesa could not start the payment: {error}"}).encode(), 502, "application/json")
         checkout = result.get("CheckoutRequestID")
@@ -655,8 +912,8 @@ class PortalHandler(BaseHTTPRequestHandler):
             with db.cursor() as cursor:
                 cursor.execute(
                     """
-                    INSERT INTO hotspot_purchases (id, client_id, device_id, package_id, phone, amount, checkout_id, mac, ip, status)
-                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+                    INSERT INTO hotspot_purchases (id, client_id, device_id, package_id, phone, amount, checkout_id, mac, ip, devices, periods, status)
+                    VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
                     """,
                     (
                         purchase_id,
@@ -664,10 +921,12 @@ class PortalHandler(BaseHTTPRequestHandler):
                         device["id"],
                         package["id"],
                         phone,
-                        format(Decimal(package["price"]), ".2f"),
+                        format(quote_result["amount"], ".2f"),
                         checkout,
                         mac,
                         ip,
+                        quote_result["devices"],
+                        quote_result["periods"],
                     ),
                 )
             db.commit()
@@ -682,8 +941,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                 "package_id": package["id"],
                 "download": int(package["download_mbps"]),
                 "upload": int(package["upload_mbps"]),
-                "seconds": validity_seconds(package["validity_amount"], package["validity_unit"]),
-                "devices": int(package["devices"] or 1),
+                "seconds": quote_result["seconds"],
+                "devices": quote_result["devices"],
                 "ip": ip,
                 "mac": mac,
                 "login": str(payload.get("login") or "")[:200],

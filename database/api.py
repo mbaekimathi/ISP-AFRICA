@@ -65,14 +65,20 @@ def clean_package_fields(payload):
         raise ApiError(400, "Enter the price in KSh with up to two decimal places.")
     service_type = package_choice(payload.get("serviceType"), SERVICE_TYPES, "Choose PPPoE or Hotspot.")
     devices = 1
+    extra_device = None
+    extra_period = None
     if service_type == "hotspot":
         device_mode = str(payload.get("deviceMode") or "").strip()
         if device_mode == "one":
             devices = 1
         elif device_mode == "multiple":
-            devices = package_count(payload.get("simultaneousDevices"), "Enter how many devices can use one account.", 100)
-            if devices < 2:
-                raise ApiError(400, "Enter at least 2 devices for a multiple-device hotspot package.")
+            devices = 0
+            extra_device = package_money(
+                payload.get("extraDevicePrice"), "Enter the amount charged for each extra device."
+            )
+            extra_period = package_money(
+                payload.get("extraPeriodPrice"), "Enter the amount charged for each extra period."
+            )
         else:
             raise ApiError(400, "Choose whether the hotspot package is for one device or multiple devices.")
     validity_amount, validity_unit = optional_duration(
@@ -164,6 +170,8 @@ def clean_package_fields(payload):
         "fair_reset_amount": fair_reset_amount,
         "fair_reset_unit": fair_reset_unit,
         "devices": devices,
+        "extra_device": extra_device,
+        "extra_period": extra_period,
         "grace_amount": grace_amount,
         "grace_unit": grace_unit,
         "status": package_choice(
@@ -447,7 +455,9 @@ def public_package(row):
         "fairThrottleUploadMbps": None if row.get("fair_throttle_upload") is None else int(row["fair_throttle_upload"]),
         "fairResetAmount": None if row.get("fair_reset_amount") is None else int(row["fair_reset_amount"]),
         "fairResetUnit": row.get("fair_reset_unit"),
-        "simultaneousDevices": int(row.get("simultaneous_devices") or 1),
+        "simultaneousDevices": int(row["simultaneous_devices"]) if row.get("simultaneous_devices") is not None else 1,
+        "extraDevicePrice": None if row.get("extra_device_price") is None else format(Decimal(row["extra_device_price"]), ".2f"),
+        "extraPeriodPrice": None if row.get("extra_period_price") is None else format(Decimal(row["extra_period_price"]), ".2f"),
         "graceAmount": None if row.get("grace_amount") is None else int(row["grace_amount"]),
         "graceUnit": row.get("grace_unit"),
         "status": row["status"],
@@ -469,7 +479,7 @@ COMPANY_PACKAGE_COLUMNS = """
   fair_throttle_download, fair_throttle_upload, data_allowance_action,
   data_throttle_download, data_throttle_upload,
   data_reset_amount, data_reset_unit, fair_reset_amount, fair_reset_unit,
-  simultaneous_devices,
+  simultaneous_devices, extra_device_price, extra_period_price,
   grace_amount, grace_unit, status, availability_routers, availability_locations,
   availability_service_areas, availability_clients, applies_to_all, image_data_url
 """
@@ -480,7 +490,8 @@ ISP_PACKAGE_COLUMNS = """
   data_reset_amount, data_reset_unit,
   fair_use_amount, fair_use_unit, fair_use_policy, fair_use_action,
   fair_throttle_download, fair_throttle_upload, fair_reset_amount, fair_reset_unit,
-  simultaneous_devices, grace_amount, grace_unit, status, availability_routers,
+  simultaneous_devices, extra_device_price, extra_period_price,
+  grace_amount, grace_unit, status, availability_routers,
   company_package_id, customized, image_data_url
 """
 
@@ -490,6 +501,18 @@ def package_choice(value, allowed, message):
     if choice not in allowed:
         raise ApiError(400, message)
     return choice
+
+
+def package_money(value, message):
+    if isinstance(value, bool):
+        raise ApiError(400, message)
+    try:
+        amount = Decimal(str("" if value is None else value).strip())
+    except InvalidOperation as error:
+        raise ApiError(400, message) from error
+    if amount < 0 or amount > Decimal("99999999.99") or amount.as_tuple().exponent < -2:
+        raise ApiError(400, message)
+    return format(amount, ".2f")
 
 
 def package_count(value, message, maximum):
@@ -632,7 +655,9 @@ def public_company_package(row):
         "fairThrottleUploadMbps": None if row["fair_throttle_upload"] is None else int(row["fair_throttle_upload"]),
         "fairResetAmount": None if row["fair_reset_amount"] is None else int(row["fair_reset_amount"]),
         "fairResetUnit": row["fair_reset_unit"],
-        "simultaneousDevices": int(row["simultaneous_devices"]),
+        "simultaneousDevices": int(row["simultaneous_devices"]) if row.get("simultaneous_devices") is not None else 1,
+        "extraDevicePrice": None if row.get("extra_device_price") is None else format(Decimal(row["extra_device_price"]), ".2f"),
+        "extraPeriodPrice": None if row.get("extra_period_price") is None else format(Decimal(row["extra_period_price"]), ".2f"),
         "graceAmount": None if row["grace_amount"] is None else int(row["grace_amount"]),
         "graceUnit": row["grace_unit"],
         "status": row["status"],
@@ -885,6 +910,8 @@ def ensure_schema():
                 ("fair_reset_amount", "fair_reset_amount INT NULL"),
                 ("fair_reset_unit", "fair_reset_unit ENUM('hours', 'days', 'weeks', 'months') NULL"),
                 ("simultaneous_devices", "simultaneous_devices INT NOT NULL DEFAULT 1"),
+                ("extra_device_price", "extra_device_price DECIMAL(10,2) NULL"),
+                ("extra_period_price", "extra_period_price DECIMAL(10,2) NULL"),
                 ("grace_amount", "grace_amount INT NULL"),
                 ("grace_unit", "grace_unit ENUM('hours', 'days', 'weeks', 'months') NULL"),
             ):
@@ -957,6 +984,8 @@ def ensure_schema():
                 ("fair_reset_amount", "fair_reset_amount INT NULL"),
                 ("fair_reset_unit", "fair_reset_unit ENUM('hours', 'days', 'weeks', 'months') NULL"),
                 ("simultaneous_devices", "simultaneous_devices INT NOT NULL DEFAULT 1"),
+                ("extra_device_price", "extra_device_price DECIMAL(10,2) NULL"),
+                ("extra_period_price", "extra_period_price DECIMAL(10,2) NULL"),
                 ("grace_amount", "grace_amount INT NULL"),
                 ("grace_unit", "grace_unit ENUM('hours', 'days', 'weeks', 'months') NULL"),
                 ("availability_routers", "availability_routers TEXT NULL"),
@@ -1043,6 +1072,8 @@ def ensure_schema():
                   checkout_id VARCHAR(64) NOT NULL,
                   mac VARCHAR(20) NOT NULL DEFAULT '',
                   ip VARCHAR(45) NOT NULL DEFAULT '',
+                  devices INT NOT NULL DEFAULT 1,
+                  periods INT NOT NULL DEFAULT 1,
                   username VARCHAR(40) NOT NULL DEFAULT '',
                   password VARCHAR(40) NOT NULL DEFAULT '',
                   status ENUM('pending', 'paid', 'failed') NOT NULL DEFAULT 'pending',
@@ -1054,6 +1085,13 @@ def ensure_schema():
                 )
                 """
             )
+            for column, definition in (
+                ("devices", "devices INT NOT NULL DEFAULT 1"),
+                ("periods", "periods INT NOT NULL DEFAULT 1"),
+            ):
+                cursor.execute("SHOW COLUMNS FROM hotspot_purchases LIKE %s", (column,))
+                if cursor.fetchone() is None:
+                    cursor.execute(f"ALTER TABLE hotspot_purchases ADD COLUMN {definition}")
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS isp_communication_settings (
@@ -3162,7 +3200,7 @@ class Handler(BaseHTTPRequestHandler):
               data_throttle_download, data_throttle_upload, data_reset_amount, data_reset_unit,
               fair_use_amount, fair_use_unit, fair_use_policy, fair_use_action,
               fair_throttle_download, fair_throttle_upload, fair_reset_amount, fair_reset_unit,
-              simultaneous_devices, grace_amount, grace_unit,
+              simultaneous_devices, extra_device_price, extra_period_price, grace_amount, grace_unit,
               status, availability_routers, image_data_url
             ) VALUES (
               %s, %s, %s, %s, %s, %s, %s, %s,
@@ -3171,7 +3209,7 @@ class Handler(BaseHTTPRequestHandler):
               %s, %s, %s, %s,
               %s, %s, %s, %s,
               %s, %s, %s, %s,
-              %s, %s, %s,
+              %s, %s, %s, %s, %s,
               %s, %s, %s
             )
             """,
@@ -3202,6 +3240,8 @@ class Handler(BaseHTTPRequestHandler):
                 fields["fair_reset_amount"],
                 fields["fair_reset_unit"],
                 fields["devices"],
+                fields["extra_device"],
+                fields["extra_period"],
                 fields["grace_amount"],
                 fields["grace_unit"],
                 fields["status"],
@@ -3238,7 +3278,8 @@ class Handler(BaseHTTPRequestHandler):
                     fair_use_amount = %s, fair_use_unit = %s, fair_use_policy = %s, fair_use_action = %s,
                     fair_throttle_download = %s, fair_throttle_upload = %s,
                     fair_reset_amount = %s, fair_reset_unit = %s,
-                    simultaneous_devices = %s, grace_amount = %s, grace_unit = %s,
+                    simultaneous_devices = %s, extra_device_price = %s, extra_period_price = %s,
+                    grace_amount = %s, grace_unit = %s,
                     status = %s, availability_routers = %s, image_data_url = %s, customized = 1
                 WHERE id = %s AND client_id = %s
                 """,
@@ -3267,6 +3308,8 @@ class Handler(BaseHTTPRequestHandler):
                     fields["fair_reset_amount"],
                     fields["fair_reset_unit"],
                     fields["devices"],
+                    fields["extra_device"],
+                    fields["extra_period"],
                     fields["grace_amount"],
                     fields["grace_unit"],
                     fields["status"],
@@ -3491,7 +3534,8 @@ class Handler(BaseHTTPRequestHandler):
                         fair_use_amount = %s, fair_use_unit = %s, fair_use_policy = %s, fair_use_action = %s,
                         fair_throttle_download = %s, fair_throttle_upload = %s,
                         fair_reset_amount = %s, fair_reset_unit = %s,
-                        simultaneous_devices = %s, grace_amount = %s, grace_unit = %s,
+                        simultaneous_devices = %s, extra_device_price = %s, extra_period_price = %s,
+                        grace_amount = %s, grace_unit = %s,
                         status = %s, availability_routers = %s, image_data_url = %s
                     WHERE id = %s
                     """,
@@ -3519,7 +3563,9 @@ class Handler(BaseHTTPRequestHandler):
                         row.get("fair_throttle_upload"),
                         row.get("fair_reset_amount"),
                         row.get("fair_reset_unit"),
-                        int(row.get("simultaneous_devices") or 1),
+                        int(row["simultaneous_devices"]) if row.get("simultaneous_devices") is not None else 1,
+                        row.get("extra_device_price"),
+                        row.get("extra_period_price"),
                         row.get("grace_amount"),
                         row.get("grace_unit"),
                         isp_status,
@@ -3544,7 +3590,7 @@ class Handler(BaseHTTPRequestHandler):
                   data_throttle_download, data_throttle_upload, data_reset_amount, data_reset_unit,
                   fair_use_amount, fair_use_unit, fair_use_policy, fair_use_action,
                   fair_throttle_download, fair_throttle_upload, fair_reset_amount, fair_reset_unit,
-                  simultaneous_devices, grace_amount, grace_unit,
+                  simultaneous_devices, extra_device_price, extra_period_price, grace_amount, grace_unit,
                   status, availability_routers, company_package_id, customized, image_data_url
                 ) VALUES (
                   %s, %s, %s, %s, %s, %s, %s, %s,
@@ -3553,7 +3599,7 @@ class Handler(BaseHTTPRequestHandler):
                   %s, %s, %s, %s,
                   %s, %s, %s, %s,
                   %s, %s, %s, %s,
-                  %s, %s, %s,
+                  %s, %s, %s, %s, %s,
                   %s, %s, %s, 0, %s
                 )
                 """,
@@ -3583,7 +3629,9 @@ class Handler(BaseHTTPRequestHandler):
                     row.get("fair_throttle_upload"),
                     row.get("fair_reset_amount"),
                     row.get("fair_reset_unit"),
-                    int(row.get("simultaneous_devices") or 1),
+                    int(row["simultaneous_devices"]) if row.get("simultaneous_devices") is not None else 1,
+                    row.get("extra_device_price"),
+                    row.get("extra_period_price"),
                     row.get("grace_amount"),
                     row.get("grace_unit"),
                     isp_status,
@@ -3668,7 +3716,7 @@ class Handler(BaseHTTPRequestHandler):
               fair_throttle_download, fair_throttle_upload, data_allowance_action,
               data_throttle_download, data_throttle_upload,
               data_reset_amount, data_reset_unit, fair_reset_amount, fair_reset_unit,
-              simultaneous_devices,
+              simultaneous_devices, extra_device_price, extra_period_price,
               grace_amount, grace_unit, status, availability_routers, availability_locations,
               availability_service_areas, availability_clients, applies_to_all, image_data_url
             ) VALUES (
@@ -3677,7 +3725,7 @@ class Handler(BaseHTTPRequestHandler):
               %s, %s, %s, %s,
               %s, %s, %s,
               %s, %s, %s, %s, %s, %s,
-              %s,
+              %s, %s, %s,
               %s, %s, %s, %s, %s,
               %s, %s, %s, %s
             )
@@ -3708,6 +3756,8 @@ class Handler(BaseHTTPRequestHandler):
                 fields["fair_reset_amount"],
                 fields["fair_reset_unit"],
                 fields["devices"],
+                fields["extra_device"],
+                fields["extra_period"],
                 fields["grace_amount"],
                 fields["grace_unit"],
                 fields["status"],
@@ -3746,7 +3796,8 @@ class Handler(BaseHTTPRequestHandler):
                     fair_use_action = %s, fair_throttle_download = %s, fair_throttle_upload = %s,
                     data_allowance_action = %s, data_throttle_download = %s, data_throttle_upload = %s,
                     data_reset_amount = %s, data_reset_unit = %s, fair_reset_amount = %s, fair_reset_unit = %s,
-                    simultaneous_devices = %s, grace_amount = %s, grace_unit = %s, status = %s,
+                    simultaneous_devices = %s, extra_device_price = %s, extra_period_price = %s,
+                    grace_amount = %s, grace_unit = %s, status = %s,
                     availability_routers = %s, availability_locations = %s, availability_service_areas = %s,
                     availability_clients = %s, applies_to_all = %s, image_data_url = %s
                 WHERE id = %s
@@ -3776,6 +3827,8 @@ class Handler(BaseHTTPRequestHandler):
                     fields["fair_reset_amount"],
                     fields["fair_reset_unit"],
                     fields["devices"],
+                    fields["extra_device"],
+                    fields["extra_period"],
                     fields["grace_amount"],
                     fields["grace_unit"],
                     fields["status"],

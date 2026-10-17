@@ -43,6 +43,8 @@ type PackageRecord = {
   fairResetAmount: number | null;
   fairResetUnit: TimeUnit | null;
   simultaneousDevices: number;
+  extraDevicePrice: string | null;
+  extraPeriodPrice: string | null;
   graceAmount: number | null;
   graceUnit: TimeUnit | null;
   status: PackageStatus;
@@ -76,7 +78,8 @@ type Draft = {
   fairThrottleUploadMbps: string;
   fairResetAmount: string;
   fairResetUnit: "" | TimeUnit;
-  simultaneousDevices: string;
+  extraDevicePrice: string;
+  extraPeriodPrice: string;
   graceAmount: string;
   graceUnit: "" | TimeUnit;
   status: "" | PackageStatus;
@@ -110,7 +113,8 @@ const emptyDraft: Draft = {
   fairThrottleUploadMbps: "",
   fairResetAmount: "",
   fairResetUnit: "",
-  simultaneousDevices: "",
+  extraDevicePrice: "",
+  extraPeriodPrice: "",
   graceAmount: "",
   graceUnit: "",
   status: "",
@@ -163,8 +167,8 @@ function payload(draft: Draft) {
     fairResetAmount: draft.fairEnabled ? draft.fairResetAmount.trim() : "",
     fairResetUnit: draft.fairEnabled ? draft.fairResetUnit : "",
     deviceMode: draft.serviceType === "hotspot" ? draft.deviceMode : "",
-    simultaneousDevices:
-      draft.serviceType === "hotspot" && draft.deviceMode === "multiple" ? Number(draft.simultaneousDevices) : 1,
+    extraDevicePrice: draft.serviceType === "hotspot" && draft.deviceMode === "multiple" ? draft.extraDevicePrice.trim() : "",
+    extraPeriodPrice: draft.serviceType === "hotspot" && draft.deviceMode === "multiple" ? draft.extraPeriodPrice.trim() : "",
     graceAmount: draft.graceAmount.trim(),
     graceUnit: draft.graceUnit,
     status: draft.status,
@@ -199,8 +203,9 @@ function draftFrom(record: PackageRecord): Draft {
     fairThrottleUploadMbps: record.fairThrottleUploadMbps == null ? "" : String(record.fairThrottleUploadMbps),
     fairResetAmount: record.fairResetAmount == null ? "" : String(record.fairResetAmount),
     fairResetUnit: record.fairResetUnit ?? "",
-    simultaneousDevices: record.serviceType === "hotspot" && record.simultaneousDevices > 1 ? String(record.simultaneousDevices) : "",
-    deviceMode: record.serviceType === "hotspot" ? (record.simultaneousDevices > 1 ? "multiple" : "one") : "",
+    extraDevicePrice: record.extraDevicePrice ?? "",
+    extraPeriodPrice: record.extraPeriodPrice ?? "",
+    deviceMode: record.serviceType === "hotspot" ? (record.simultaneousDevices === 1 ? "one" : "multiple") : "",
     graceAmount: record.graceAmount == null ? "" : String(record.graceAmount),
     graceUnit: record.graceUnit ?? "",
     status: record.status,
@@ -434,7 +439,8 @@ function PackageFields({
       ...draft,
       serviceType,
       deviceMode: "",
-      simultaneousDevices: "",
+      extraDevicePrice: "",
+      extraPeriodPrice: "",
     });
   }
 
@@ -558,7 +564,10 @@ function PackageFields({
           <div className="sm:col-span-2 grid gap-3">
             <fieldset className="grid gap-2">
               <legend className="text-sm font-medium text-foreground">Devices</legend>
-              <p className="text-sm text-muted-foreground">Choose whether one device or several devices can use this hotspot package.</p>
+              <p className="text-sm text-muted-foreground">
+                One device sells the package at the price above. Multiple devices lets the customer pick how many devices
+                and how many periods to buy on the pay page.
+              </p>
               <div className="grid gap-2 sm:grid-cols-2">
                 <label className="flex items-center gap-2 rounded-lg border border-border px-3 py-2 text-sm">
                   <input
@@ -566,7 +575,7 @@ function PackageFields({
                     name={`${idPrefix}-device-mode`}
                     required
                     checked={draft.deviceMode === "one"}
-                    onChange={() => onChange({ ...draft, deviceMode: "one", simultaneousDevices: "" })}
+                    onChange={() => onChange({ ...draft, deviceMode: "one", extraDevicePrice: "", extraPeriodPrice: "" })}
                   />
                   One device
                 </label>
@@ -583,17 +592,42 @@ function PackageFields({
               </div>
             </fieldset>
             {draft.deviceMode === "multiple" ? (
-              <FormField id={`${idPrefix}-devices`} label="Number of devices" hint="How many devices can use one account.">
-                <input
-                  id={`${idPrefix}-devices`}
-                  className="field"
-                  inputMode="numeric"
-                  min={2}
-                  required
-                  value={draft.simultaneousDevices}
-                  onChange={(event) => set("simultaneousDevices", event.target.value)}
-                />
-              </FormField>
+              <div className="grid gap-3 rounded-xl border border-border p-3">
+                <p className="text-sm text-muted-foreground">
+                  The price above covers 1 device for the validity period. The customer pays the extra-device charge for
+                  every additional device and the extra-period charge for every additional period they choose.
+                </p>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <FormField
+                    id={`${idPrefix}-extra-device`}
+                    label="Charge per extra device (KSh)"
+                    hint="Added for each device beyond the first."
+                  >
+                    <input
+                      id={`${idPrefix}-extra-device`}
+                      className="field"
+                      inputMode="decimal"
+                      required
+                      value={draft.extraDevicePrice}
+                      onChange={(event) => set("extraDevicePrice", event.target.value)}
+                    />
+                  </FormField>
+                  <FormField
+                    id={`${idPrefix}-extra-period`}
+                    label="Charge per extra period (KSh)"
+                    hint="Added for each extra validity period the customer buys."
+                  >
+                    <input
+                      id={`${idPrefix}-extra-period`}
+                      className="field"
+                      inputMode="decimal"
+                      required
+                      value={draft.extraPeriodPrice}
+                      onChange={(event) => set("extraPeriodPrice", event.target.value)}
+                    />
+                  </FormField>
+                </div>
+              </div>
             ) : null}
           </div>
         ) : null}
@@ -787,6 +821,14 @@ function periodLabel(amount: number | null, unit: TimeUnit | null) {
   return `${amount} ${name}`;
 }
 
+function deviceLabel(item: PackageRecord) {
+  if (item.serviceType !== "hotspot") return String(item.simultaneousDevices);
+  if (item.simultaneousDevices === 0) {
+    return `Customer chooses · +KSh ${item.extraDevicePrice ?? "0"} per extra device · +KSh ${item.extraPeriodPrice ?? "0"} per extra period`;
+  }
+  return item.simultaneousDevices > 1 ? `Up to ${item.simultaneousDevices}` : "1";
+}
+
 function packageDetails(item: PackageRecord, routers: PackageRouter[]) {
   const availability = item.routers.length
     ? item.routers
@@ -813,7 +855,7 @@ function packageDetails(item: PackageRecord, routers: PackageRouter[]) {
     { label: "Speed", value: `${item.downloadMbps} / ${item.uploadMbps} Mbps` },
     { label: "Validity", value: `${item.validityAmount} ${item.validityUnit}` },
     { label: "Grace", value: item.graceAmount ? periodLabel(item.graceAmount, item.graceUnit) : "None" },
-    { label: "Devices", value: String(item.simultaneousDevices) },
+    { label: "Devices", value: deviceLabel(item) },
     { label: "Data", value: item.dataResetAmount ? `${dataAction}. Resets after ${periodLabel(item.dataResetAmount, item.dataResetUnit)}` : dataAction },
     { label: "Fair use", value: item.fairResetAmount ? `${fairAction}. Resets after ${periodLabel(item.fairResetAmount, item.fairResetUnit)}` : fairAction },
     { label: "Routers", value: availability },

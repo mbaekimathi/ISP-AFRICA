@@ -21,12 +21,39 @@ type Offer = {
   validityAmount?: number;
   validityUnit?: string;
   imageDataUrl?: string;
+  simultaneousDevices?: number;
+  extraDevicePrice?: string | null;
+  extraPeriodPrice?: string | null;
 };
 
 function validityText(offer: Offer) {
   if (!offer.validityAmount || !offer.validityUnit) return "";
   const unit = offer.validityAmount === 1 && offer.validityUnit.endsWith("s") ? offer.validityUnit.slice(0, -1) : offer.validityUnit;
   return ` · ${offer.validityAmount} ${unit}`;
+}
+
+function unitLabel(offer: Offer) {
+  const unit = offer.validityUnit || "days";
+  const amount = offer.validityAmount ?? 1;
+  if (amount === 1 && unit.endsWith("s")) return unit.slice(0, -1);
+  return `${amount} ${unit}`;
+}
+
+function cents(value?: string | null) {
+  const amount = Number(value ?? 0);
+  return Number.isFinite(amount) ? Math.round(amount * 100) : 0;
+}
+
+function deviceCount(offer: Offer) {
+  return offer.simultaneousDevices ?? 1;
+}
+
+function offerDetail(offer: Offer) {
+  const count = deviceCount(offer);
+  if (count === 0) {
+    return `1 device included · +KSh ${offer.extraDevicePrice ?? "0"} per extra device · +KSh ${offer.extraPeriodPrice ?? "0"} per extra ${unitLabel(offer)}`;
+  }
+  return count > 1 ? `Up to ${count} devices` : "1 device";
 }
 
 const copy = {
@@ -64,10 +91,13 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
   const [loaded, setLoaded] = useState(false);
   const [loadError, setLoadError] = useState("");
   const [selected, setSelected] = useState("");
+  const [mode, setMode] = useState<"one" | "multi">("one");
+  const [devices, setDevices] = useState(2);
+  const [periods, setPeriods] = useState(1);
   const [phone, setPhone] = useState("");
   const [phoneError, setPhoneError] = useState("");
   const [formError, setFormError] = useState("");
-  const [prompt, setPrompt] = useState<{ name: string; price: string; phone: string } | null>(null);
+  const [prompt, setPrompt] = useState<{ name: string; price: string; phone: string; detail?: string } | null>(null);
 
   useEffect(() => {
     let stopped = false;
@@ -76,7 +106,14 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
         if (stopped) return;
         const active = body.packages.filter((item) => item.status === "active" && (item.serviceType || "pppoe") === kind);
         setOffers(active);
-        setSelected(active[0]?.id ?? "");
+        if (kind === "hotspot") {
+          const single = active.filter((item) => deviceCount(item) <= 1);
+          const fallback = single.length ? single : active.filter((item) => deviceCount(item) !== 1);
+          setMode(single.length ? "one" : "multi");
+          setSelected(fallback[0]?.id ?? "");
+        } else {
+          setSelected(active[0]?.id ?? "");
+        }
       })
       .catch((cause: unknown) => {
         if (!stopped) setLoadError(cause instanceof Error ? cause.message : "Packages could not be loaded.");
@@ -89,8 +126,24 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
     };
   }, []);
 
-  const chosen = offers.find((item) => item.id === selected) ?? null;
+  const isHotspot = kind === "hotspot";
+  const singleOffers = offers.filter((item) => deviceCount(item) <= 1);
+  const multiOffers = offers.filter((item) => deviceCount(item) !== 1);
+  const visibleOffers = isHotspot ? (mode === "one" ? singleOffers : multiOffers) : offers;
+  const chosen = visibleOffers.find((item) => item.id === selected) ?? null;
+  const customising = isHotspot && mode === "multi" && chosen != null && deviceCount(chosen) === 0;
+  const totalCents = chosen
+    ? cents(chosen.price) +
+      (customising ? (devices - 1) * cents(chosen.extraDevicePrice) + (periods - 1) * cents(chosen.extraPeriodPrice) : 0)
+    : 0;
+  const total = (totalCents / 100).toFixed(2);
   const home = (path: string) => (user ? clientPage(user, path) : path);
+
+  function chooseMode(next: "one" | "multi") {
+    setMode(next);
+    const list = next === "one" ? singleOffers : multiOffers;
+    setSelected((current) => (list.some((item) => item.id === current) ? current : (list[0]?.id ?? "")));
+  }
 
   function pay() {
     if (!chosen) {
@@ -106,7 +159,12 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
     }
     setFormError("");
     setPhoneError("");
-    setPrompt({ name: chosen.name, price: chosen.price, phone: normalized });
+    setPrompt({
+      name: chosen.name,
+      price: total,
+      phone: normalized,
+      detail: customising ? `${devices} devices · ${periods} × ${unitLabel(chosen)}` : undefined,
+    });
   }
 
   return (
@@ -142,6 +200,12 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
                 <dt className="text-muted-foreground">Package</dt>
                 <dd className="font-medium">{prompt.name}</dd>
               </div>
+              {prompt.detail ? (
+                <div className="flex items-baseline justify-between gap-3">
+                  <dt className="text-muted-foreground">Covers</dt>
+                  <dd className="font-medium">{prompt.detail}</dd>
+                </div>
+              ) : null}
               <div className="flex items-baseline justify-between gap-3">
                 <dt className="text-muted-foreground">Amount</dt>
                 <dd className="font-medium">{money(prompt.price)}</dd>
@@ -169,6 +233,30 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
               pay();
             }}
           >
+            {isHotspot && singleOffers.length > 0 && multiOffers.length > 0 ? (
+              <div className="grid grid-cols-2 gap-2" role="tablist" aria-label="How many devices">
+                {(
+                  [
+                    ["one", "One device"],
+                    ["multi", "Multiple devices"],
+                  ] as const
+                ).map(([value, label]) => (
+                  <button
+                    key={value}
+                    type="button"
+                    role="tab"
+                    aria-selected={mode === value}
+                    className={cn(
+                      "rounded-xl border px-4 py-2.5 text-sm font-semibold",
+                      mode === value ? "border-primary bg-primary/5 text-primary" : "border-border text-muted-foreground",
+                    )}
+                    onClick={() => chooseMode(value)}
+                  >
+                    {label}
+                  </button>
+                ))}
+              </div>
+            ) : null}
             <fieldset className="grid gap-2">
               <legend className="text-sm font-medium">Package</legend>
               {!loaded ? <p className="text-sm text-muted-foreground">Loading packages...</p> : null}
@@ -187,7 +275,7 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
                   No active packages are available yet. Add one under Packages before a customer can pay here.
                 </p>
               ) : null}
-              {offers.map((offer) => (
+              {visibleOffers.map((offer) => (
                 <label
                   key={offer.id}
                   className={cn(
@@ -214,10 +302,47 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
                     <span className="block text-xs text-muted-foreground">
                       {offer.downloadMbps} Mbps down · {offer.uploadMbps} Mbps up{validityText(offer)}
                     </span>
+                    {isHotspot ? <span className="block text-xs text-muted-foreground">{offerDetail(offer)}</span> : null}
                   </span>
                   <span className="text-sm font-semibold">{money(offer.price)}</span>
                 </label>
               ))}
+              {customising && chosen ? (
+                <div className="grid gap-3 rounded-xl border border-primary/40 bg-primary/5 px-4 py-3">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    <label className="grid gap-1 text-sm font-medium" htmlFor="wifi-devices">
+                      Devices
+                      <input
+                        id="wifi-devices"
+                        type="number"
+                        className="field"
+                        min={1}
+                        max={50}
+                        inputMode="numeric"
+                        value={devices}
+                        onChange={(event) => setDevices(Math.min(50, Math.max(1, Number(event.target.value) || 1)))}
+                      />
+                    </label>
+                    <label className="grid gap-1 text-sm font-medium" htmlFor="wifi-periods">
+                      Periods (1 = {unitLabel(chosen)})
+                      <input
+                        id="wifi-periods"
+                        type="number"
+                        className="field"
+                        min={1}
+                        max={60}
+                        inputMode="numeric"
+                        value={periods}
+                        onChange={(event) => setPeriods(Math.min(60, Math.max(1, Number(event.target.value) || 1)))}
+                      />
+                    </label>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    {devices} devices · {periods} × {unitLabel(chosen)} — total{" "}
+                    <span className="font-semibold text-foreground">{money(total)}</span>
+                  </p>
+                </div>
+              ) : null}
             </fieldset>
             <FormField id="wifi-phone" label="M-Pesa number" hint="Safaricom number that will approve the payment, such as 0712345678." error={phoneError}>
               <input
@@ -231,7 +356,7 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
               />
             </FormField>
             <PrimaryButton type="submit" disabled={!chosen}>
-              {chosen ? `Pay ${money(chosen.price)}` : "Pay"}
+              {chosen ? `Pay ${money(total)}` : "Pay"}
             </PrimaryButton>
             <p className="text-xs leading-5 text-muted-foreground">
               Guests on a hotspot port see a similar page when they are redirected to pay.{" "}
