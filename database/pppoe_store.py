@@ -2065,7 +2065,7 @@ def list_transactions(cursor, client_id, query):
                s.first_name, s.last_name, s.phone, s.pppoe_username, s.service,
                pkg.name AS package_name,
                (SELECT st.mpesa_code FROM pppoe_stk_requests st
-                WHERE st.checkout_id LIKE CONCAT(p.mpesa_reference, '%') AND st.mpesa_code <> ''
+                WHERE st.checkout_id LIKE CONCAT(p.mpesa_reference, '%%') AND st.mpesa_code <> ''
                 LIMIT 1) AS mpesa_code
         FROM pppoe_payments p
         JOIN pppoe_subscribers s ON s.id = p.subscriber_id
@@ -2231,6 +2231,17 @@ def record_daraja_callback(cursor, payload):
     if str(result_code) == "0" and receipt:
         cursor.execute("UPDATE pppoe_stk_requests SET mpesa_code = %s WHERE checkout_id = %s", (receipt, checkout_id))
         cursor.execute("UPDATE hotspot_purchases SET mpesa_code = %s WHERE checkout_id = %s", (receipt, checkout_id))
+        # A request an earlier poll already marked failed can still be a real
+        # payment when the PIN was entered late — revive it so the next status
+        # poll credits it instead of reporting the stale failure.
+        cursor.execute(
+            "UPDATE pppoe_stk_requests SET status = 'pending', last_error = '' WHERE checkout_id = %s AND status = 'failed'",
+            (checkout_id,),
+        )
+        cursor.execute(
+            "UPDATE hotspot_purchases SET status = 'pending' WHERE checkout_id = %s AND status = 'failed'",
+            (checkout_id,),
+        )
         cursor.execute("UPDATE pppoe_payments SET mpesa_reference = %s WHERE mpesa_reference = %s", (receipt, checkout_id[:40]))
         cursor.execute("UPDATE pppoe_invoices SET mpesa_reference = %s WHERE mpesa_reference = %s", (receipt, checkout_id[:40]))
     elif str(result_code) != "0":

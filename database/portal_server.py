@@ -97,6 +97,8 @@ button:disabled{background:#c7d2e0;box-shadow:none;cursor:default;transform:none
 .done{width:66px;height:66px;margin:2px auto 16px;border-radius:50%;display:flex;align-items:center;justify-content:center;background:#ecfdf5;color:#059669;box-shadow:0 0 0 9px rgba(16,185,129,.12)}
 .done svg{width:30px;height:30px}
 .spin{display:inline-block;width:26px;height:26px;border-radius:50%;border:3px solid #dbe7f6;border-top-color:#1d4ed8;animation:rot .8s linear infinite}
+.spin.big{width:40px;height:40px;border-width:4px}
+.spin.g{border-color:#d1fae5;border-top-color:#059669}
 @keyframes rot{to{transform:rotate(360deg)}}
 .voucher{margin-top:16px;padding:14px 16px;background:#f8fafc;border:1.5px dashed #cbd5e1;border-radius:12px;text-align:center}
 .voucher small{display:block;font-size:11px;font-weight:700;letter-spacing:.09em;text-transform:uppercase;color:#64748b;margin-bottom:6px}
@@ -422,12 +424,13 @@ def pay_page(row, offers, payment):
 <p class=hint>You'll get a prompt on the phone to approve. This page updates itself when the payment lands.</p>
 <script>
 const BRAND={json.dumps(BRAND)};
-const DONE={json.dumps(DONE_ICON)};
 const PKG={json.dumps(pkg_js)};
 const CYCLE={cycle};
 const SIG={json.dumps(pay_signature(row, offers, payment))};
 let cid=null;
 let dirty=false;
+let voucher='';
+let tries=0;
 function money(cents){{return 'KSh '+(cents%100?(cents/100).toFixed(2):String(cents/100));}}
 function sel(){{const p=document.querySelector('input[name=pkg]:checked');return p?p.value:'';}}
 function refresh(){{
@@ -446,28 +449,50 @@ function pickpkg(){{
  if(p&&amt)amt.value=String(p/100);
  refresh();
 }}
-function paid(){{
- document.querySelector('.card').innerHTML=BRAND+'<div class=okpage>'+DONE+'<span class="badge ok">Paid</span><h1>You are back online</h1><p class=sub>Payment received — your internet is reconnecting now.</p><p class=hint>This window can be closed.</p></div>';
+function stage(html){{document.querySelector('.card').innerHTML=BRAND+html;}}
+function waitPin(){{
+ stage('<div class=okpage><p style="margin:8px 0 14px"><span class="spin big"></span></p><span class="badge blue">M-Pesa</span><h1>Approve on your phone</h1><p class=sub>Enter your M-Pesa PIN on the prompt sent to your phone. This page updates itself — no need to refresh.</p></div>');
 }}
-function thanks(b){{
- if(b&&b.voucher){{location.href='/thank-you?code='+encodeURIComponent(b.voucher);return;}}
- paid();
+function connecting(){{
+ stage('<div class=okpage><p style="margin:8px 0 14px"><span class="spin big g"></span></p><span class="badge ok">Paid</span><h1>Payment received</h1><p class=sub>Reconnecting you to the internet — hold on…</p><p class=hint id=later></p></div>');
+}}
+function fail(reason){{
+ cid=null;
+ stage('<div class=okpage><span class="badge bad">Not completed</span><h1>Payment not completed</h1><p class=sub>'+reason+'</p><button type=button onclick="retry()">Try again</button></div>');
+}}
+function retry(){{saveState();location.reload();}}
+function thanks(){{
+ const code=voucher;cid=null;
+ location.href='/thank-you'+(code?'?code='+encodeURIComponent(code):'');
 }}
 async function poll(){{
  if(!cid)return;
- const r=await fetch('/pay/status?id='+encodeURIComponent(cid));
- const b=await r.json();
- if(b.state==='paid'){{cid=null;thanks(b);return;}}
- if(b.state==='failed'){{cid=null;document.getElementById('msg').innerHTML='<div class=err>'+(b.reason||'Payment was not completed.')+'</div>';const btn=document.getElementById('paybtn');if(btn)btn.disabled=false;refresh();return;}}
+ try{{
+  const r=await fetch('/pay/status?id='+encodeURIComponent(cid));
+  const b=await r.json();
+  if(b.state==='paid'){{voucher=b.voucher||'';connecting();setTimeout(online,1500);return;}}
+  if(b.state==='failed'){{fail(b.reason||'Payment was not completed.');return;}}
+ }}catch(e){{}}
  setTimeout(poll,2500);
+}}
+async function online(){{
+ if(!cid)return;
+ try{{
+  const r=await fetch('/pay/online?id='+encodeURIComponent(cid));
+  const b=await r.json();
+  if(b.state==='online'){{thanks();return;}}
+ }}catch(e){{}}
+ tries+=1;
+ if(tries>30){{cid=null;location.href='/help';return;}}
+ if(tries===10){{const l=document.getElementById('later');if(l)l.textContent='Still working on it — reconnects can take a minute or two after payment.';}}
+ setTimeout(online,3000);
 }}
 async function pay(){{
  const pkg=sel();
  if(!pkg){{document.getElementById('msg').innerHTML='<div class=err>Pick a package first.</div>';return;}}
- const btn=document.getElementById('paybtn');
  const r=await fetch('/pay',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{phone:document.getElementById('phone').value,packageId:pkg,amount:document.getElementById('amount').value}})}});
  const b=await r.json();
- if(b.checkoutId){{cid=b.checkoutId;btn.disabled=true;btn.textContent='Waiting for M-Pesa approval…';document.getElementById('msg').innerHTML='<div class=note>Check the phone and approve the M-Pesa prompt…</div>';poll();}}
+ if(b.checkoutId){{cid=b.checkoutId;waitPin();poll();}}
  else document.getElementById('msg').innerHTML='<div class=err>'+(b.error||'Could not start the payment.')+'</div>';
 }}
 document.querySelectorAll('input[name=pkg]').forEach(function(r){{r.addEventListener('change',pickpkg);}});
@@ -512,6 +537,21 @@ refresh();
 {picks}
 {stk}{manual}""",
     ).replace(b"</style>", HOTSPOT_CSS.encode() + b"</style>")
+
+
+def help_page():
+    return page(
+        "Still offline",
+        f"""{WARN_ICON}
+<span class="badge warn">Paid · not connected</span>
+<h1>Your payment went through, but the link has not come back yet</h1>
+<p class=sub>Your payment is recorded already — this is only the reconnect taking too long. Try these in order:</p>
+<p class=sect>Get back online</p>
+<div class=row><span>Step 1</span><span>Turn Wi-Fi off and back on, on this device.</span></div>
+<div class=row><span>Step 2</span><span>Restart the router — off for 30 seconds, then on. It re-dials by itself.</span></div>
+<div class=row><span>Step 3</span><span>Give it five more minutes — reconnects can lag behind the payment.</span></div>
+<p class=note>Still offline after a restart? Contact the provider and quote your M-Pesa receipt code — the payment is already on your account.</p>""",
+    )
 
 
 def unknown_page():
@@ -1232,6 +1272,10 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self.pay_offers()
         if path == "/pay/status":
             return self.pay_status(parse_qs(urlparse(self.path).query).get("id", [""])[0])
+        if path == "/pay/online":
+            return self.pay_online(parse_qs(urlparse(self.path).query).get("id", [""])[0])
+        if path == "/help":
+            return self._send(help_page())
         if path == "/thank-you":
             return self.thank_you(parse_qs(urlparse(self.path).query))
         if path.startswith("/hotspot"):
@@ -1449,12 +1493,14 @@ class PortalHandler(BaseHTTPRequestHandler):
                     return self._send(self.paid_body(cursor, db, request), 200, "application/json")
                 if request["status"] == "processing":
                     return self._send(b'{"state":"pending"}', 200, "application/json")
-                if request["status"] == "failed":
+                confirmed = bool(str(request.get("mpesa_code") or "").strip())
+                if request["status"] == "failed" and not confirmed:
                     reason = request["last_error"] or "Payment was declined."
                     return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
                 # A Daraja callback that already wrote the M-Pesa receipt confirms
-                # the payment without another stkpushquery round-trip.
-                if not str(request.get("mpesa_code") or "").strip():
+                # the payment without another stkpushquery round-trip — even when an
+                # earlier poll marked the request failed before the PIN was entered.
+                if not confirmed:
                     settings = daraja_settings(cursor, request["client_id"])
                     result = None
                     if settings:
@@ -1480,7 +1526,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                         db.commit()
                         return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
                 cursor.execute(
-                    "UPDATE pppoe_stk_requests SET status = 'processing' WHERE checkout_id = %s AND status = 'pending'",
+                    "UPDATE pppoe_stk_requests SET status = 'processing' WHERE checkout_id = %s AND (status = 'pending' OR (status = 'failed' AND mpesa_code <> ''))",
                     (checkout_id,),
                 )
                 db.commit()
@@ -1531,6 +1577,41 @@ class PortalHandler(BaseHTTPRequestHandler):
                         db.rollback()
                     return self._send(b'{"state":"pending"}', 200, "application/json")
                 return self._send(self.paid_body(cursor, db, request), 200, "application/json")
+        finally:
+            db.close()
+
+    def pay_online(self, checkout_id):
+        """Whether the paid subscriber has re-dialed since the payment landed.
+
+        renewal sends a Disconnect-Request, so the old session closes and a fresh
+        radacct session opens with acctstarttime after paid_at — only that counts
+        as back online; a pre-payment session would still be in redirect."""
+        db = self.server.connect()
+        try:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT r.status, r.paid_at, r.created_at, s.pppoe_username
+                    FROM pppoe_stk_requests r
+                    JOIN pppoe_subscribers s ON s.id = r.subscriber_id
+                    WHERE r.checkout_id = %s
+                    """,
+                    (checkout_id,),
+                )
+                request = cursor.fetchone()
+                if not request or request["status"] != "paid":
+                    return self._send(b'{"state":"connecting"}', 200, "application/json")
+                cursor.execute(
+                    """
+                    SELECT 1 FROM radacct
+                    WHERE username = %s AND acctstoptime IS NULL
+                      AND acctstarttime >= %s - INTERVAL 5 SECOND
+                    LIMIT 1
+                    """,
+                    (request["pppoe_username"], request["paid_at"] or request["created_at"]),
+                )
+                state = "online" if cursor.fetchone() else "connecting"
+                return self._send(json.dumps({"state": state}).encode(), 200, "application/json")
         finally:
             db.close()
 
@@ -1686,7 +1767,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                     except Exception:
                         db.rollback()
                     return self._send(json.dumps(hotspot_paid_result(cursor, row)).encode(), 200, "application/json")
-                if row["status"] == "failed":
+                confirmed = bool(str(row.get("mpesa_code") or "").strip())
+                if row["status"] == "failed" and not confirmed:
                     return self._send(b'{"state":"failed","reason":"Payment was declined."}', 200, "application/json")
                 with HOTSPOT_LOCK:
                     pending = HOTSPOT_PENDING.get(checkout_id)
@@ -1694,11 +1776,11 @@ class PortalHandler(BaseHTTPRequestHandler):
                     pending = hotspot_pending_from_row(row)
                     with HOTSPOT_LOCK:
                         HOTSPOT_PENDING[checkout_id] = pending
-                if (datetime.now() - pending["at"]).total_seconds() > 180:
+                if not confirmed and (datetime.now() - pending["at"]).total_seconds() > 180:
                     with HOTSPOT_LOCK:
                         HOTSPOT_PENDING.pop(checkout_id, None)
                     return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
-                if str(row.get("mpesa_code") or "").strip():
+                if confirmed:
                     # The Daraja callback already confirmed this purchase.
                     state, reason = "paid", ""
                 else:
@@ -1722,7 +1804,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     db.commit()
                     return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
                 cursor.execute(
-                    "UPDATE hotspot_purchases SET status = 'paid', paid_at = NOW() WHERE checkout_id = %s AND status = 'pending'",
+                    "UPDATE hotspot_purchases SET status = 'paid', paid_at = NOW() WHERE checkout_id = %s AND (status = 'pending' OR (status = 'failed' AND mpesa_code <> ''))",
                     (checkout_id,),
                 )
                 db.commit()

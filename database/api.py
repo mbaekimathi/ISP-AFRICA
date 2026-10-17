@@ -7,6 +7,7 @@ import os
 import secrets
 import socket
 import time
+import traceback
 import uuid
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -1539,6 +1540,7 @@ class Handler(BaseHTTPRequestHandler):
         except pymysql.MySQLError:
             self.send_json(status, {"error": "The account database could not be reached."})
         except Exception:
+            traceback.print_exc()
             self.send_json(status, {"error": "The account service could not complete that request."})
         finally:
             elapsed = int((time.perf_counter() - started) * 1000)
