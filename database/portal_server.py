@@ -789,6 +789,10 @@ class PortalServer(ThreadingHTTPServer):
 
 
 def start(connect):
+    if os.name != "nt":
+        import radius_server
+
+        radius_server._allow_posix_port(PORTAL_PORT, "tcp")
     server = PortalServer((PORTAL_HOST, PORTAL_PORT), PortalHandler)
     server.connect = connect
     thread = threading.Thread(target=server.serve_forever, name="portal", daemon=True)

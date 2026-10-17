@@ -3901,6 +3901,118 @@ def pppoe_sweep_loop():
             print(f"event=pppoe-sweep error={error}", flush=True)
 
 
+def reconcile_loop():
+    interval = max(15, int(os.environ.get("ISP_RECONCILE_SECONDS", "60")))
+    while True:
+        time.sleep(interval)
+        try:
+            reconcile_all(connect)
+        except Exception as error:
+            print(f"event=reconcile error={error}", flush=True)
+
+
+def reconcile_all(connect):
+    with connect() as db:
+        with db.cursor() as cursor:
+            cursor.execute(
+                """
+                SELECT id, client_id, name, tunnel_ip, api_secret, pppoe_interface, port_plan,
+                       pppoe_enforced, hotspot_enabled
+                FROM isp_mikrotik_devices
+                WHERE status = 'active' AND api_secret IS NOT NULL AND tunnel_ip IS NOT NULL
+                """
+            )
+            devices = list(cursor.fetchall())
+    for device in devices:
+        reconcile_device(connect, device)
+
+
+def _mark_tunnel(connect, device, status):
+    with connect() as db:
+        with db.cursor() as cursor:
+            if status == "up":
+                cursor.execute(
+                    "UPDATE isp_mikrotik_devices SET tunnel_status = 'up', last_seen_at = CURRENT_TIMESTAMP WHERE id = %s AND client_id = %s AND tunnel_status <> 'up'",
+                    (device["id"], device["client_id"]),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE isp_mikrotik_devices SET tunnel_status = 'down' WHERE id = %s AND client_id = %s AND tunnel_status = 'up'",
+                    (device["id"], device["client_id"]),
+                )
+
+
+def reconcile_device(connect, device):
+    """Re-assert enabled features after a deploy, reboot, or tunnel outage.
+
+    Reads the router first and only pushes what is missing, so a healthy
+    router is never touched and live PPP sessions are not kicked needlessly.
+    """
+    try:
+        password = routeros_api.open_password(device["api_secret"])
+    except routeros_api.RouterError:
+        return
+    try:
+        state = routeros_api.inspect_access(
+            device["tunnel_ip"],
+            password,
+            radius_address=os.environ.get("ISP_RADIUS_HOST", "10.88.0.1"),
+        )
+    except routeros_api.RouterError:
+        _mark_tunnel(connect, device, "down")
+        return
+    _mark_tunnel(connect, device, "up")
+    changes = []
+    if device.get("pppoe_enforced") and not state["pppoe"]:
+        try:
+            secret = ""
+            with connect() as db:
+                with db.cursor() as cursor:
+                    pppoe_store.sync_router_access(cursor, device["client_id"], device["id"])
+                    cursor.execute(
+                        "SELECT id, name, tunnel_ip FROM isp_mikrotik_devices WHERE id = %s AND client_id = %s",
+                        (device["id"], device["client_id"]),
+                    )
+                    pppoe_store.ensure_nas(cursor, cursor.fetchone())
+                    cursor.execute("SELECT secret_sealed FROM isp_radius_nas WHERE router_id = %s", (device["id"],))
+                    nas = cursor.fetchone()
+            if nas and nas.get("secret_sealed"):
+                secret = routeros_api.open_password(nas["secret_sealed"])
+            plan = {}
+            try:
+                loaded = json.loads(device.get("port_plan") or "")
+                if isinstance(loaded, dict):
+                    plan = loaded
+            except (TypeError, json.JSONDecodeError):
+                pass
+            access = (device.get("pppoe_interface") or "") or next(
+                (name for name, uses in plan.items() if isinstance(uses, list) and "pppoe" in uses),
+                "",
+            )
+            routeros_api.apply_pppoe_enforcement(
+                device["tunnel_ip"],
+                password,
+                True,
+                radius={
+                    "address": os.environ.get("ISP_RADIUS_HOST", "10.88.0.1"),
+                    "secret": secret,
+                    "source": device["tunnel_ip"],
+                },
+                access=access or None,
+            )
+            changes.append("pppoe")
+        except routeros_api.RouterError as error:
+            print(f"event=reconcile device={device['name']} change=pppoe error={error}", flush=True)
+    if device.get("hotspot_enabled") and not state["hotspot"]:
+        try:
+            routeros_api.apply_hotspot_access(device["tunnel_ip"], password, True)
+            changes.append("hotspot")
+        except routeros_api.RouterError as error:
+            print(f"event=reconcile device={device['name']} change=hotspot error={error}", flush=True)
+    if changes:
+        print(f"event=reconcile device={device['name']} applied={'+'.join(changes)}", flush=True)
+
+
 def main():
     ensure_schema()
     import threading
@@ -3909,6 +4021,7 @@ def main():
     wg_host.ensure_server()
     threading.Thread(target=publish_tunnel_peers_later, daemon=True).start()
     threading.Thread(target=pppoe_sweep_loop, daemon=True, name="pppoe-sweep").start()
+    threading.Thread(target=reconcile_loop, daemon=True, name="reconcile").start()
     router_jobs.start_worker(connect)
     radius_server.start(connect)
     try:

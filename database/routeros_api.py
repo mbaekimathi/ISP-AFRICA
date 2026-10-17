@@ -1640,28 +1640,34 @@ def _hotspot_profile(sock, reader, name, address, dns):
 
 
 def _hotspot_server(sock, reader, name, iface, pool, profile):
+    """Exactly one enabled hotspot server on the chosen interface.
+
+    A server with our name sitting on another interface (e.g. an uplink port)
+    is rebound here instead of merely re-enabled, and duplicates on the target
+    interface are parked so two servers never fight over the same clients.
+    """
     spots = talk(sock, reader, ["/ip/hotspot/print"])
-    matched = [row for row in spots if _row_id(row) and (row.get("interface") == iface or row.get("name") == name)]
-    if matched:
-        for row in matched:
-            talk(
-                sock,
-                reader,
-                ["/ip/hotspot/set", f"=.id={_row_id(row)}", f"=profile={profile}", f"=address-pool={pool}", "=disabled=no"],
-            )
+    candidates = [
+        row
+        for row in spots
+        if _row_id(row) and (row.get("name") == name or row.get("interface") == iface)
+    ]
+    keep = next((row for row in candidates if row.get("interface") == iface), None)
+    if keep is None:
+        keep = next((row for row in candidates if row.get("name") == name), None)
+    words = [
+        f"=interface={iface}",
+        f"=profile={profile}",
+        f"=address-pool={pool}",
+        "=disabled=no",
+    ]
+    if keep is None:
+        talk(sock, reader, ["/ip/hotspot/add", f"=name={name}", *words])
     else:
-        talk(
-            sock,
-            reader,
-            [
-                "/ip/hotspot/add",
-                f"=name={name}",
-                f"=interface={iface}",
-                f"=address-pool={pool}",
-                f"=profile={profile}",
-                "=disabled=no",
-            ],
-        )
+        talk(sock, reader, ["/ip/hotspot/set", f"=.id={_row_id(keep)}", *words])
+    for row in candidates:
+        if row is not keep and row.get("disabled") != "true":
+            talk(sock, reader, ["/ip/hotspot/set", f"=.id={_row_id(row)}", "=disabled=yes"])
 
 
 def _portal_group(sock, reader):
@@ -1770,16 +1776,19 @@ def _captive_portal(sock, reader):
     _portal_pages(sock, reader)
 
 
-def _hotspot_port(interfaces, spots):
+def _hotspot_port(interfaces, spots, avoid=None):
+    """Pick the client-side interface for the hotspot. WAN-listed ports and
+    dhcp-client ports are skipped so the hotspot can never capture the uplink."""
+    avoid = set(avoid or ())
     for row in spots:
         name = row.get("interface") or ""
-        if _safe_iface(name):
+        if _safe_iface(name) and name not in avoid:
             return name
     for row in interfaces:
-        if _physical_port(row) and "hotspot" in (row.get("comment") or "").lower():
+        if _physical_port(row) and "hotspot" in (row.get("comment") or "").lower() and (row.get("name") or "") not in avoid:
             return row.get("name") or ""
     for row in interfaces:
-        if _physical_port(row):
+        if _physical_port(row) and (row.get("name") or "") not in avoid:
             return row.get("name") or ""
     return ""
 
@@ -1789,6 +1798,10 @@ def _enable_hotspot(sock, reader, iface, spots):
     if _missing_name(pools, HOTSPOT_POOL):
         talk(sock, reader, ["/ip/pool/add", f"=name={HOTSPOT_POOL}", f"=ranges={HOTSPOT_RANGE}"])
     addresses = talk(sock, reader, ["/ip/address/print"])
+    for row in addresses:
+        if row.get("address") == HOTSPOT_ADDRESS and row.get("interface") != iface and _row_id(row):
+            talk(sock, reader, ["/ip/address/remove", f"=.id={_row_id(row)}"])
+            addresses.remove(row)
     if _missing_address(addresses, HOTSPOT_ADDRESS):
         talk(
             sock,
@@ -1801,11 +1814,22 @@ def _enable_hotspot(sock, reader, iface, spots):
     dhcp_name = f"{HOTSPOT_NAME}-dhcp"
     servers = talk(sock, reader, ["/ip/dhcp-server/print"])
     named = [row for row in servers if row.get("name") == dhcp_name and _row_id(row)]
-    if named:
-        for row in named:
+    on_iface = [row for row in servers if row.get("interface") == iface and _row_id(row)]
+    for row in named:
+        if row.get("interface") == iface:
             if row.get("disabled") == "true":
                 talk(sock, reader, ["/ip/dhcp-server/set", f"=.id={_row_id(row)}", "=disabled=no"])
-    elif not any(row.get("interface") == iface for row in servers):
+        elif on_iface:
+            if row.get("disabled") != "true":
+                talk(sock, reader, ["/ip/dhcp-server/set", f"=.id={_row_id(row)}", "=disabled=yes"])
+        else:
+            talk(
+                sock,
+                reader,
+                ["/ip/dhcp-server/set", f"=.id={_row_id(row)}", f"=interface={iface}", "=disabled=no"],
+            )
+            on_iface.append(row)
+    if not on_iface:
         talk(
             sock,
             reader,
@@ -1870,6 +1894,23 @@ def _disable_hotspot(sock, reader, iface):
         )
 
 
+def _device_mode_gate(sock, reader):
+    """RouterOS 7.6+ can forbid features like hotspot and fetch in device-mode;
+    lifting the flag needs a physical confirmation on the device. Request the
+    change, then report which features are still blocked."""
+    try:
+        rows = talk(sock, reader, ["/system/device-mode/print"])
+    except RouterError:
+        return []
+    blocked = [name for name in ("hotspot", "fetch") if rows and rows[0].get(name) == "no"]
+    for name in blocked:
+        try:
+            talk(sock, reader, ["/system/device-mode/update", f"={name}=yes"])
+        except RouterError:
+            pass
+    return blocked
+
+
 def apply_hotspot_access(host, password, enabled, timeout=12, port=API_PORT, opener=None):
     """Turn hotspot access on or off with direct API writes. This does not create a system script."""
     if not isinstance(enabled, bool):
@@ -1887,7 +1928,8 @@ def apply_hotspot_access(host, password, enabled, timeout=12, port=API_PORT, ope
             raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
         interfaces = talk(sock, reader, ["/interface/print"])
         spots = talk(sock, reader, ["/ip/hotspot/print"])
-        iface = _hotspot_port(interfaces, spots)
+        avoid, lan = _wan_ports(sock, reader)
+        iface = _hotspot_port(interfaces, spots, avoid=avoid)
         if not _safe_iface(iface):
             raise RouterError("This router has no port for the hotspot, so nothing was changed.")
         try:
@@ -1896,12 +1938,67 @@ def apply_hotspot_access(host, password, enabled, timeout=12, port=API_PORT, ope
             bridges = []
         iface = _bridge_target(bridges, iface)
         if enabled:
+            blocked = _device_mode_gate(sock, reader)
+            if "hotspot" in blocked:
+                raise RouterError(
+                    "RouterOS device-mode does not allow hotspot. The change was queued — "
+                    "press the router's reset button (or power-cycle it) to confirm, then push again."
+                )
             _enable_hotspot(sock, reader, iface, spots)
         else:
             _disable_hotspot(sock, reader, iface)
+        if enabled and "fetch" in blocked:
+            return {
+                "applied": True,
+                "message": "Updated on the router. Press the reset button or power-cycle it once "
+                           "to finish enabling 'fetch' — until then the pay pages cannot be downloaded.",
+            }
     finally:
         sock.close()
     return {"applied": True, "message": "Updated on the router."}
+
+
+def inspect_access(host, password, radius_address="", timeout=4, port=API_PORT, opener=None):
+    """Read-only check used by the reconcile loop: are PPPoE enforcement and
+    the hotspot actually live on the router right now?"""
+    connect = opener or socket.create_connection
+    try:
+        sock = connect((host, port), timeout)
+    except OSError as error:
+        raise RouterError("The management tunnel did not answer.") from error
+    try:
+        sock.settimeout(timeout)
+        reader = ByteReader(sock)
+        login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
+        if any(row.get("ret") for row in login):
+            raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
+        servers = talk(sock, reader, ["/interface/pppoe-server/server/print"])
+        filters = talk(sock, reader, ["/ip/firewall/filter/print"])
+        spots = talk(sock, reader, ["/ip/hotspot/print"])
+        try:
+            radius_rows = talk(sock, reader, ["/radius/print"])
+        except RouterError:
+            radius_rows = []
+        avoid, _lan = _wan_ports(sock, reader)
+    finally:
+        sock.close()
+    comments = {row.get("comment") for row in filters}
+    pppoe_server = any(
+        row.get("service-name") == PPPOE_SERVICE and row.get("disabled") != "true" and _row_id(row)
+        for row in servers
+    )
+    radius_ok = not radius_address or any(
+        row.get("address") == radius_address and "ppp" in (row.get("service") or "").split(",")
+        for row in radius_rows
+    )
+    pppoe = pppoe_server and PPPOE_DROP_PPP in comments and PPPOE_ALLOW in comments and radius_ok
+    hotspot = any(
+        _row_id(row)
+        and row.get("disabled") != "true"
+        and (row.get("interface") or "") not in avoid
+        for row in spots
+    )
+    return {"pppoe": pppoe, "hotspot": hotspot}
 
 
 def authorize_hotspot_client(host, password, ip, mac, username, secret, profile, rate_limit, shared_users, uptime, timeout=12, port=API_PORT, opener=None):

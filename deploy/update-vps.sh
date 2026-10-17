@@ -58,6 +58,12 @@ echo "==> Restarting isp-centric"
 systemctl restart isp-centric
 sleep 3
 
+# RADIUS/portal traffic only arrives on the tunnel interface — keep ufw from
+# dropping it (api.py also adds this rule once the tunnel is up).
+if command -v ufw >/dev/null 2>&1; then
+    ufw allow in on isp-centric >/dev/null 2>&1 || true
+fi
+
 if ! systemctl is-active --quiet isp-centric; then
     echo "!! service failed to start — last 30 log lines:" >&2
     journalctl -u isp-centric -n 30 --no-pager >&2

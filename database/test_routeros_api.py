@@ -253,6 +253,9 @@ class RouterOsApiTests(unittest.TestCase):
                 done,
                 done,
                 done,
+                done,
+                done,
+                done,
             ]
         )
         report = routeros_api.apply_hotspot_access("10.88.0.5", "secret-password", False, opener=lambda _address, _timeout: sock)

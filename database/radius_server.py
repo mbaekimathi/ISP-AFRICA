@@ -9,6 +9,7 @@ router address that sends the packet.
 
 import hashlib
 import hmac
+import os
 import secrets
 import socket
 import struct
@@ -665,9 +666,35 @@ def _listener(port, handler, connect, stop):
     sock.close()
 
 
+def _allow_posix_port(port, proto="udp"):
+    """Linux counterpart of _allow_port: ufw's default deny would silently drop
+    tunnel traffic. Scopes the rule to the tunnel interface when it exists."""
+    import shutil
+    import subprocess
+
+    if not shutil.which("ufw"):
+        return
+    import wg_host
+
+    if wg_host.tunnel_running():
+        cmd = [
+            "ufw", "allow", "in", "on", wg_host.TUNNEL_NAME,
+            "to", "any", "port", str(port), "proto", proto,
+        ]
+    else:
+        cmd = ["ufw", "allow", f"{port}/{proto}"]
+    try:
+        subprocess.run(cmd, capture_output=True, timeout=15, check=False)
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+
+
 def _allow_port(port):
     import subprocess
 
+    if os.name != "nt":
+        _allow_posix_port(port)
+        return
     try:
         subprocess.run(
             [

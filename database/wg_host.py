@@ -244,6 +244,14 @@ def _allow_posix_port():
                 capture_output=True,
                 timeout=15,
             )
+            # Everything the routers send back (RADIUS, portal, API replies)
+            # arrives on this interface — ufw's default deny would drop it.
+            subprocess.run(
+                ["ufw", "allow", "in", "on", TUNNEL_NAME],
+                check=False,
+                capture_output=True,
+                timeout=15,
+            )
         except (OSError, subprocess.TimeoutExpired):
             pass
 

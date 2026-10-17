@@ -149,6 +149,9 @@ Firewall (also allow the same ports in the provider's security group):
 
 ```bash
 sudo ufw allow OpenSSH && sudo ufw allow 80,443/tcp && sudo ufw allow 51820/udp && sudo ufw enable
+sudo ufw allow in on isp-centric   # RADIUS + portal arrive on the tunnel interface;
+                                   # without this ufw silently drops them (api.py
+                                   # adds this rule itself once the tunnel is up)
 ```
 
 Public HTTPS via nginx (`deploy/nginx-site.conf` → `/etc/nginx/sites-available/`):
@@ -182,6 +185,7 @@ restarts the service, and prints the health check.
 
 | Symptom | Cause / fix |
 |---|---|
+| Router RADIUS timeouts; tcpdump shows requests arriving but no replies | ufw drops tunnel traffic. `sudo ufw allow in on isp-centric` (current code adds this automatically). |
 | `event=radius … bind-failed` | Another `api.py` (or FreeRADIUS) holds UDP 1812/1813. `netstat -ano | findstr 1812` → kill the PID. Health shows `radius: bind-failed`. |
 | `event=wireguard status=waiting-for-admin` | The UAC prompt was denied. Run `api.py` from an elevated shell once. |
 | `status=not-installed` | Install WireGuard for Windows on the XPS — or `apt install wireguard` on Linux. |
