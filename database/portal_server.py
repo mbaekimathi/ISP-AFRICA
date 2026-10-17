@@ -32,7 +32,7 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime
-from decimal import Decimal, InvalidOperation, ROUND_CEILING, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -438,9 +438,9 @@ function refresh(){{
  const p=PKG[sel()];
  const amt=document.getElementById('amount');
  const c=Math.round(parseFloat(amt.value||'0')*100)||0;
- const d=p?Math.floor(c*CYCLE/p):0;
+ const d=p&&c>0?Math.max(1,Math.floor(c*CYCLE/p)):0;
  const dd=document.getElementById('days');
- if(dd)dd.textContent=p?(d>0?'Buys '+d+' day'+(d===1?'':'s')+' of internet.':'Too little — buys less than a day.'):'';
+ if(dd)dd.textContent=p?(d>0?'Buys '+d+' day'+(d===1?'':'s')+' of internet.':''):'';
  const b=document.getElementById('paybtn');
  if(b&&!b.disabled)b.textContent=c>0?'Pay '+money(c)+' with M-Pesa':'Pay with M-Pesa';
 }}
@@ -1370,14 +1370,6 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self._send(b'{"error":"Enter the amount to recharge."}', 400, "application/json")
         if amount <= 0 or amount > Decimal("99999999.99"):
             return self._send(b'{"error":"Enter the amount to recharge."}', 400, "application/json")
-        period = int(row["cycle_days"] or 30)
-        if int(amount * period / price) < 1:
-            minimum = (price / period).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
-            return self._send(
-                json.dumps({"error": f"That amount buys less than a day — top up at least KSh {ksh(minimum)}."}).encode(),
-                400,
-                "application/json",
-            )
         if not settings or not settings["passkey"]:
             return self._send(b'{"error":"M-Pesa prompts are not configured yet."}', 503, "application/json")
         amount = whole_shillings(amount)

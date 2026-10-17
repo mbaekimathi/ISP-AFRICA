@@ -1732,9 +1732,7 @@ def renew(cursor, client_id, subscriber_id, payload):
     period = int(row["cycle_days"] or 30)
     if price <= 0 or period <= 0:
         raise PppoeError(400, "This subscription has no package price to bill against.")
-    days = int(amount * period / price)
-    if days < 1:
-        raise PppoeError(400, "That amount buys less than a day of service on this package.")
+    days = max(1, int(-(-amount * period // price)))
     anchor = as_day(row["expiry_date"])
     today = date.today()
     if anchor is None or anchor < today:
