@@ -711,7 +711,7 @@ def list_subscribers(cursor, client_id, query, service="pppoe"):
     if package:
         where.append("s.package_id = %s")
         args.append(package)
-    router_states = {"surfing", "not_surfing", "expired", "expired_online", "disconnecting", "disconnected", "pending_activation"}
+    router_states = {"surfing", "not_surfing", "expired", "expired_online", "suspended_online", "disconnecting", "disconnected", "pending_activation"}
     if status in router_states or status in {"online", "offline", "unknown"}:
         pass
     elif status:

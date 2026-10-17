@@ -17,7 +17,7 @@ type Subscriber = {
   packageName: string;
   status: string;
   connection: "online" | "offline" | "unknown";
-  routerStatus: "surfing" | "not_surfing" | "expired" | "expired_online" | "disconnecting" | "disconnected" | "pending_activation";
+  routerStatus: "surfing" | "not_surfing" | "expired" | "expired_online" | "suspended_online" | "disconnecting" | "disconnected" | "pending_activation";
   billingStatus: string;
   expiry: string | null;
 };
@@ -34,6 +34,7 @@ const routerStatusLabel = {
   not_surfing: "Not surfing",
   expired: "Expired",
   expired_online: "Expired",
+  suspended_online: "Suspended",
   disconnecting: "Disconnecting",
   disconnected: "Disconnected",
   pending_activation: "Pending activation",
@@ -44,6 +45,7 @@ const routerStatusTone = {
   not_surfing: "paused",
   expired: "critical",
   expired_online: "due",
+  suspended_online: "due",
   disconnecting: "due",
   disconnected: "paused",
   pending_activation: "neutral",
@@ -171,6 +173,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
             <option value="surfing">Surfing</option>
             <option value="not_surfing">Not surfing</option>
             <option value="expired">Expired</option>
+            <option value="suspended">Suspended</option>
             <option value="disconnecting">Disconnecting</option>
             <option value="disconnected">Disconnected</option>
             <option value="pending_activation">Pending activation</option>
@@ -245,7 +248,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
                         {client.status === "suspended" ? "Continue" : "Suspend"}
                       </SecondaryButton>
                     )}
-                    {client.routerStatus === "surfing" || client.routerStatus === "expired_online" ? (
+                    {client.routerStatus === "surfing" || client.routerStatus === "expired_online" || client.routerStatus === "suspended_online" ? (
                       <SecondaryButton type="button" disabled={busy === client.id} onClick={() => void act(client.id, "disconnect")}>Disconnect</SecondaryButton>
                     ) : null}
                   </div>

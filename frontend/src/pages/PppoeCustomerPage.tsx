@@ -489,8 +489,8 @@ export function PppoeCustomerPage() {
   const home = (path: string) => (user ? clientPage(user, path) : path);
   const status = labelFor(subscriber.status);
   const billing = billingLabelFor(subscriber.billingStatus);
-  const connectionDot = subscriber.connection === "online" ? "bg-success" : subscriber.connection === "offline" ? "bg-destructive" : "bg-warning";
   const suspended = subscriber.status === "suspended";
+  const connectionDot = subscriber.connection === "online" ? (suspended ? "bg-warning" : "bg-success") : subscriber.connection === "offline" ? "bg-destructive" : "bg-warning";
   const pendingApproval = subscriber.status === "pending_activation";
   const ended = subscriber.status === "disconnected" || subscriber.status === "cancelled";
   const sessionOpen = subscriber.connection === "online";
@@ -509,9 +509,15 @@ export function PppoeCustomerPage() {
   let statusHint: string;
   let statusTone = "";
   if (subscriber.connection === "online") {
-    statusLabel = "Online";
-    statusHint = `Online for ${subscriber.live.uptime || elapsedLabel(surfSinceRef.current ?? Date.now())}`;
-    statusTone = "text-success";
+    if (suspended) {
+      statusLabel = "Paused";
+      statusHint = `Restricted session for ${subscriber.live.uptime || elapsedLabel(surfSinceRef.current ?? Date.now())}`;
+      statusTone = "text-warning";
+    } else {
+      statusLabel = "Online";
+      statusHint = `Online for ${subscriber.live.uptime || elapsedLabel(surfSinceRef.current ?? Date.now())}`;
+      statusTone = "text-success";
+    }
   } else if (ended) {
     statusLabel = "Disconnected";
     statusHint = seenFor ? `Disconnected for ${seenFor}` : "Disconnected";
