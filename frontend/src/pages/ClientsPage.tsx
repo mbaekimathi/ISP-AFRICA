@@ -125,6 +125,29 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
     }
   }
 
+  async function hotspotRecharge(id: string) {
+    if (!window.confirm("Recharge this guest — mint a voucher for every device on the router and connect it?")) return;
+    setBusy(id);
+    setMessage("");
+    try {
+      const result = await apiRequest<{ result: { connected: number; vouchers: { code: string; status: string }[] } }>(
+        `/api/hotspot/clients/${id}/recharge`,
+        { method: "POST", body: JSON.stringify({ vouchers: 1, periods: 1 }) },
+      );
+      const spare = result.result.vouchers.filter((voucher) => voucher.status === "issued").map((voucher) => voucher.code);
+      setMessage(
+        result.result.connected
+          ? `${result.result.connected} device(s) are online now.${spare.length ? ` Unused voucher: ${spare.join(", ")}` : ""}`
+          : `No registered device is on the router. Voucher issued: ${spare.join(", ") || "—"}.`,
+      );
+      load();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "That action could not be completed.");
+    } finally {
+      setBusy("");
+    }
+  }
+
   const home = (path: string) => (user ? clientPage(user, path) : path);
 
   return (
@@ -242,6 +265,11 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
                 <td className="px-3 py-3">
                   <div className="flex flex-wrap gap-2">
                     {kind === "hotspot" ? <SecondaryButton to={home(`/hotspot/${client.id}`)}>View</SecondaryButton> : null}
+                    {kind === "hotspot" ? (
+                      <SecondaryButton type="button" disabled={busy === client.id} onClick={() => void hotspotRecharge(client.id)}>
+                        Recharge
+                      </SecondaryButton>
+                    ) : null}
                     {kind === "pppoe" ? <SecondaryButton to={home(`/pppoe/${client.id}`)}>View</SecondaryButton> : null}
                     {kind === "pppoe" ? <SecondaryButton to={home(`/pppoe/${client.id}?edit=1`)}>Edit</SecondaryButton> : null}
                     {kind === "pppoe" ? (client.status === "pending_activation" ? (
