@@ -1,0 +1,149 @@
+import hashlib
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import radius_server
+
+SECRET = "testing-secret"
+USERNAME = "0722123456"
+PASSWORD = "Abcdefg2"
+REQUEST_AUTH = bytes(range(16))
+
+
+def encode_pap(secret, request_auth, password):
+    plain = password.encode()
+    plain += b"\x00" * (16 - len(plain) % 16)
+    out = b""
+    previous = request_auth
+    for offset in range(0, len(plain), 16):
+        block = plain[offset: offset + 16]
+        digest = hashlib.md5(secret.encode() + previous).digest()
+        cipher = bytes(left ^ right for left, right in zip(digest, block))
+        out += cipher
+        previous = cipher
+    return out
+
+
+def chap_packet(password, challenge):
+    ident = 7
+    digest = hashlib.md5(bytes([ident]) + password.encode() + challenge).digest()
+    return {
+        "id": 1,
+        "auth": REQUEST_AUTH,
+        "attrs": {1: [USERNAME.encode()], 3: [bytes([ident]) + digest], 60: [challenge]},
+        "vendor": {},
+    }
+
+
+def pap_packet(password):
+    return {
+        "id": 1,
+        "auth": REQUEST_AUTH,
+        "attrs": {1: [USERNAME.encode()], 2: [encode_pap(SECRET, REQUEST_AUTH, password)]},
+        "vendor": {},
+    }
+
+
+def mschap1_packet(password, challenge):
+    nt_response = radius_server.challenge_response(challenge[:8], radius_server.nt_hash(password))
+    response = bytes([5, 1]) + bytes(24) + nt_response
+    return {
+        "id": 1,
+        "auth": REQUEST_AUTH,
+        "attrs": {1: [USERNAME.encode()]},
+        "vendor": {radius_server.VENDOR_MICROSOFT: [(radius_server.MS_CHAP_CHALLENGE, challenge), (radius_server.MS_CHAP_RESPONSE, response)]},
+    }
+
+
+class FakeCursor:
+    """Answers the four queries authenticate() runs. update_closed flips open_count to zero."""
+
+    def __init__(self, open_count=0, cleartext=PASSWORD):
+        self.open_count = open_count
+        self.cleartext = cleartext
+        self.updated = False
+
+    def execute(self, sql, args=None):
+        normalized = " ".join(sql.split())
+        if normalized.startswith("UPDATE radacct"):
+            self.open_count = 0
+            self.updated = True
+        self.last = normalized
+
+    def fetchone(self):
+        sql = getattr(self, "last", "")
+        if sql.startswith("SELECT secret FROM nas"):
+            return {"secret": SECRET}
+        if "open_count" in sql:
+            return {"open_count": self.open_count}
+        return None
+
+    def fetchall(self):
+        sql = getattr(self, "last", "")
+        if sql.startswith("SELECT username, attribute, value FROM radcheck"):
+            if not self.cleartext:
+                return []
+            return [
+                {"username": USERNAME, "attribute": "Cleartext-Password", "value": self.cleartext},
+                {"username": USERNAME, "attribute": "Simultaneous-Use", "value": "1"},
+            ]
+        return []
+
+
+class VerifyPasswordTests(unittest.TestCase):
+    def test_pap_accepts_and_rejects(self):
+        ok, _ = radius_server.verify_password(pap_packet(PASSWORD), SECRET, PASSWORD)
+        self.assertTrue(ok)
+        ok, _ = radius_server.verify_password(pap_packet("wrongpw99"), SECRET, PASSWORD)
+        self.assertFalse(ok)
+
+    def test_chap_accepts_and_rejects(self):
+        challenge = b"chapchal"
+        ok, _ = radius_server.verify_password(chap_packet(PASSWORD, challenge), SECRET, PASSWORD)
+        self.assertTrue(ok)
+        ok, _ = radius_server.verify_password(chap_packet("wrongpw99", challenge), SECRET, PASSWORD)
+        self.assertFalse(ok)
+
+    def test_mschap1_reads_the_nt_response_field(self):
+        challenge = bytes(range(16, 32))
+        ok, _ = radius_server.verify_password(mschap1_packet(PASSWORD, challenge), SECRET, PASSWORD)
+        self.assertTrue(ok)
+        ok, _ = radius_server.verify_password(mschap1_packet("wrongpw99", challenge), SECRET, PASSWORD)
+        self.assertFalse(ok)
+
+
+class AuthenticateTests(unittest.TestCase):
+    def test_valid_login_is_accepted(self):
+        response = radius_server.authenticate(FakeCursor(), pap_packet(PASSWORD), "10.88.0.2")
+        self.assertEqual(response[0], radius_server.ACCESS_ACCEPT)
+
+    def test_wrong_password_is_rejected(self):
+        response = radius_server.authenticate(FakeCursor(), pap_packet("wrongpw99"), "10.88.0.2")
+        self.assertEqual(response[0], radius_server.ACCESS_REJECT)
+
+    def test_unknown_username_is_rejected(self):
+        response = radius_server.authenticate(FakeCursor(cleartext=""), pap_packet(PASSWORD), "10.88.0.2")
+        self.assertEqual(response[0], radius_server.ACCESS_REJECT)
+
+    def test_stale_open_session_is_closed_before_the_simultaneous_check(self):
+        cursor = FakeCursor(open_count=1)
+        response = radius_server.authenticate(cursor, pap_packet(PASSWORD), "10.88.0.2")
+        self.assertTrue(cursor.updated)
+        self.assertEqual(response[0], radius_server.ACCESS_ACCEPT)
+
+    def test_unknown_nas_is_dropped_silently(self):
+        class EmptyNas(FakeCursor):
+            def fetchone(self):
+                sql = getattr(self, "last", "")
+                if sql.startswith("SELECT secret FROM nas"):
+                    return None
+                return super().fetchone()
+
+        self.assertIsNone(radius_server.authenticate(EmptyNas(), pap_packet(PASSWORD), "203.0.113.9"))
+
+
+if __name__ == "__main__":
+    unittest.main()

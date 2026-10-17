@@ -160,7 +160,10 @@ def _des_key(key7):
 
 
 def _des_encrypt(key7, block):
-    from cryptography.hazmat.decrepit.ciphers.algorithms import TripleDES
+    try:
+        from cryptography.hazmat.decrepit.ciphers.algorithms import TripleDES
+    except ImportError:
+        from cryptography.hazmat.primitives.ciphers.algorithms import TripleDES
     from cryptography.hazmat.primitives.ciphers import Cipher, modes
 
     key8 = _des_key(key7)
@@ -304,9 +307,9 @@ def verify_password(packet, secret, cleartext):
         success = bytes([ident_byte]) + b"S=" + proof.encode()
         return True, encode_vsa(VENDOR_MICROSOFT, MS_CHAP2_SUCCESS, success)
     ms_chap1 = vendor_attr(packet["vendor"], VENDOR_MICROSOFT, MS_CHAP_RESPONSE)
-    if ms_chap1 is not None and len(ms_chap1) >= 49:
+    if ms_chap1 is not None and len(ms_chap1) >= 50:
         server_challenge = vendor_attr(packet["vendor"], VENDOR_MICROSOFT, MS_CHAP_CHALLENGE) or packet["auth"]
-        nt_response = ms_chap1[24:48]
+        nt_response = ms_chap1[26:50]
         expected = challenge_response(server_challenge[:8], nt_hash(cleartext))
         return expected == nt_response, b""
     chap = attrs.get(3)
@@ -359,6 +362,9 @@ def reply_attributes(cursor, username, extra):
     return encoded + extra
 
 
+STALE_SESSION_MINUTES = 15
+
+
 def open_sessions(cursor, usernames):
     names = list(usernames)
     marks = ", ".join(["%s"] * len(names))
@@ -369,10 +375,29 @@ def open_sessions(cursor, usernames):
     return int(cursor.fetchone()["open_count"])
 
 
+def close_stale_sessions(cursor, usernames):
+    """Sessions older than three interim-update gaps died without a Stop; close them so Simultaneous-Use cannot lock an account out."""
+    names = list(usernames)
+    marks = ", ".join(["%s"] * len(names))
+    cursor.execute(
+        f"""
+        UPDATE radacct
+        SET acctstoptime = COALESCE(acctupdatetime, acctstarttime),
+            acctterminatecause = 'lost-service'
+        WHERE username IN ({marks})
+          AND acctstoptime IS NULL
+          AND COALESCE(acctupdatetime, acctstarttime) < DATE_SUB(NOW(), INTERVAL %s MINUTE)
+        """,
+        [*names, STALE_SESSION_MINUTES],
+    )
+
+
 def authenticate(cursor, packet, source_ip):
     secret = nas_secret(cursor, source_ip, packet)
     if not secret:
-        print(f"event=radius-auth result=no-nas source={source_ip}", flush=True)
+        nas_ip = packet["attrs"].get(4)
+        nas_hint = socket.inet_ntoa(nas_ip[0]) if nas_ip and len(nas_ip[0]) == 4 else ""
+        print(f"event=radius-auth result=no-nas source={source_ip} nas-ip={nas_hint} nas-id={attr_text(packet['attrs'], 32)}", flush=True)
         return None
     username = attr_text(packet["attrs"], 1)
     if not username:
@@ -389,9 +414,15 @@ def authenticate(cursor, packet, source_ip):
     if checks.get("Auth-Type") == "Reject" or not cleartext:
         return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", 80 in packet["attrs"])
     limit = int(checks.get("Simultaneous-Use") or 1)
+    close_stale_sessions(cursor, set(candidates) | {stored})
     if open_sessions(cursor, set(candidates) | {stored}) >= limit:
+        print(f"event=radius-auth result=busy user={username} source={source_ip}", flush=True)
         return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", 80 in packet["attrs"])
-    ok, extra = verify_password(packet, secret, cleartext)
+    try:
+        ok, extra = verify_password(packet, secret, cleartext)
+    except Exception as error:
+        print(f"event=radius-auth result=error user={username} source={source_ip} error={error}", flush=True)
+        return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", 80 in packet["attrs"])
     if not ok:
         print(f"event=radius-auth result=reject user={username} source={source_ip}", flush=True)
         return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", 80 in packet["attrs"])

@@ -301,6 +301,7 @@ def write_radius(cursor, username, plan):
 
 
 def ensure_nas(cursor, router):
+    nasname = router.get("tunnel_ip") or router["id"]
     cursor.execute("SELECT secret_sealed FROM isp_radius_nas WHERE router_id = %s", (router["id"],))
     existing = cursor.fetchone()
     if existing:
@@ -309,13 +310,17 @@ def ensure_nas(cursor, router):
         except routeros_api.RouterError:
             return None
         cursor.execute(
-            "UPDATE nas SET secret = %s WHERE nasname = %s AND description = %s",
-            (known, router.get("tunnel_ip") or router["id"], router["id"]),
+            """
+            INSERT INTO nas (nasname, shortname, type, secret, description)
+            VALUES (%s, %s, 'mikrotik', %s, %s)
+            ON DUPLICATE KEY UPDATE secret = VALUES(secret), description = VALUES(description)
+            """,
+            (nasname, str(router.get("name") or "")[:32], known, router["id"]),
         )
+        cursor.execute("UPDATE isp_radius_nas SET nasname = %s WHERE router_id = %s", (nasname, router["id"]))
         return None
     secret = secrets.token_urlsafe(18)
     sealed = routeros_api.seal_password(secret)
-    nasname = router.get("tunnel_ip") or router["id"]
     cursor.execute(
         "INSERT INTO isp_radius_nas (router_id, nasname, secret_sealed) VALUES (%s, %s, %s)",
         (router["id"], nasname, sealed),

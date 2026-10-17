@@ -503,8 +503,8 @@ export function PppoeCustomerPage() {
         Back to PPPoE clients
       </SecondaryButton>
 
-      <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
-        <div className="bg-gradient-to-r from-primary/10 via-primary/5 to-transparent px-5 py-5 sm:px-6">
+      <section className="mt-4 rounded-2xl border border-border bg-surface shadow-card">
+        <div className={`bg-gradient-to-r from-primary/10 via-primary/5 to-transparent px-5 py-5 sm:px-6 ${profileOpen || editing ? "rounded-t-2xl" : "rounded-2xl"}`}>
           <div className="flex flex-wrap items-start justify-between gap-4">
             <button
               type="button"
@@ -596,7 +596,7 @@ export function PppoeCustomerPage() {
         </div>
 
         {profileOpen || editing ? (
-          <div className="border-t border-border px-5 py-5 sm:px-6">
+          <div className="rounded-b-2xl border-t border-border px-5 py-5 sm:px-6">
             {editing ? (
               <form className="grid gap-4" onSubmit={(event) => void saveEdit(event)}>
                 <div className="grid gap-3 sm:grid-cols-2">
