@@ -468,7 +468,7 @@ function fail(reason){{
 function retry(){{saveState();location.reload();}}
 function thanks(){{
  const code=voucher;cid=null;
- location.href='/thank-you'+(code?'?code='+encodeURIComponent(code):'');
+ location.href=code?'/thank-you?code='+encodeURIComponent(code):'/thank-you';
 }}
 async function poll(){{
  if(!cid)return;

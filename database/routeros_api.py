@@ -1956,6 +1956,47 @@ def _hotspot_port(interfaces, spots, avoid=None):
     return ""
 
 
+def _harden_hotspot_gate(sock, reader):
+    """Remove every path onto the internet that skips payment.
+
+    None of these rows are created by the portal, so they survive every config
+    push and quietly let unpaid devices surf.
+    """
+    for profile in talk(sock, reader, ["/ip/hotspot/profile/print"]):
+        methods = [m for m in (profile.get("login-by") or "").split(",") if m]
+        kept = [m for m in methods if m not in {"trial", "mac", "mac-auth"}]
+        if kept != methods and _row_id(profile):
+            talk(
+                sock,
+                reader,
+                ["/ip/hotspot/profile/set", f"=.id={_row_id(profile)}", f"=login-by={','.join(kept) or 'http-pap'}"],
+            )
+    # The RouterOS default 'admin' hotspot user ships with an empty password —
+    # hitting /login?username=admin&password= logs anyone in for free.
+    # Any other user row with an empty password is just as open.
+    for user in talk(sock, reader, ["/ip/hotspot/user/print"]):
+        if (not user.get("password")) and _row_id(user):
+            talk(sock, reader, ["/ip/hotspot/user/remove", f"=.id={_row_id(user)}"])
+    # A bypassed ip-binding puts the client straight online without logging in.
+    for binding in talk(sock, reader, ["/ip/hotspot/ip-binding/print"]):
+        if (binding.get("type") or "regular") == "bypassed" and _row_id(binding):
+            talk(sock, reader, ["/ip/hotspot/ip-binding/remove", f"=.id={_row_id(binding)}"])
+    # A walled-garden entry that accepts the whole web is a free-for-all.
+    for row in talk(sock, reader, ["/ip/hotspot/walled-garden/ip/print"]):
+        dst = row.get("dst-address") or ""
+        if row.get("action") == "accept" and dst in {"", "0.0.0.0/0", "::/0"} and _row_id(row):
+            talk(sock, reader, ["/ip/hotspot/walled-garden/ip/remove", f"=.id={_row_id(row)}"])
+    for row in talk(sock, reader, ["/ip/hotspot/walled-garden/print"]):
+        opens_web = (
+            row.get("action") == "accept"
+            and not row.get("dst-host")
+            and not row.get("dst-address")
+            and str(row.get("dst-port") or "") in {"80", "443", "8080"}
+        )
+        if opens_web and _row_id(row):
+            talk(sock, reader, ["/ip/hotspot/walled-garden/remove", f"=.id={_row_id(row)}"])
+
+
 def _enable_hotspot(sock, reader, iface, spots):
     pools = talk(sock, reader, ["/ip/pool/print"])
     if _missing_name(pools, HOTSPOT_POOL):
@@ -2019,6 +2060,7 @@ def _enable_hotspot(sock, reader, iface, spots):
     for row in talk(sock, reader, ["/ip/firewall/filter/print"]):
         if row.get("comment") in {HOTSPOT_BLOCK, HOTSPOT_BLOCK_INPUT} and _row_id(row):
             talk(sock, reader, ["/ip/firewall/filter/remove", f"=.id={_row_id(row)}"])
+    _harden_hotspot_gate(sock, reader)
     _captive_portal(sock, reader)
 
 
@@ -2188,6 +2230,10 @@ def authorize_hotspot_client(host, password, ip, mac, username, secret, profile,
         login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
         if any(row.get("ret") for row in login):
             raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
+        try:
+            _harden_hotspot_gate(sock, reader)
+        except RouterError:
+            pass
         profile_words = []
         if rate_limit:
             profile_words.append(f"=rate-limit={rate_limit}")
