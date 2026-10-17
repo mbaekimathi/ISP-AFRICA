@@ -46,6 +46,11 @@ DARAJA_TIMEOUT = 8
 HOTSPOT_PENDING = {}
 HOTSPOT_LOCK = threading.Lock()
 VALIDITY_SECONDS = {"hours": 3600, "days": 86400, "weeks": 604800, "months": 2592000}
+ANDROID_PROBES = {"/generate_204", "/generate204", "/gen_204"}
+PROBE_GRACE = int(os.environ.get("ISP_PROBE_GRACE") or 180)
+PROBE_RESTART = int(os.environ.get("ISP_PROBE_RESTART") or 900)
+PROBE_SEEN = {}
+PROBE_LOCK = threading.Lock()
 
 PAGE_CSS = """
 *{box-sizing:border-box;margin:0;padding:0}
@@ -1290,6 +1295,23 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path in ANDROID_PROBES:
+            # Android's connectivity check expects a bare 204. Serving the
+            # portal page first makes the phone flag a captive portal and
+            # raise the "Sign in" popup; after PROBE_GRACE we answer 204 so
+            # the network validates and the "limited connection" label clears.
+            # The window reopens once a device goes quiet for PROBE_RESTART.
+            now = time.time()
+            ip = self.client_address[0]
+            with PROBE_LOCK:
+                first, last = PROBE_SEEN.get(ip, (now, 0.0))
+                if now - last > PROBE_RESTART:
+                    first = now
+                PROBE_SEEN[ip] = (first, now)
+                if len(PROBE_SEEN) > 8192:
+                    PROBE_SEEN.clear()
+            if now - first >= PROBE_GRACE:
+                return self._send(b"", 204)
         if path == "/pay/offers":
             return self.pay_offers()
         if path == "/pay/status":
