@@ -1344,9 +1344,12 @@ def require_reviewer(cursor, employee_token):
 class ApiServer(ThreadingHTTPServer):
     """Refuses to share its port: without SO_EXCLUSIVEADDRUSE a second
     api.py instance can bind the same TCP port on Windows and silently
-    split the service (one owns HTTP, the other owns RADIUS)."""
+    split the service (one owns HTTP, the other owns RADIUS). On POSIX,
+    SO_REUSEADDR is safe — it only permits rebinding over TIME_WAIT
+    connections, never a second live listener — so restarts under load
+    do not hit EADDRINUSE."""
 
-    allow_reuse_address = False
+    allow_reuse_address = os.name != "nt"
 
     def server_bind(self):
         if os.name == "nt":

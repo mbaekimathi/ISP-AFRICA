@@ -778,9 +778,11 @@ class PortalHandler(BaseHTTPRequestHandler):
 
 class PortalServer(ThreadingHTTPServer):
     """Refuses to share its port on Windows so a duplicate api.py instance
-    fails loudly instead of splitting HTTP and RADIUS across processes."""
+    fails loudly instead of splitting HTTP and RADIUS across processes. On
+    POSIX, SO_REUSEADDR only permits rebinding over TIME_WAIT connections,
+    never a second live listener, so restarts do not hit EADDRINUSE."""
 
-    allow_reuse_address = False
+    allow_reuse_address = os.name != "nt"
 
     def server_bind(self):
         if os.name == "nt":
