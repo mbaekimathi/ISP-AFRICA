@@ -183,8 +183,8 @@ export function PppoeRegisterPage() {
           <FormField id="first-name" label="First name" error={errors.firstName}>
             <input id="first-name" className="field" value={form.firstName} onChange={(event) => setField("firstName", event.target.value)} required />
           </FormField>
-          <FormField id="last-name" label="Last name" error={errors.lastName}>
-            <input id="last-name" className="field" value={form.lastName} onChange={(event) => setField("lastName", event.target.value)} required />
+          <FormField id="last-name" label="Last name" error={errors.lastName} hint="Optional">
+            <input id="last-name" className="field" value={form.lastName} onChange={(event) => setField("lastName", event.target.value)} />
           </FormField>
           <FormField id="phone" label="Phone number" error={errors.phone} hint="07…, 01…, or +254…">
             <input id="phone" className="field" value={form.phone} onChange={(event) => setField("phone", event.target.value)} required />

@@ -138,8 +138,8 @@ def validate_pppoe_provisioning(payload, context, today=None):
     last = str(payload.get("lastName", "")).strip()
     if len(first) < 2 or len(first) > 60:
         issue(errors, "firstName", "Enter a first name of at least 2 characters.")
-    if len(last) < 2 or len(last) > 60:
-        issue(errors, "lastName", "Enter a last name of at least 2 characters.")
+    if last and len(last) > 60:
+        issue(errors, "lastName", "Enter a shorter last name.")
     phone = normalize_phone(payload.get("phone"))
     if not phone:
         issue(errors, "phone", "Enter a Kenyan phone number, such as 07…, 01…, or +254….")

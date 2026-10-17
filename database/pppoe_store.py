@@ -1991,8 +1991,10 @@ def edit_subscriber(cursor, client_id, subscriber_id, payload):
     building = str(payload.get("buildingName", "")).strip()
     house = str(payload.get("houseNumber", "")).strip()
     serial = str(payload.get("serial") or "").strip()
-    if len(first) < 2 or len(last) < 2:
-        raise PppoeError(400, "Enter a first and last name of at least 2 characters.")
+    if len(first) < 2:
+        raise PppoeError(400, "Enter a first name of at least 2 characters.")
+    if len(last) > 60:
+        raise PppoeError(400, "Enter a shorter last name.")
     if not phone:
         raise PppoeError(400, "Enter a Kenyan phone number, such as 07…, 01…, or +254….")
     if email and (len(email) > 120 or "@" not in email):
