@@ -80,6 +80,9 @@ class FakeCursor:
         sql = getattr(self, "last", "")
         if sql.startswith("SELECT secret FROM nas"):
             return {"secret": SECRET}
+        if sql.startswith("SELECT router_id FROM pppoe_subscribers"):
+            router = getattr(self, "subscriber_router", None)
+            return {"router_id": router} if router else None
         if "open_count" in sql:
             return {"open_count": self.open_count}
         return None
@@ -95,6 +98,9 @@ class FakeCursor:
             ]
         if sql.startswith("SELECT radacctid"):
             return list(self.sessions)
+        if "FROM isp_radius_nas" in sql:
+            router = getattr(self, "nas_router", None)
+            return [{"router_id": router}] if router else []
         return []
 
 
@@ -172,6 +178,51 @@ class AuthenticateTests(unittest.TestCase):
         self.assertEqual(response[0], radius_server.ACCESS_ACCEPT)
         radcheck_args = [args for sql, args in cursor.queries if sql.startswith("SELECT username, attribute, value FROM radcheck")]
         self.assertTrue(any(USERNAME in (args or []) for args in radcheck_args))
+
+    def test_credential_dialed_on_another_router_is_rejected(self):
+        cursor = FakeCursor()
+        cursor.subscriber_router = "router-a"
+        cursor.nas_router = "router-b"
+        response = radius_server.authenticate(cursor, pap_packet(PASSWORD), "10.88.0.9")
+        self.assertEqual(response[0], radius_server.ACCESS_REJECT)
+
+    def test_credential_on_its_own_router_is_accepted(self):
+        cursor = FakeCursor()
+        cursor.subscriber_router = "router-a"
+        cursor.nas_router = "router-a"
+        response = radius_server.authenticate(cursor, pap_packet(PASSWORD), "10.88.0.2")
+        self.assertEqual(response[0], radius_server.ACCESS_ACCEPT)
+
+    def test_wrong_router_attempt_does_not_kick_the_live_session(self):
+        sent = []
+        original = radius_server.disconnect_session
+        radius_server.disconnect_session = lambda *args: sent.append(args)
+        try:
+            cursor = FakeCursor(
+                open_count=1,
+                sessions=[
+                    {
+                        "radacctid": 7,
+                        "username": USERNAME,
+                        "nasipaddress": "10.88.0.2",
+                        "acctsessionid": "session-1",
+                        "framedipaddress": "10.10.0.5",
+                    }
+                ],
+            )
+            cursor.subscriber_router = "router-a"
+            cursor.nas_router = "router-b"
+            response = radius_server.authenticate(cursor, pap_packet(PASSWORD), "10.88.0.9")
+            self.assertEqual(response[0], radius_server.ACCESS_REJECT)
+            self.assertEqual(sent, [])
+        finally:
+            radius_server.disconnect_session = original
+
+    def test_radius_user_without_a_subscriber_row_still_authenticates(self):
+        cursor = FakeCursor()
+        cursor.nas_router = "router-b"
+        response = radius_server.authenticate(cursor, pap_packet(PASSWORD), "10.88.0.9")
+        self.assertEqual(response[0], radius_server.ACCESS_ACCEPT)
 
     def test_unknown_nas_is_dropped_silently(self):
         class EmptyNas(FakeCursor):

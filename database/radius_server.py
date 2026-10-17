@@ -331,7 +331,8 @@ def verify_password(packet, secret, cleartext):
     return False, b""
 
 
-def nas_secret(cursor, source_ip, packet):
+def nas_names(source_ip, packet):
+    """Every name a NAS can be known by: peer IP, NAS-IP-Address, NAS-Identifier."""
     names = [source_ip]
     nas_ip = packet["attrs"].get(4)
     if nas_ip and len(nas_ip[0]) == 4:
@@ -339,10 +340,30 @@ def nas_secret(cursor, source_ip, packet):
     ident = attr_text(packet["attrs"], 32)
     if ident:
         names.append(ident)
+    return names
+
+
+def nas_secret(cursor, source_ip, packet):
+    names = nas_names(source_ip, packet)
     placeholders = ", ".join(["%s"] * len(names))
     cursor.execute(f"SELECT secret FROM nas WHERE nasname IN ({placeholders}) LIMIT 1", names)
     row = cursor.fetchone()
     return row["secret"] if row else None
+
+
+def nas_routers(cursor, source_ip, packet):
+    """Router ids the calling NAS belongs to — nas.description and isp_radius_nas both hold router ids."""
+    names = nas_names(source_ip, packet)
+    marks = ", ".join(["%s"] * len(names))
+    cursor.execute(
+        f"""
+        SELECT router_id FROM isp_radius_nas WHERE nasname IN ({marks})
+        UNION
+        SELECT description AS router_id FROM nas WHERE nasname IN ({marks}) AND description <> ''
+        """,
+        [*names, *names],
+    )
+    return {str(row["router_id"]) for row in cursor.fetchall() if row.get("router_id")}
 
 
 def reply_attributes(cursor, username, extra):
@@ -498,6 +519,17 @@ def authenticate(cursor, packet, source_ip):
     checks = by_user.get(stored, {})
     cleartext = checks.get("Cleartext-Password")
     if checks.get("Auth-Type") == "Reject" or not cleartext:
+        return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", True)
+    # A subscriber credential only dials from the router it was provisioned on.
+    # Check before touching session state so a copied login on another router
+    # cannot kick or disturb the legitimate session.
+    cursor.execute(
+        "SELECT router_id FROM pppoe_subscribers WHERE pppoe_username = %s AND deleted = 0 LIMIT 1",
+        (stored,),
+    )
+    owner = cursor.fetchone()
+    if owner and owner.get("router_id") and str(owner["router_id"]) not in nas_routers(cursor, source_ip, packet):
+        print(f"event=radius-auth result=wrong-router user={username} source={source_ip}", flush=True)
         return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", True)
     limit = int(checks.get("Simultaneous-Use") or 1)
     names = set(candidates) | {stored}
