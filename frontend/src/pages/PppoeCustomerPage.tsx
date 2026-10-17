@@ -466,7 +466,6 @@ export function PppoeCustomerPage() {
   const status = labelFor(subscriber.status);
   const billing = billingLabelFor(subscriber.billingStatus);
   const connectionDot = subscriber.connection === "online" ? "bg-success" : subscriber.connection === "offline" ? "bg-destructive" : "bg-warning";
-  const connectionLabel = subscriber.connection === "online" ? "Online" : subscriber.connection === "offline" ? "Offline" : "Unknown";
   const suspended = subscriber.status === "suspended";
   const pendingApproval = subscriber.status === "pending_activation";
   const ended = subscriber.status === "disconnected" || subscriber.status === "cancelled";
@@ -482,15 +481,19 @@ export function PppoeCustomerPage() {
   ) : subscriber.connection === "online" ? "—" : "Offline";
   const lastSeenMs = stampMs(subscriber.live.lastSeen);
   const seenFor = lastSeenMs ? elapsedLabel(lastSeenMs) : null;
+  let statusLabel: string;
   let statusHint: string;
   let statusTone = "";
   if (subscriber.connection === "online") {
+    statusLabel = "Online";
     statusHint = `Online for ${subscriber.live.uptime || elapsedLabel(surfSinceRef.current ?? Date.now())}`;
     statusTone = "text-success";
   } else if (ended) {
+    statusLabel = "Disconnected";
     statusHint = seenFor ? `Disconnected for ${seenFor}` : "Disconnected";
     statusTone = "text-destructive";
   } else {
+    statusLabel = "Not surfing";
     statusHint = seenFor ? `Not surfing for ${seenFor}` : "Never connected";
     statusTone = "text-warning";
   }
@@ -628,7 +631,7 @@ export function PppoeCustomerPage() {
             </button>
 
             <div className="grid min-w-[18rem] flex-1 grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
-              <Stat label="Status" value={connectionLabel} valueClass={statusTone} hint={statusHint} hintClass={statusTone} />
+              <Stat label="Status" value={statusLabel} valueClass={statusTone} hint={statusHint} hintClass={statusTone} />
               <Stat
                 label="Live speed"
                 value={liveSpeed}
