@@ -399,8 +399,10 @@ def router_status(status, open_sessions, expiry_date, today, last_action="", tun
         return "expired_online" if sessions else "expired"
     if status == "suspended" and sessions:
         return "suspended_online"
-    if status in {"suspended", "disabled", "disconnected", "cancelled"}:
+    if status == "suspended":
         return "disconnected"
+    if status in {"disabled", "disconnected", "cancelled"}:
+        return "expired_online" if sessions else "expired"
     if status == "active" and sessions:
         return "surfing"
     if status == "active" and tunnel_status != "up":
@@ -411,7 +413,7 @@ def router_status(status, open_sessions, expiry_date, today, last_action="", tun
 def analysis_bucket(status, open_sessions, expiry_date, today, last_action="", tunnel_status="up"):
     """Card groups: surfing, not surfing, expired, and disconnected."""
     state = router_status(status, open_sessions, expiry_date, today, last_action, tunnel_status)
-    if state in {"disconnecting", "disconnected", "suspended_online"} or status in {"suspended", "disabled", "disconnected"}:
+    if state in {"disconnecting", "disconnected", "suspended_online"} or status in {"suspended", "disabled"}:
         return "disconnected"
     if state in {"expired", "expired_online"}:
         return "expired"

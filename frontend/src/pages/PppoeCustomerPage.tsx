@@ -108,8 +108,8 @@ export function labelFor(status: string): { label: string; tone: Tone } {
     active: { label: "Active", tone: "active" },
     suspended: { label: "Suspended", tone: "paused" },
     expired: { label: "Expired", tone: "due" },
-    disconnected: { label: "Disconnected", tone: "paused" },
-    cancelled: { label: "Service ended", tone: "paused" },
+    disconnected: { label: "Expired", tone: "due" },
+    cancelled: { label: "Expired", tone: "due" },
   };
   return map[status] ?? { label: status, tone: "neutral" };
 }
@@ -519,9 +519,9 @@ export function PppoeCustomerPage() {
       statusTone = "text-success";
     }
   } else if (ended) {
-    statusLabel = "Disconnected";
-    statusHint = seenFor ? `Disconnected for ${seenFor}` : "Disconnected";
-    statusTone = "text-destructive";
+    statusLabel = "Expired";
+    statusHint = seenFor ? `Offline for ${seenFor}` : "Access ended";
+    statusTone = "text-warning";
   } else {
     statusLabel = "Not surfing";
     statusHint = seenFor ? `Not surfing for ${seenFor}` : "Never connected";
