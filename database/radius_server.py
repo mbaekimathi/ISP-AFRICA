@@ -9,9 +9,12 @@ router address that sends the packet.
 
 import hashlib
 import hmac
+import secrets
 import socket
 import struct
 import threading
+
+import pymysql
 
 import pppoe_service
 
@@ -27,6 +30,8 @@ ACCESS_ACCEPT = 2
 ACCESS_REJECT = 3
 ACCOUNTING_REQUEST = 4
 ACCOUNTING_RESPONSE = 5
+DISCONNECT_REQUEST = 40
+DISCONNECT_ACK = 41
 
 STATUS_START = 1
 STATUS_STOP = 2
@@ -392,6 +397,81 @@ def close_stale_sessions(cursor, usernames):
     )
 
 
+def open_session_rows(cursor, usernames):
+    names = list(usernames)
+    marks = ", ".join(["%s"] * len(names))
+    cursor.execute(
+        f"""
+        SELECT radacctid, username, nasipaddress, acctsessionid, framedipaddress
+        FROM radacct
+        WHERE username IN ({marks}) AND acctstoptime IS NULL
+        ORDER BY acctstarttime
+        """,
+        names,
+    )
+    return list(cursor.fetchall())
+
+
+def disconnect_packet(secret, username, session_id="", framed=""):
+    """RFC 5176 Disconnect-Request. The Request Authenticator is MD5(header + zeroes + attrs + secret)."""
+    attrs = encode_attr(1, str(username).encode())
+    if session_id:
+        attrs += encode_attr(44, str(session_id).encode())
+    try:
+        if framed:
+            attrs += encode_attr(8, socket.inet_aton(str(framed)))
+    except OSError:
+        pass
+    head = struct.pack(">BBH", DISCONNECT_REQUEST, secrets.randbelow(256), 20 + len(attrs))
+    authenticator = hashlib.md5(head + bytes(16) + attrs + secret.encode()).digest()
+    return head + authenticator + attrs
+
+
+def disconnect_session(host, secret, username, session_id="", framed=""):
+    """Fire a Disconnect-Request at the NAS on UDP 3799. Best-effort; the radacct row is closed regardless."""
+    try:
+        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        udp.settimeout(2)
+        udp.sendto(disconnect_packet(secret, username, session_id, framed), (host, 3799))
+        udp.close()
+    except OSError:
+        pass
+
+
+def kick_sessions(cursor, rows):
+    """PoD the oldest open sessions so a re-dialing subscriber is not locked out by a dead one."""
+    for row in rows:
+        host = (row.get("nasipaddress") or "").strip()
+        if not host:
+            continue
+        cursor.execute("SELECT secret FROM nas WHERE nasname = %s LIMIT 1", (host,))
+        nas = cursor.fetchone()
+        if nas:
+            disconnect_session(
+                host,
+                nas["secret"],
+                row.get("username") or "",
+                row.get("acctsessionid") or "",
+                row.get("framedipaddress") or "",
+            )
+    ids = [row["radacctid"] for row in rows if row.get("radacctid") is not None]
+    if ids:
+        marks = ", ".join(["%s"] * len(ids))
+        cursor.execute(
+            f"UPDATE radacct SET acctstoptime = NOW(), acctterminatecause = 'nas-request' WHERE radacctid IN ({marks}) AND acctstoptime IS NULL",
+            ids,
+        )
+
+
+def _username_roots(username):
+    """'user@realm' and 'DOMAIN\\user' should resolve to the same radcheck row as 'user'."""
+    roots = [username]
+    for root in (username.split("@", 1)[0], username.rsplit("\\", 1)[-1]):
+        if root and root not in roots:
+            roots.append(root)
+    return roots
+
+
 def authenticate(cursor, packet, source_ip):
     secret = nas_secret(cursor, source_ip, packet)
     if not secret:
@@ -401,8 +481,12 @@ def authenticate(cursor, packet, source_ip):
         return None
     username = attr_text(packet["attrs"], 1)
     if not username:
-        return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", 80 in packet["attrs"])
-    candidates = [username] + sorted(alias for alias in pppoe_service.phone_variants(username) if alias != username)
+        return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", True)
+    roots = _username_roots(username)
+    candidates = list(roots)
+    candidates += sorted(
+        alias for root in roots for alias in pppoe_service.phone_variants(root) if alias not in candidates
+    )
     marks = ", ".join(["%s"] * len(candidates))
     cursor.execute(f"SELECT username, attribute, value FROM radcheck WHERE username IN ({marks})", candidates)
     by_user = {}
@@ -412,23 +496,29 @@ def authenticate(cursor, packet, source_ip):
     checks = by_user.get(stored, {})
     cleartext = checks.get("Cleartext-Password")
     if checks.get("Auth-Type") == "Reject" or not cleartext:
-        return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", 80 in packet["attrs"])
+        return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", True)
     limit = int(checks.get("Simultaneous-Use") or 1)
-    close_stale_sessions(cursor, set(candidates) | {stored})
-    if open_sessions(cursor, set(candidates) | {stored}) >= limit:
+    names = set(candidates) | {stored}
+    close_stale_sessions(cursor, names)
+    rows = open_session_rows(cursor, names)
+    if limit > 0 and len(rows) >= limit:
+        kicked = rows[: len(rows) - limit + 1]
+        kick_sessions(cursor, kicked)
+        print(f"event=radius-auth result=kick user={username} kicked={len(kicked)}", flush=True)
+    if open_sessions(cursor, names) >= limit:
         print(f"event=radius-auth result=busy user={username} source={source_ip}", flush=True)
-        return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", 80 in packet["attrs"])
+        return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", True)
     try:
         ok, extra = verify_password(packet, secret, cleartext)
     except Exception as error:
         print(f"event=radius-auth result=error user={username} source={source_ip} error={error}", flush=True)
-        return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", 80 in packet["attrs"])
+        return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", True)
     if not ok:
         print(f"event=radius-auth result=reject user={username} source={source_ip}", flush=True)
-        return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", 80 in packet["attrs"])
+        return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", True)
     attrs = reply_attributes(cursor, stored, extra)
     print(f"event=radius-auth result=accept user={username} source={source_ip}", flush=True)
-    return build_response(ACCESS_ACCEPT, packet["id"], packet["auth"], secret, attrs, 80 in packet["attrs"])
+    return build_response(ACCESS_ACCEPT, packet["id"], packet["auth"], secret, attrs, True)
 
 
 def accounting(cursor, packet, source_ip):
@@ -454,7 +544,19 @@ def accounting(cursor, packet, source_ip):
     nas_ip = socket.inet_ntoa(nas_ip_raw[0]) if nas_ip_raw and len(nas_ip_raw[0]) == 4 else source_ip
     unique = hashlib.md5(f"{nas_ip}|{session_id}".encode()).hexdigest()
     if not session_id:
-        return build_response(ACCOUNTING_RESPONSE, packet["id"], packet["auth"], secret, b"", 80 in attrs)
+        return build_response(ACCOUNTING_RESPONSE, packet["id"], packet["auth"], secret, b"", True)
+    if username and nas_ip:
+        names = _username_roots(username)
+        marks = ", ".join(["%s"] * len(names))
+        cursor.execute(
+            f"""
+            UPDATE pppoe_subscribers s
+            JOIN isp_mikrotik_devices d ON d.tunnel_ip = %s AND d.client_id = s.client_id
+            SET s.router_id = d.id
+            WHERE s.service = 'pppoe' AND s.pppoe_username IN ({marks}) AND (s.router_id <> d.id OR s.router_id IS NULL)
+            """,
+            [nas_ip, *names],
+        )
     if status == STATUS_START:
         cursor.execute(
             "UPDATE radacct SET acctstoptime = NOW() WHERE acctsessionid = %s AND acctstoptime IS NULL",
@@ -510,7 +612,7 @@ def accounting(cursor, packet, source_ip):
                     framed,
                 ),
             )
-    return build_response(ACCOUNTING_RESPONSE, packet["id"], packet["auth"], secret, b"", 80 in attrs)
+    return build_response(ACCOUNTING_RESPONSE, packet["id"], packet["auth"], secret, b"", True)
 
 
 def _listener(port, handler, connect, stop):
@@ -541,9 +643,16 @@ def _listener(port, handler, connect, stop):
         if packet is None:
             continue
         try:
-            db.ping(reconnect=True)
             with db.cursor() as cursor:
                 response = handler(cursor, packet, source[0])
+        except (pymysql.err.OperationalError, pymysql.err.InterfaceError):
+            try:
+                db.ping(reconnect=True)
+                with db.cursor() as cursor:
+                    response = handler(cursor, packet, source[0])
+            except Exception as error:
+                print(f"event=radius port={port} error={error}", flush=True)
+                continue
         except Exception as error:
             print(f"event=radius port={port} error={error}", flush=True)
             continue

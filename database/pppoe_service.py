@@ -372,7 +372,6 @@ def radius_plan(plan):
         group_replies = [
             {"attribute": "Mikrotik-Rate-Limit", "op": ":=", "value": plan["rateLimit"]},
             {"attribute": "Mikrotik-Address-List", "op": ":=", "value": "pppoe-subscribed"},
-            {"attribute": "Idle-Timeout", "op": ":=", "value": "600"},
         ]
     else:
         replies.append({"attribute": "Session-Timeout", "op": ":=", "value": str(RESTRICTED_SESSION_SECONDS)})

@@ -59,12 +59,14 @@ def mschap1_packet(password, challenge):
 
 
 class FakeCursor:
-    """Answers the four queries authenticate() runs. update_closed flips open_count to zero."""
+    """Answers the queries authenticate() runs. update_closed flips open_count to zero."""
 
-    def __init__(self, open_count=0, cleartext=PASSWORD):
+    def __init__(self, open_count=0, cleartext=PASSWORD, sessions=None):
         self.open_count = open_count
         self.cleartext = cleartext
+        self.sessions = sessions or []
         self.updated = False
+        self.queries = []
 
     def execute(self, sql, args=None):
         normalized = " ".join(sql.split())
@@ -72,6 +74,7 @@ class FakeCursor:
             self.open_count = 0
             self.updated = True
         self.last = normalized
+        self.queries.append((normalized, args))
 
     def fetchone(self):
         sql = getattr(self, "last", "")
@@ -90,6 +93,8 @@ class FakeCursor:
                 {"username": USERNAME, "attribute": "Cleartext-Password", "value": self.cleartext},
                 {"username": USERNAME, "attribute": "Simultaneous-Use", "value": "1"},
             ]
+        if sql.startswith("SELECT radacctid"):
+            return list(self.sessions)
         return []
 
 
@@ -133,6 +138,40 @@ class AuthenticateTests(unittest.TestCase):
         response = radius_server.authenticate(cursor, pap_packet(PASSWORD), "10.88.0.2")
         self.assertTrue(cursor.updated)
         self.assertEqual(response[0], radius_server.ACCESS_ACCEPT)
+
+    def test_busy_account_disconnects_the_dead_session_instead_of_rejecting(self):
+        sent = []
+        original = radius_server.disconnect_session
+        radius_server.disconnect_session = lambda *args: sent.append(args)
+        try:
+            cursor = FakeCursor(
+                open_count=1,
+                sessions=[
+                    {
+                        "radacctid": 7,
+                        "username": USERNAME,
+                        "nasipaddress": "10.88.0.2",
+                        "acctsessionid": "session-1",
+                        "framedipaddress": "10.10.0.5",
+                    }
+                ],
+            )
+            response = radius_server.authenticate(cursor, pap_packet(PASSWORD), "10.88.0.2")
+            self.assertEqual(response[0], radius_server.ACCESS_ACCEPT)
+            self.assertEqual(len(sent), 1)
+            self.assertEqual(sent[0][:3], ("10.88.0.2", SECRET, USERNAME))
+            self.assertTrue(cursor.updated)
+        finally:
+            radius_server.disconnect_session = original
+
+    def test_realm_suffix_matches_the_base_username(self):
+        packet = pap_packet(PASSWORD)
+        packet["attrs"][1] = [f"{USERNAME}@isp".encode()]
+        cursor = FakeCursor()
+        response = radius_server.authenticate(cursor, packet, "10.88.0.2")
+        self.assertEqual(response[0], radius_server.ACCESS_ACCEPT)
+        radcheck_args = [args for sql, args in cursor.queries if sql.startswith("SELECT username, attribute, value FROM radcheck")]
+        self.assertTrue(any(USERNAME in (args or []) for args in radcheck_args))
 
     def test_unknown_nas_is_dropped_silently(self):
         class EmptyNas(FakeCursor):

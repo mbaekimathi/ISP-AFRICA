@@ -357,8 +357,93 @@ class RouterOsApiTests(unittest.TestCase):
         self.assertIn(b"/ip/firewall/connection/print", sent)
         self.assertIn(b"/ipv6/firewall/filter/add", sent)
         self.assertIn(b"/interface/pppoe-server/server/add", sent)
+        self.assertIn(b"in-interface=ether2", sent)
         self.assertNotIn(b"/system/script", sent)
         self.assertNotIn(b"secret-password", b"".join(sock.sent[1:]))
+
+    def test_pppoe_port_skips_the_wan_interface(self):
+        done = sentence("!done")
+        sock = ScriptedSocket(
+            [
+                done,
+                sentence("!re", "=name=ether1", "=type=ether") + sentence("!re", "=name=ether2", "=type=ether") + done,
+                sentence("!re", "=.id=*9", "=interface=ether1", "=service-name=pppoe") + done,
+                sentence("!re", "=interface=ether1", "=list=WAN") + sentence("!re", "=interface=bridge", "=list=LAN") + done,
+                sentence("!re", "=interface=ether1") + done,
+                done,
+            ]
+            + [done] * 50
+        )
+        report = routeros_api.apply_pppoe_enforcement("10.88.0.5", "secret-password", True, opener=lambda _address, _timeout: sock)
+        self.assertTrue(report["applied"])
+        sent = b"".join(sock.sent)
+        self.assertIn(b"/interface/pppoe-server/server/set", sent)
+        self.assertIn(b"=interface=ether2", sent)
+
+    def test_pppoe_port_honors_the_configured_access_interface(self):
+        done = sentence("!done")
+        sock = ScriptedSocket(
+            [
+                done,
+                sentence("!re", "=name=ether1", "=type=ether") + sentence("!re", "=name=ether5", "=type=ether") + done,
+                sentence("!re", "=.id=*9", "=interface=ether1", "=service-name=pppoe") + done,
+                sentence("!re", "=interface=ether1", "=list=WAN") + done,
+                sentence("!re", "=interface=ether1") + done,
+                done,
+            ]
+            + [done] * 50
+        )
+        report = routeros_api.apply_pppoe_enforcement(
+            "10.88.0.5", "secret-password", True, access="ether5", opener=lambda _address, _timeout: sock
+        )
+        self.assertTrue(report["applied"])
+        self.assertIn(b"=interface=ether5", b"".join(sock.sent))
+
+    def test_live_sessions_reads_devices_from_the_router(self):
+        sock = ScriptedSocket(
+            [
+                sentence("!done"),
+                sentence(
+                    "!re",
+                    "=name=<pppoe-user1>",
+                    "=user=user1",
+                    "=remote-address=8C:44:BB:2F:AA:E8",
+                    "=uptime=18m29s",
+                    "=dynamic=true",
+                    "=running=true",
+                )
+                + sentence("!re", "=name=<pppoe-other>", "=user=other", "=remote-address=AA:BB:CC:DD:EE:FF", "=dynamic=true")
+                + sentence("!done"),
+                sentence("!re", "=name=user1", "=caller-id=8C:44:BB:2F:AA:E8", "=address=10.10.0.2", "=uptime=18m29s") + sentence("!done"),
+                sentence("!re", "=name=<pppoe-user1>", "=rx-byte=2704487", "=tx-byte=25497108")
+                + sentence("!re", "=name=ether1", "=rx-byte=9", "=tx-byte=9")
+                + sentence("!done"),
+            ]
+        )
+        sessions = routeros_api.live_sessions("10.88.0.2", "secret-password", "user1", opener=lambda _address, _timeout: sock)
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["mac"], "8C:44:BB:2F:AA:E8")
+        self.assertEqual(sessions[0]["ip"], "10.10.0.2")
+        self.assertEqual(sessions[0]["uptime"], "18m29s")
+        self.assertEqual(sessions[0]["seconds"], 18 * 60 + 29)
+        self.assertEqual(sessions[0]["bytesIn"], 2704487)
+        self.assertEqual(sessions[0]["bytesOut"], 25497108)
+
+    def test_live_sessions_falls_back_to_active_rows(self):
+        sock = ScriptedSocket(
+            [
+                sentence("!done"),
+                sentence("!done"),
+                sentence("!re", "=name=user1", "=caller-id=8c:44:bb:2f:aa:e8", "=address=10.10.0.2", "=uptime=5s") + sentence("!done"),
+                sentence("!done"),
+            ]
+        )
+        sessions = routeros_api.live_sessions("10.88.0.2", "secret-password", "user1", opener=lambda _address, _timeout: sock)
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["mac"], "8c:44:bb:2f:aa:e8")
+        self.assertEqual(sessions[0]["seconds"], 5)
+        self.assertEqual(sessions[0]["bytesIn"], 0)
+        self.assertEqual(routeros_api.norm_mac("8c-44-bb-2f-aa-e8"), routeros_api.norm_mac("8C:44:BB:2F:AA:E8"))
 
     def test_a_selection_script_runs_and_is_removed(self):
         self.assertFalse(routeros_api.script_is_allowed("{ /system reboot; }"))

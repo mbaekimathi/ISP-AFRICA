@@ -17,6 +17,7 @@ import { ClientsPage } from "@/pages/ClientsPage";
 import { ClientUsagePage } from "@/pages/ClientUsagePage";
 import { WifiPaymentPage } from "@/pages/WifiPaymentPage";
 import { PppoeCustomerPage } from "@/pages/PppoeCustomerPage";
+import { PppoeCustomerTransactionsPage } from "@/pages/PppoeCustomerTransactionsPage";
 import { PppoeRegisterPage } from "@/pages/PppoeRegisterPage";
 import { IspPackagePage } from "@/pages/IspPackagePage";
 import { IspCommunicationsPage } from "@/pages/IspCommunicationsPage";
@@ -74,7 +75,9 @@ export function App() {
             <Route path="/pppoe/register" element={<PppoeRegisterPage />} />
             <Route path="/:code/pppoe/register" element={<PppoeRegisterPage />} />
             <Route path="/pppoe/:subscriberId" element={<PppoeCustomerPage />} />
+            <Route path="/pppoe/:subscriberId/transactions" element={<PppoeCustomerTransactionsPage />} />
             <Route path="/:code/pppoe/:subscriberId" element={<PppoeCustomerPage />} />
+            <Route path="/:code/pppoe/:subscriberId/transactions" element={<PppoeCustomerTransactionsPage />} />
             <Route path="/clients" element={<ClientsPage kind="pppoe" />} />
             <Route path="/clients/payments" element={<WifiPaymentPage kind="pppoe" />} />
             <Route path="/clients/usage" element={<ClientUsagePage kind="pppoe" />} />

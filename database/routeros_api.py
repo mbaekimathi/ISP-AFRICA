@@ -539,6 +539,108 @@ def read_router(host, password, timeout=4, port=API_PORT, opener=None):
     }
 
 
+def subscriber_rates(host, password, username, timeout=4, port=API_PORT, opener=None):
+    """Instantaneous rx/tx rates for the subscriber's dynamic <pppoe-username> interface."""
+    connect = opener or socket.create_connection
+    try:
+        sock = connect((host, port), timeout)
+    except OSError as error:
+        raise RouterError("The management tunnel did not answer.") from error
+    try:
+        sock.settimeout(timeout)
+        reader = ByteReader(sock)
+        login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
+        if any(row.get("ret") for row in login):
+            raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
+        rows = talk(sock, reader, ["/interface/monitor-traffic", f"=interface=<pppoe-{username}>", "=once="])
+    finally:
+        sock.close()
+    row = rows[0] if rows else {}
+
+    def rate(key):
+        try:
+            return int(float(row.get(key) or 0))
+        except (TypeError, ValueError):
+            return 0
+
+    return {"rxBps": rate("rx-bits-per-second"), "txBps": rate("tx-bits-per-second")}
+
+
+def norm_mac(value):
+    return "".join(ch for ch in (value or "") if ch.isalnum()).upper()
+
+
+def uptime_seconds(value):
+    """RouterOS uptime strings like '1w2d3h4m5s' or '18m29s' → seconds."""
+    scale = {"w": 604800, "d": 86400, "h": 3600, "m": 60, "s": 1}
+    return sum(int(amount) * scale[unit] for amount, unit in re.findall(r"(\d+)([wdhms])", value or ""))
+
+
+def byte_count(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def live_sessions(host, password, username, timeout=4, port=API_PORT, opener=None):
+    """Live PPPoE sessions for a subscriber, read straight from the router.
+
+    Returns one entry per dialed-in device: {mac, ip, uptime, seconds,
+    bytesIn, bytesOut}. Raises RouterError when the router can't be read.
+    """
+    connect = opener or socket.create_connection
+    try:
+        sock = connect((host, port), timeout)
+    except OSError as error:
+        raise RouterError("The management tunnel did not answer.") from error
+    try:
+        sock.settimeout(timeout)
+        reader = ByteReader(sock)
+        login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
+        if any(row.get("ret") for row in login):
+            raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
+        servers = talk(sock, reader, ["/interface/pppoe-server/print"])
+        actives = [row for row in talk(sock, reader, ["/ppp/active/print"]) if row.get("name") == username]
+        counters = {row.get("name"): row for row in talk(sock, reader, ["/interface/print"])}
+    finally:
+        sock.close()
+
+    sessions = []
+    for server in servers:
+        if server.get("user") != username or server.get("dynamic") != "true":
+            continue
+        mac = server.get("remote-address") or ""
+        active = next((row for row in actives if norm_mac(row.get("caller-id")) == norm_mac(mac)), {})
+        iface = counters.get(server.get("name")) or {}
+        uptime = server.get("uptime") or active.get("uptime") or ""
+        sessions.append(
+            {
+                "mac": mac or active.get("caller-id") or "",
+                "ip": active.get("address") or "",
+                "uptime": uptime,
+                "seconds": uptime_seconds(uptime),
+                "bytesIn": byte_count(iface.get("rx-byte")),
+                "bytesOut": byte_count(iface.get("tx-byte")),
+            }
+        )
+    if not sessions:
+        for active in actives:
+            iface = counters.get(f"<pppoe-{username}>") or {}
+            uptime = active.get("uptime") or ""
+            sessions.append(
+                {
+                    "mac": active.get("caller-id") or "",
+                    "ip": active.get("address") or "",
+                    "uptime": uptime,
+                    "seconds": uptime_seconds(uptime),
+                    "bytesIn": byte_count(iface.get("rx-byte")),
+                    "bytesOut": byte_count(iface.get("tx-byte")),
+                }
+            )
+    return sessions
+
+
 def disabled_flag(row):
     return row.get("disabled") == "true"
 
@@ -824,13 +926,19 @@ def _physical_port(row):
     return lowered.startswith(("ether", "sfp", "combo", "qsfp"))
 
 
-def _pppoe_port(interfaces, servers):
+def _pppoe_port(interfaces, servers, preferred="", avoid=None):
+    if preferred and _safe_iface(preferred):
+        return preferred
+    avoid = set(avoid or ())
     for row in servers:
         name = row.get("interface") or ""
-        if _safe_iface(name):
+        if _safe_iface(name) and name not in avoid:
             return name
     for row in interfaces:
-        if _physical_port(row) and "pppoe" in (row.get("comment") or "").lower():
+        if _physical_port(row) and "pppoe" in (row.get("comment") or "").lower() and (row.get("name") or "") not in avoid:
+            return row.get("name") or ""
+    for row in interfaces:
+        if _physical_port(row) and (row.get("name") or "") not in avoid:
             return row.get("name") or ""
     for row in interfaces:
         if _physical_port(row):
@@ -851,14 +959,23 @@ def _configure_subscriber_radius(sock, reader, radius):
         return
     address = str(radius.get("address") or "")
     secret = str(radius.get("secret") or "")
+    source = str(radius.get("source") or "")
     if not re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", address) or not _radius_secret_ok(secret):
         raise RouterError("RADIUS for this router is not ready, so enforcement was not changed.")
-    matched = [row for row in talk(sock, reader, ["/radius/print"]) if row.get("address") == address and _row_id(row)]
+    fields = [f"=address={address}", f"=secret={secret}", "=service=ppp", "=timeout=3s"]
+    if re.fullmatch(r"(?:\d{1,3}\.){3}\d{1,3}", source):
+        fields.append(f"=src-address={source}")
+    rows = talk(sock, reader, ["/radius/print"])
+    matched = [
+        row
+        for row in rows
+        if _row_id(row) and (row.get("address") == address or "ppp" in (row.get("service") or "").split(","))
+    ]
     if matched:
         for row in matched:
-            talk(sock, reader, ["/radius/set", f"=.id={_row_id(row)}", f"=secret={secret}", "=service=ppp"])
+            talk(sock, reader, ["/radius/set", f"=.id={_row_id(row)}", *fields])
     else:
-        talk(sock, reader, ["/radius/add", f"=address={address}", f"=secret={secret}", "=service=ppp"])
+        talk(sock, reader, ["/radius/add", *fields])
     talk(sock, reader, ["/radius/incoming/set", "=accept=yes"])
     filters = talk(sock, reader, ["/ip/firewall/filter/print"])
     if not any(row.get("comment") == PPPOE_COA and _row_id(row) for row in filters):
@@ -901,7 +1018,7 @@ def _add_placed(sock, reader, words):
         talk(sock, reader, [word for word in words if not word.startswith("=place-before=")])
 
 
-def _enable_pppoe(sock, reader, iface, servers, radius=None):
+def _enable_pppoe(sock, reader, iface, servers, radius=None, shared=False):
     pools = talk(sock, reader, ["/ip/pool/print"])
     if not _named(pools, PPPOE_POOL):
         talk(sock, reader, ["/ip/pool/add", f"=name={PPPOE_POOL}", f"=ranges={PPPOE_RANGE}"])
@@ -917,6 +1034,7 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
                     f"=.id={_row_id(row)}",
                     f"=local-address={PPPOE_LOCAL}",
                     f"=dns-server={PPPOE_LOCAL}",
+                    "=change-tcp-mss=yes",
                 ],
             )
     else:
@@ -930,6 +1048,7 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
                 f"=remote-address={PPPOE_POOL}",
                 f"=dns-server={PPPOE_LOCAL}",
                 "=only-one=yes",
+                "=change-tcp-mss=yes",
             ],
         )
     talk(sock, reader, ["/ip/dns/set", "=allow-remote-requests=yes"])
@@ -979,8 +1098,12 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
         )
     _portal_nat(sock, reader)
     portal_ip, portal_port = _portal_target(radius)
-    rules = [
-        ["/ip/firewall/filter/add", "=chain=forward", "=action=drop", f"=in-interface={iface}", f"=comment={PPPOE_DROP}", "=place-before=0"],
+    rules = []
+    if not shared:
+        rules.append(
+            ["/ip/firewall/filter/add", "=chain=forward", "=action=drop", f"=in-interface={iface}", f"=comment={PPPOE_DROP}", "=place-before=0"]
+        )
+    rules += [
         ["/ip/firewall/filter/add", "=chain=forward", "=action=drop", "=out-interface=all-ppp", f"=comment={PPPOE_DROP_PPP_BACK}", "=place-before=0"],
         ["/ip/firewall/filter/add", "=chain=forward", "=action=drop", "=in-interface=all-ppp", f"=comment={PPPOE_DROP_PPP}", "=place-before=0"],
         ["/ip/firewall/filter/add", "=chain=forward", "=action=drop", f"=dst-address-list={PPPOE_EXPIRED}", f"=comment={PPPOE_EXPIRED_DROP_BACK}", "=place-before=0"],
@@ -1023,8 +1146,9 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
         PPPOE_EXPIRED_DROP_BACK,
         PPPOE_DROP_PPP,
         PPPOE_DROP_PPP_BACK,
-        PPPOE_DROP,
     ]
+    if not shared:
+        order.append(PPPOE_DROP)
     if anchor:
         for comment in order:
             if ours.get(comment):
@@ -1052,7 +1176,8 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
         for row in talk(sock, reader, ["/ipv6/firewall/filter/print"]):
             if row.get("comment") in PPPOE_V6_FILTERS and _row_id(row):
                 talk(sock, reader, ["/ipv6/firewall/filter/remove", f"=.id={_row_id(row)}"])
-        for target, comment in (("all-ppp", PPPOE_DROP_PPP_V6), (iface, PPPOE_DROP_V6)):
+        v6_targets = [("all-ppp", PPPOE_DROP_PPP_V6)] if shared else [("all-ppp", PPPOE_DROP_PPP_V6), (iface, PPPOE_DROP_V6)]
+        for target, comment in v6_targets:
             talk(
                 sock,
                 reader,
@@ -1097,9 +1222,10 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
                     f"=comment={comment}",
                 ],
             )
-    for row in talk(sock, reader, ["/ip/dhcp-server/print"]):
-        if row.get("interface") == iface and row.get("disabled") != "true" and _row_id(row):
-            talk(sock, reader, ["/ip/dhcp-server/set", f"=.id={_row_id(row)}", "=disabled=yes"])
+    if not shared:
+        for row in talk(sock, reader, ["/ip/dhcp-server/print"]):
+            if row.get("interface") == iface and row.get("disabled") != "true" and _row_id(row):
+                talk(sock, reader, ["/ip/dhcp-server/set", f"=.id={_row_id(row)}", "=disabled=yes"])
     for row in talk(sock, reader, ["/ip/hotspot/print"]):
         ours = row.get("name") == DHCP_PORTAL_NAME or (row.get("interface") == iface and row.get("profile") == DHCP_PORTAL_PROFILE)
         if ours and row.get("disabled") != "true" and _row_id(row):
@@ -1108,7 +1234,7 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
     _drop_open_sessions(sock, reader)
 
 
-def _disable_pppoe(sock, reader, iface):
+def _disable_pppoe(sock, reader, iface, shared=False):
     for row in talk(sock, reader, ["/interface/pppoe-server/server/print"]):
         if row.get("service-name") == PPPOE_SERVICE and row.get("disabled") != "true" and _row_id(row):
             talk(sock, reader, ["/interface/pppoe-server/server/set", f"=.id={_row_id(row)}", "=disabled=yes"])
@@ -1124,6 +1250,8 @@ def _disable_pppoe(sock, reader, iface):
     for row in talk(sock, reader, ["/ip/firewall/nat/print"]):
         if row.get("comment") in PPPOE_NATS and _row_id(row):
             talk(sock, reader, ["/ip/firewall/nat/remove", f"=.id={_row_id(row)}"])
+    if shared:
+        return
     addresses = talk(sock, reader, ["/ip/address/print"])
     if not any(row.get("interface") == iface and row.get("address") == PPPOE_ADDRESS for row in addresses):
         talk(
@@ -1174,7 +1302,30 @@ def _disable_pppoe(sock, reader, iface):
     _captive_portal(sock, reader)
 
 
-def apply_pppoe_enforcement(host, password, enforced, timeout=12, port=API_PORT, opener=None, radius=None):
+def _wan_ports(sock, reader):
+    """Interfaces that carry upstream traffic: WAN-listed ports and dhcp-client ports."""
+    avoid = set()
+    lan = set()
+    try:
+        for row in talk(sock, reader, ["/interface/list/member/print"]):
+            name = row.get("interface") or ""
+            if row.get("list") == "WAN":
+                avoid.add(name)
+            elif row.get("list") == "LAN":
+                lan.add(name)
+    except RouterError:
+        pass
+    try:
+        for row in talk(sock, reader, ["/ip/dhcp-client/print"]):
+            name = row.get("interface") or ""
+            if row.get("disabled") != "true":
+                avoid.add(name)
+    except RouterError:
+        pass
+    return avoid, lan
+
+
+def apply_pppoe_enforcement(host, password, enforced, timeout=12, port=API_PORT, opener=None, radius=None, access=None):
     """Turn PPPoE enforcement on or off with direct API writes. This does not create a system script."""
     if not isinstance(enforced, bool):
         raise RouterError("Choose whether PPPoE enforcement is on or off.")
@@ -1191,7 +1342,8 @@ def apply_pppoe_enforcement(host, password, enforced, timeout=12, port=API_PORT,
             raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
         interfaces = talk(sock, reader, ["/interface/print"])
         servers = talk(sock, reader, ["/interface/pppoe-server/server/print"])
-        iface = _pppoe_port(interfaces, servers)
+        avoid, lan = _wan_ports(sock, reader)
+        iface = _pppoe_port(interfaces, servers, preferred=access or "", avoid=avoid)
         if not _safe_iface(iface):
             raise RouterError("This router has no port for PPPoE, so nothing was changed.")
         try:
@@ -1199,10 +1351,12 @@ def apply_pppoe_enforcement(host, password, enforced, timeout=12, port=API_PORT,
         except RouterError:
             bridges = []
         iface = _bridge_target(bridges, iface)
+        kinds = {row.get("name") or "": row.get("type") or "" for row in interfaces}
+        shared = kinds.get(iface) == "bridge" or iface in lan
         if enforced:
-            _enable_pppoe(sock, reader, iface, servers, radius)
+            _enable_pppoe(sock, reader, iface, servers, radius, shared=shared)
         else:
-            _disable_pppoe(sock, reader, iface)
+            _disable_pppoe(sock, reader, iface, shared=shared)
     finally:
         sock.close()
     return {"applied": True, "message": "Updated on the router."}

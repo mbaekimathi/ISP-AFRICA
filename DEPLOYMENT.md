@@ -22,8 +22,8 @@ the captive portal, and the WireGuard management tunnel.
    Note the root password — it goes in `.env` as `ISP_DB_PASSWORD`.
 3. **WireGuard for Windows** (`winget install WireGuard.WireGuard`) — needed
    for the `C:\Program Files\WireGuard\wireguard.exe` tunnel service.
-4. **Node.js LTS** — only if you build the frontend on the XPS. If you copy a
-   ready-made `frontend\dist`, Node is not required at runtime.
+4. **Node.js 20+ LTS** — only if you build the frontend on the XPS. If you copy
+   a ready-made `frontend\dist`, Node is not required at runtime.
 
 ## Setup
 

@@ -1,30 +1,22 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
-import { useParams, useSearchParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   Activity,
-  ArrowDownUp,
   ArrowLeft,
-  CalendarClock,
   ChevronDown,
   Copy,
   Eye,
   EyeOff,
-  Gauge,
-  KeyRound,
-  Wallet,
-  Wifi,
 } from "lucide-react";
-import { DetailGrid } from "@/components/ui/DetailGrid";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
-import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormField } from "@/components/ui/FormField";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
 import { clientPage } from "@/lib/accounts";
 import { useAuth } from "@/providers/AuthProvider";
 
-type Subscriber = {
+export type Subscriber = {
   id: string;
   firstName: string;
   lastName: string;
@@ -46,9 +38,10 @@ type Subscriber = {
   rateLimit: string;
   downloadMbps: number | null;
   uploadMbps: number | null;
-  live: { connection: string; ip: string; mac: string; uptime: string; router: string; lastSeen: string | null };
+  live: { connection: string; ip: string; mac: string; uptime: string; router: string; lastSeen: string | null; rates?: { rxBps: number; txBps: number } | null };
   usage: { days: { day: string; bytesIn: number; bytesOut: number }[]; monthBytesIn: number; monthBytesOut: number };
   sessions: { login: string | null; logout: string | null; duration: number; ip: string; bytesIn: number; bytesOut: number; cause: string }[];
+  devices: { mac: string; ip: string; sessions: number; seconds: number; bytesIn: number; bytesOut: number; online: boolean; onlineFor: string; lastSeen: string | null }[];
   billing: {
     invoices: { id: string; amount: string; purpose: string; status: string; reference: string; createdAt: string }[];
     payments: { id: string; amount: string; method: string; reference: string; createdAt: string }[];
@@ -67,7 +60,7 @@ type Subscriber = {
 
 type PackageOption = { id: string; name: string; price: string };
 type RouterOption = { id: string; name: string };
-type DialogKind = "suspend" | "package" | "migrate" | "disconnect" | "terminate";
+type DialogKind = "suspend" | "package" | "migrate" | "disconnect" | "terminate" | "password" | "edit";
 type Tone = "active" | "due" | "paused" | "neutral";
 type TrendPoint = { label: string; date: string; minutes: number; drops: number };
 
@@ -77,6 +70,31 @@ function bytes(value: number) {
   return `${value} B`;
 }
 
+const SURFING_BPS = 64_000;
+
+function rateLabel(bps: number) {
+  if (bps >= 1_000_000) return `${(bps / 1_000_000).toFixed(1)} Mbps`;
+  if (bps >= 1_000) return `${Math.round(bps / 1_000)} Kbps`;
+  return `${bps} bps`;
+}
+
+function elapsedLabel(sinceMs: number, now = Date.now()) {
+  const seconds = Math.max(0, Math.floor((now - sinceMs) / 1000));
+  const minutes = Math.floor(seconds / 60);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+  if (days) return `${days}d ${hours % 24}h`;
+  if (hours) return `${hours}h ${minutes % 60}m`;
+  if (minutes) return `${minutes}m`;
+  return `${seconds}s`;
+}
+
+function stampMs(value: string | null | undefined) {
+  if (!value) return null;
+  const ms = Date.parse(value.replace(" ", "T"));
+  return Number.isNaN(ms) ? null : ms;
+}
+
 function duration(seconds: number) {
   if (seconds < 60) return `${seconds}s`;
   const hours = Math.floor(seconds / 3600);
@@ -84,7 +102,7 @@ function duration(seconds: number) {
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
-function labelFor(status: string): { label: string; tone: Tone } {
+export function labelFor(status: string): { label: string; tone: Tone } {
   const map: Record<string, { label: string; tone: Tone }> = {
     pending_activation: { label: "Not started yet", tone: "due" },
     active: { label: "Active", tone: "active" },
@@ -96,7 +114,7 @@ function labelFor(status: string): { label: string; tone: Tone } {
   return map[status] ?? { label: status, tone: "neutral" };
 }
 
-function billingLabelFor(status: string): { label: string; tone: Tone } {
+export function billingLabelFor(status: string): { label: string; tone: Tone } {
   const map: Record<string, { label: string; tone: Tone }> = {
     pending: { label: "Payment pending", tone: "due" },
     paid: { label: "Paid", tone: "active" },
@@ -107,7 +125,7 @@ function billingLabelFor(status: string): { label: string; tone: Tone } {
   return map[status] ?? { label: status, tone: "neutral" };
 }
 
-function invoiceTone(status: string): Tone {
+export function invoiceTone(status: string): Tone {
   if (status === "paid") return "active";
   if (status === "pending") return "due";
   if (status === "void") return "paused";
@@ -244,29 +262,26 @@ function TrendChart({
   );
 }
 
-function StatCard({
-  icon,
+function Stat({
   label,
   value,
   hint,
   valueClass,
+  hintClass,
 }: {
-  icon: ReactNode;
   label: string;
-  value: string;
-  hint: string;
+  value: ReactNode;
+  hint?: ReactNode;
   valueClass?: string;
+  hintClass?: string;
 }) {
   return (
-    <div className="rounded-xl border border-border bg-surface p-4 shadow-card">
-      <div className="flex items-center gap-2">
-        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
-          {icon}
-        </span>
-        <p className="truncate text-xs text-muted-foreground">{label}</p>
-      </div>
-      <p className={`mt-3 text-sm font-semibold ${valueClass ?? ""}`}>{value}</p>
-      <p className="mt-0.5 truncate text-xs text-muted-foreground">{hint}</p>
+    <div className="min-w-0">
+      <p className="truncate text-[11px] font-medium uppercase tracking-wide text-primary-foreground/60">{label}</p>
+      <div className={`mt-1 flex min-w-0 items-center gap-1.5 text-sm font-semibold tracking-tight ${valueClass ?? ""}`}>{value}</div>
+      {hint != null && hint !== "" ? (
+        <div className={`mt-0.5 truncate text-[11px] ${hintClass ?? "text-primary-foreground/60"}`}>{hint}</div>
+      ) : null}
     </div>
   );
 }
@@ -282,18 +297,17 @@ export function PppoeCustomerPage() {
   const [routers, setRouters] = useState<RouterOption[]>([]);
   const [packageId, setPackageId] = useState("");
   const [routerId, setRouterId] = useState("");
-  const [amount, setAmount] = useState("");
-  const [reference, setReference] = useState("");
-  const [editing, setEditing] = useState(search.get("edit") === "1");
   const [profileOpen, setProfileOpen] = useState(search.get("edit") === "1");
-  const [openSection, setOpenSection] = useState<string | null>(search.get("recharge") === "1" ? "billing" : null);
-  const [dialog, setDialog] = useState<DialogKind | null>(null);
+  const [openSection, setOpenSection] = useState<string | null>(null);
+  const [dialog, setDialog] = useState<DialogKind | null>(search.get("edit") === "1" ? "edit" : null);
   const [reason, setReason] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [healthTrend, setHealthTrend] = useState<TrendPoint[] | null>(null);
   const [usageTrend, setUsageTrend] = useState<TrendPoint[] | null>(null);
   const menuRef = useRef<HTMLDivElement>(null);
-  const amountRef = useRef<HTMLInputElement>(null);
+  const surfSinceRef = useRef<number | null>(null);
+  const idleSinceRef = useRef<number | null>(null);
+  const navigate = useNavigate();
 
   usePageMeta("PPPoE customer — ISP CENTRIC", "Connection, usage, and billing for one PPPoE client.");
 
@@ -310,16 +324,39 @@ export function PppoeCustomerPage() {
 
   useEffect(() => {
     load();
-    const timer = window.setInterval(() => {
-      apiRequest<{ connection: Subscriber["connection"]; live: Subscriber["live"]; status: string; billingStatus: string }>(
+    surfSinceRef.current = null;
+    idleSinceRef.current = null;
+    const refresh = () => {
+      apiRequest<{ connection: Subscriber["connection"]; live: Subscriber["live"] | null; status: string; billingStatus: string; rates?: { rxBps: number; txBps: number } | null; devices?: Subscriber["devices"] }>(
         `/api/pppoe/subscribers/${subscriberId}/status`,
       )
         .then((body) => {
-          setSubscriber((current) => current ? { ...current, connection: body.connection, live: { ...current.live, ...body.live, connection: body.connection }, status: body.status, billingStatus: body.billingStatus } : current);
+          const now = Date.now();
+          const total = body.rates ? body.rates.rxBps + body.rates.txBps : null;
+          if (body.connection === "online" && total !== null && total >= SURFING_BPS) {
+            if (surfSinceRef.current === null) surfSinceRef.current = now;
+            idleSinceRef.current = null;
+          } else if (body.connection === "online" && total !== null) {
+            surfSinceRef.current = null;
+            if (idleSinceRef.current === null) idleSinceRef.current = now;
+          } else {
+            surfSinceRef.current = null;
+            idleSinceRef.current = null;
+          }
+          setSubscriber((current) => current ? { ...current, connection: body.connection, live: { ...current.live, ...body.live, connection: body.connection, rates: body.rates ?? null }, status: body.status, billingStatus: body.billingStatus, devices: body.devices ?? current.devices } : current);
         })
         .catch(() => undefined);
-    }, 20000);
-    return () => window.clearInterval(timer);
+    };
+    refresh();
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") refresh();
+    };
+    const timer = window.setInterval(refreshIfVisible, 8000);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
   }, [subscriberId]);
 
   useEffect(() => {
@@ -411,7 +448,7 @@ export function PppoeCustomerPage() {
       houseNumber: data.get("houseNumber"),
       serial: data.get("serial"),
     });
-    setEditing(false);
+    closeDialog();
   }
 
   async function exportSessions() {
@@ -432,6 +469,8 @@ export function PppoeCustomerPage() {
 
   const totalOnline = (usageTrend ?? []).reduce((sum, point) => sum + point.minutes, 0);
   const totalDown = (healthTrend ?? []).reduce((sum, point) => sum + point.minutes, 0);
+  const devices = subscriber.devices ?? [];
+  const devicesOnline = devices.filter((device) => device.online).length;
   const home = (path: string) => (user ? clientPage(user, path) : path);
   const status = labelFor(subscriber.status);
   const billing = billingLabelFor(subscriber.billingStatus);
@@ -443,12 +482,33 @@ export function PppoeCustomerPage() {
   const sessionOpen = subscriber.connection === "online";
   const initials = `${subscriber.firstName.trim().charAt(0)}${subscriber.lastName.trim().charAt(0)}`.toUpperCase() || "?";
   const outstandingDue = Number(subscriber.billing.outstanding) > 0;
-  const paidAmount = Number(amount);
-  const packagePrice = Number(subscriber.billing.price);
-  const purchasedDays = packagePrice > 0 && paidAmount > 0 ? Math.floor((paidAmount * subscriber.billing.cycleDays) / packagePrice) : 0;
-  const anchor = subscriber.billing.expiry && subscriber.billing.expiry > new Date().toISOString().slice(0, 10) ? subscriber.billing.expiry : new Date().toISOString().slice(0, 10);
-  const newExpiry = purchasedDays > 0 ? new Date(`${anchor}T00:00:00`) : null;
-  if (newExpiry) newExpiry.setDate(newExpiry.getDate() + purchasedDays + subscriber.billing.graceDays);
+  const rates = subscriber.live.rates;
+  const liveSpeed = rates ? (
+    <>
+      <span className="text-success">↓</span> {rateLabel(rates.txBps)}{" "}
+      <span className="text-primary">↑</span> {rateLabel(rates.rxBps)}
+    </>
+  ) : subscriber.connection === "online" ? "—" : "Offline";
+  const totalBps = rates ? rates.rxBps + rates.txBps : null;
+  let statusHint: string;
+  let statusTone = "";
+  if (subscriber.connection === "online") {
+    if (totalBps !== null && totalBps >= SURFING_BPS) {
+      statusHint = `Surfing for ${elapsedLabel(surfSinceRef.current ?? Date.now())}`;
+      statusTone = "text-success";
+    } else if (totalBps !== null) {
+      statusHint = `Not surfing for ${elapsedLabel(idleSinceRef.current ?? Date.now())}`;
+      statusTone = "text-warning";
+    } else {
+      statusHint = `IP ${subscriber.live.ip || "—"}`;
+    }
+  } else if (subscriber.connection === "offline") {
+    const lastSeen = stampMs(subscriber.live.lastSeen);
+    statusHint = lastSeen ? `Disconnected for ${elapsedLabel(lastSeen)}` : "Last seen never";
+    statusTone = "text-destructive";
+  } else {
+    statusHint = `Last seen ${subscriber.live.lastSeen ?? "never"}`;
+  }
 
   // The browser fires a "toggle" event on <details> both for user clicks and
   // when React sets/removes the open attribute. Guard the close branch so a
@@ -457,26 +517,8 @@ export function PppoeCustomerPage() {
   const toggleSection = (id: string) => (next: boolean) =>
     setOpenSection((current) => (next ? id : current === id ? null : current));
 
-  const ledger = [
-    ...subscriber.billing.invoices.map((invoice) => ({
-      id: `inv-${invoice.id}`,
-      createdAt: invoice.createdAt,
-      label: invoice.purpose ? invoice.purpose.charAt(0).toUpperCase() + invoice.purpose.slice(1) : "Invoice",
-      amount: `KSh ${invoice.amount}`,
-      badge: <StatusBadge tone={invoiceTone(invoice.status)}>{invoice.status}</StatusBadge>,
-      payment: false,
-    })),
-    ...subscriber.billing.payments.map((payment) => ({
-      id: `pay-${payment.id}`,
-      createdAt: payment.createdAt,
-      label: `Payment · ${payment.method}`,
-      amount: `KSh ${payment.amount}`,
-      badge: null,
-      payment: true,
-    })),
-  ].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-
   const menuItems: { label: string; danger?: boolean; onClick: () => void }[] = [
+    { label: "Transactions", onClick: () => navigate(home(`/pppoe/${subscriberId}/transactions`)) },
     ...(ended
       ? []
       : [
@@ -484,81 +526,67 @@ export function PppoeCustomerPage() {
           { label: "Move to another router", onClick: () => setDialog("migrate") },
         ]),
     ...(sessionOpen ? [{ label: "Disconnect current session", onClick: () => setDialog("disconnect") }] : []),
-    { label: "Reset password", onClick: () => void post("password", {}) },
-    { label: "Show password", onClick: () => void post("reveal", {}) },
+    { label: "Reset password", onClick: () => setDialog("password") },
     {
-      label: "Edit customer details",
+      label: "Show password",
       onClick: () => {
-        setProfileOpen(true);
-        setEditing(true);
+        setDialog("password");
+        void post("reveal", {});
       },
     },
+    { label: "Edit customer details", onClick: () => setDialog("edit") },
     ...(ended ? [] : [{ label: "divider", onClick: () => undefined }, { label: "End service", danger: true, onClick: () => setDialog("terminate") }]),
   ];
 
   return (
     <div className="page-shell py-8">
-      <SecondaryButton to={home("/clients")}>
-        <ArrowLeft className="h-4 w-4" />
-        Back to PPPoE clients
-      </SecondaryButton>
-
-      <section className="mt-4 rounded-2xl border border-border bg-surface shadow-card">
-        <div className={`bg-gradient-to-r from-primary/10 via-primary/5 to-transparent px-5 py-5 sm:px-6 ${profileOpen || editing ? "rounded-t-2xl" : "rounded-2xl"}`}>
-          <div className="flex flex-wrap items-start justify-between gap-4">
-            <button
-              type="button"
-              aria-expanded={profileOpen || editing}
-              onClick={() => setProfileOpen((open) => !open)}
-              className="group flex min-w-0 items-center gap-4 rounded-xl text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+      <section className="overflow-hidden rounded-3xl bg-gradient-to-br from-primary via-primary/85 to-primary/60 text-primary-foreground shadow-card">
+        <div className="px-5 pb-6 pt-5 sm:px-7 sm:pt-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <Link
+              to={home("/clients")}
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-primary-foreground/75 transition hover:text-white"
             >
-              <div
-                className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-primary/15 text-base font-semibold text-primary ring-2 ring-primary/25"
-                aria-hidden="true"
-              >
-                {initials}
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-1.5">
-                  <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">
-                    {subscriber.firstName} {subscriber.lastName}
-                  </h1>
-                  <ChevronDown
-                    className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${profileOpen || editing ? "rotate-180" : ""}`}
-                    aria-hidden="true"
-                  />
-                </div>
-                <p className="mt-0.5 truncate text-sm text-muted-foreground">
-                  {subscriber.phone} · {subscriber.username}
-                </p>
-              </div>
-            </button>
+              <ArrowLeft className="h-4 w-4" />
+              PPPoE clients
+            </Link>
             <div className="flex flex-wrap gap-2">
-              <PrimaryButton
-                type="button"
-                onClick={() => {
-                  setOpenSection("billing");
-                  window.setTimeout(() => amountRef.current?.focus(), 50);
-                }}
+              <Link
+                to={`${home(`/pppoe/${subscriberId}/transactions`)}?pay=1`}
+                className="inline-flex min-h-10 items-center justify-center rounded-xl bg-white px-4 text-sm font-semibold text-primary shadow-sm transition hover:bg-white/90"
               >
                 Record payment
-              </PrimaryButton>
+              </Link>
               {pendingApproval ? (
-                <SecondaryButton type="button" onClick={() => void post("activate", {})}>
+                <button
+                  type="button"
+                  className="inline-flex min-h-10 items-center justify-center rounded-xl bg-white/15 px-4 text-sm font-semibold transition hover:bg-white/25"
+                  onClick={() => void post("activate", {})}
+                >
                   Approve
-                </SecondaryButton>
+                </button>
               ) : ended || subscriber.status === "expired" ? null : (
-                <SecondaryButton type="button" onClick={() => setDialog("suspend")}>
+                <button
+                  type="button"
+                  className="inline-flex min-h-10 items-center justify-center rounded-xl bg-white/15 px-4 text-sm font-semibold transition hover:bg-white/25"
+                  onClick={() => setDialog("suspend")}
+                >
                   {suspended ? "Continue" : "Suspend"}
-                </SecondaryButton>
+                </button>
               )}
               <div className="relative" ref={menuRef}>
-                <SecondaryButton type="button" aria-haspopup="menu" aria-expanded={menuOpen} onClick={() => setMenuOpen((open) => !open)}>
+                <button
+                  type="button"
+                  aria-haspopup="menu"
+                  aria-expanded={menuOpen}
+                  onClick={() => setMenuOpen((open) => !open)}
+                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-white/15 px-4 text-sm font-semibold transition hover:bg-white/25"
+                >
                   More
                   <ChevronDown className="h-4 w-4" />
-                </SecondaryButton>
+                </button>
                 {menuOpen ? (
-                  <div role="menu" className="absolute right-0 z-40 mt-1 w-56 overflow-hidden rounded-xl border border-border bg-surface py-1 shadow-lg">
+                  <div role="menu" className="absolute right-0 z-40 mt-1 w-56 overflow-hidden rounded-xl border border-border bg-surface py-1 text-foreground shadow-lg">
                     {menuItems.map((item, index) =>
                       item.label === "divider" ? (
                         <div key={`divider-${index}`} className="my-1 border-t border-border" />
@@ -582,363 +610,325 @@ export function PppoeCustomerPage() {
               </div>
             </div>
           </div>
-          <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2">
-            <span className="flex items-center gap-2 text-sm font-semibold text-foreground">
-              <span className={`h-3 w-3 rounded-full ${connectionDot}`} aria-hidden="true" />
-              {connectionLabel}
-            </span>
-            <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
-            <StatusBadge tone={billing.tone}>{billing.label}</StatusBadge>
-            <span className="text-sm text-muted-foreground">
-              {subscriber.routerName} · {subscriber.packageName}
-            </span>
-          </div>
-        </div>
 
-        {profileOpen || editing ? (
-          <div className="rounded-b-2xl border-t border-border px-5 py-5 sm:px-6">
-            {editing ? (
-              <form className="grid gap-4" onSubmit={(event) => void saveEdit(event)}>
-                <div className="grid gap-3 sm:grid-cols-2">
-                  <FormField id="edit-firstName" label="First name"><input id="edit-firstName" className="field" name="firstName" defaultValue={subscriber.firstName} /></FormField>
-                  <FormField id="edit-lastName" label="Last name"><input id="edit-lastName" className="field" name="lastName" defaultValue={subscriber.lastName} /></FormField>
-                  <FormField id="edit-phone" label="Phone"><input id="edit-phone" className="field" name="phone" defaultValue={subscriber.phone} /></FormField>
-                  <FormField id="edit-email" label="Email"><input id="edit-email" className="field" name="email" defaultValue={subscriber.email} /></FormField>
-                  <FormField id="edit-buildingName" label="Building"><input id="edit-buildingName" className="field" name="buildingName" defaultValue={subscriber.buildingName} /></FormField>
-                  <FormField id="edit-houseNumber" label="House number"><input id="edit-houseNumber" className="field" name="houseNumber" defaultValue={subscriber.houseNumber} /></FormField>
-                  <FormField id="edit-serial" label="Device serial"><input id="edit-serial" className="field" name="serial" defaultValue={subscriber.serial} /></FormField>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  <PrimaryButton type="submit">Save</PrimaryButton>
-                  <SecondaryButton type="button" onClick={() => setEditing(false)}>Cancel</SecondaryButton>
-                </div>
-              </form>
-            ) : (
-              <>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h2 className="text-sm font-semibold">Client details</h2>
-                  <SecondaryButton type="button" className="min-h-8 px-3" onClick={() => setEditing(true)}>
-                    Edit
-                  </SecondaryButton>
-                </div>
-                <div className="mt-3">
-                  <DetailGrid items={[
-                    { label: "Phone", value: subscriber.phone || "—" },
-                    { label: "Email", value: subscriber.email || "—" },
-                    { label: "Building", value: subscriber.buildingName || "—" },
-                    { label: "House", value: subscriber.houseNumber || "—" },
-                    { label: "Device serial", value: subscriber.serial || "—" },
-                    { label: "IP assignment", value: subscriber.staticIp || "From pool" },
-                    { label: "Router", value: subscriber.routerName || "—" },
-                    { label: "Package", value: subscriber.packageName || "—" },
-                  ]} />
-                </div>
-              </>
-            )}
-          </div>
-        ) : null}
-      </section>
-
-      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
-        <StatCard
-          icon={<Activity className="h-4 w-4" />}
-          label="Status"
-          value={connectionLabel}
-          hint={subscriber.connection === "online" ? `IP ${subscriber.live.ip || "—"}` : `Last seen ${subscriber.live.lastSeen ?? "never"}`}
-        />
-        <StatCard
-          icon={<Gauge className="h-4 w-4" />}
-          label="Plan"
-          value={`${subscriber.downloadMbps ?? "—"}↓ ${subscriber.uploadMbps ?? "—"}↑ Mbps`}
-          hint={subscriber.packageName}
-        />
-        <StatCard
-          icon={<ArrowDownUp className="h-4 w-4" />}
-          label="Usage · 30d"
-          value={bytes(subscriber.usage.monthBytesIn + subscriber.usage.monthBytesOut)}
-          hint={`${bytes(subscriber.usage.monthBytesIn)}↓ ${bytes(subscriber.usage.monthBytesOut)}↑`}
-        />
-        <StatCard
-          icon={<Wallet className="h-4 w-4" />}
-          label="Outstanding"
-          value={outstandingDue ? `KSh ${subscriber.billing.outstanding}` : "KSh 0"}
-          valueClass={outstandingDue ? "text-destructive" : "text-success"}
-          hint={`Due ${subscriber.billing.nextDueDate ?? "—"}`}
-        />
-        <StatCard
-          icon={<CalendarClock className="h-4 w-4" />}
-          label="Access expires"
-          value={subscriber.billing.expiry ?? "—"}
-          hint={billing.label}
-        />
-      </div>
-
-      <div className="mt-4 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_19rem]">
-        <section className="overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
-        <Section title="Payments &amp; billing" open={openSection === "billing"} onToggle={toggleSection("billing")}>
-          <div className="grid gap-6 lg:grid-cols-2">
-            <form
-              className="grid gap-3"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void post("renew", { amount, mpesaReference: reference });
-              }}
-            >
-              <FormField id="payment-amount" label="Amount (KSh)">
-                <input id="payment-amount" ref={amountRef} className="field" value={amount} onChange={(event) => setAmount(event.target.value)} />
-              </FormField>
-              {paidAmount > 0 && packagePrice > 0 ? (
-                <p className="text-xs text-muted-foreground">
-                  ≈ {purchasedDays} {purchasedDays === 1 ? "day" : "days"} of internet
-                  {newExpiry ? ` · access until ${newExpiry.toISOString().slice(0, 10)}` : ""}
-                  {purchasedDays === 0 ? " · less than a day — enter a higher amount" : ""}
-                </p>
-              ) : null}
-              <FormField id="payment-reference" label="M-Pesa reference (optional)">
-                <input id="payment-reference" className="field" value={reference} onChange={(event) => setReference(event.target.value)} />
-              </FormField>
-              <div className="flex flex-wrap gap-2">
-                <PrimaryButton type="submit">Record payment</PrimaryButton>
-                <SecondaryButton type="button" onClick={() => void post("payment", { amount, method: "stk" })}>Send STK push</SecondaryButton>
-              </div>
-            </form>
-            <div>
-              <h3 className="text-sm font-semibold">Invoices &amp; payments</h3>
-              {ledger.length === 0 ? (
-                <p className="mt-3 text-sm text-muted-foreground">No invoices or payments yet.</p>
-              ) : (
-                <ul className="mt-3 grid gap-2 text-sm">
-                  {ledger.map((entry) => (
-                    <li key={entry.id} className="flex flex-wrap items-center justify-between gap-2 border-b border-border py-2">
-                      <span>{entry.label}</span>
-                      <span className="flex items-center gap-2">
-                        <span className={entry.payment ? "font-medium text-success" : "font-medium"}>{entry.amount}</span>
-                        {entry.badge}
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-        </Section>
-
-        <Section title="Usage" open={openSection === "usage"} onToggle={toggleSection("usage")}>
-          <p className="text-sm text-muted-foreground">
-            Plan {subscriber.downloadMbps ?? "—"}↓ / {subscriber.uploadMbps ?? "—"}↑ Mbps · Last 30 days{" "}
-            {bytes(subscriber.usage.monthBytesIn + subscriber.usage.monthBytesOut)} ({bytes(subscriber.usage.monthBytesIn)}↓ {bytes(subscriber.usage.monthBytesOut)}↑)
-          </p>
-        </Section>
-
-        <Section
-          title="Sessions &amp; activity"
-          open={openSection === "history"}
-          onToggle={toggleSection("history")}
-          action={
-            <SecondaryButton
+          <div className="mt-5 flex flex-wrap items-center gap-x-10 gap-y-5">
+            <button
               type="button"
-              className="min-h-8 px-3"
-              onClick={(event) => {
-                event.preventDefault();
-                event.stopPropagation();
-                void exportSessions();
-              }}
+              aria-expanded={profileOpen}
+              onClick={() => setProfileOpen((open) => !open)}
+              className="flex min-w-0 items-center gap-4 rounded-xl text-left"
             >
-              Export CSV
-            </SecondaryButton>
-          }
-        >
-          <div className="grid gap-6 lg:grid-cols-2">
-            <div>
-              <h3 className="text-sm font-semibold">Sessions</h3>
-              <div className="mt-3 overflow-x-auto">
-                <table className="w-full min-w-[40rem] text-left text-sm">
-                  <thead className="text-xs text-muted-foreground">
-                    <tr>
-                      <th className="py-2">Started</th>
-                      <th className="py-2">Ended</th>
-                      <th className="py-2">Duration</th>
-                      <th className="py-2">IP</th>
-                      <th className="py-2">Downloaded</th>
-                      <th className="py-2">Uploaded</th>
-                      <th className="py-2">Ended because</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {subscriber.sessions.length === 0 ? <tr><td colSpan={7} className="py-3 text-muted-foreground">No sessions yet.</td></tr> : null}
-                    {subscriber.sessions.map((session) => (
-                      <tr key={`${session.login}-${session.ip}`} className="border-t border-border">
-                        <td className="py-2">{session.login ?? "—"}</td>
-                        <td className="py-2">{session.logout ?? <span className="text-success">Still connected</span>}</td>
-                        <td className="py-2">{duration(session.duration)}</td>
-                        <td className="py-2">{session.ip}</td>
-                        <td className="py-2">{bytes(session.bytesIn)}</td>
-                        <td className="py-2">{bytes(session.bytesOut)}</td>
-                        <td className="py-2">{session.cause || "—"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div
+                className="relative flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-white text-lg font-semibold text-primary shadow-sm"
+                aria-hidden="true"
+              >
+                {initials}
+                <span className={`absolute bottom-0 right-0 h-4 w-4 rounded-full border-2 border-white ${connectionDot}`} />
               </div>
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold">Activity log</h3>
-              {subscriber.events.length === 0 ? (
-                <p className="mt-3 text-sm text-muted-foreground">No activity yet.</p>
-              ) : (
-                <ul className="mt-3 grid gap-2 text-sm">
-                  {subscriber.events.map((event) => (
-                    <li key={`${event.at}-${event.action}`} className="flex flex-wrap items-baseline gap-2 border-b border-border py-2">
-                      <span className="text-muted-foreground tabular-nums">{event.at}</span>
-                      <span className="font-medium">{event.action}</span>
-                      {event.reason ? <span className="text-muted-foreground">{event.reason}</span> : null}
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </div>
-          </div>
-        </Section>
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <h1 className="truncate text-2xl font-semibold tracking-tight">
+                    {subscriber.firstName} {subscriber.lastName}
+                  </h1>
+                  <span className="shrink-0 rounded-full bg-white/15 px-2.5 py-0.5 text-[11px] font-semibold">{status.label}</span>
+                  <ChevronDown
+                    className={`h-4 w-4 shrink-0 text-primary-foreground/70 transition-transform ${profileOpen ? "rotate-180" : ""}`}
+                    aria-hidden="true"
+                  />
+                </div>
+                <p className="mt-0.5 truncate text-sm text-primary-foreground/75">
+                  {subscriber.phone} · {subscriber.routerName} · {subscriber.packageName}
+                </p>
+              </div>
+            </button>
 
-        <div className="grid border-t border-border sm:grid-cols-2 sm:divide-x sm:divide-border">
-          <div className="p-5">
-            <div className="flex items-baseline justify-between gap-3">
-              <p className="text-xs font-medium text-muted-foreground">Online activity</p>
-              <p className="text-xs tabular-nums text-muted-foreground">Last 3 hours · {totalOnline} min online</p>
-            </div>
-            {usageTrend === null ? (
-              <p className="mt-3 text-sm text-muted-foreground">Reading activity…</p>
-            ) : (
-              <TrendChart
-                ariaLabel="Online activity"
-                emptyText="No activity in the last 3 hours."
-                formatY={(value) => `${value} min`}
-                data={usageTrend.map((point) => ({ x: point.label, y: point.minutes }))}
+            <div className="grid min-w-[18rem] flex-1 grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
+              <Stat label="Status" value={connectionLabel} valueClass={statusTone} hint={statusHint} hintClass={statusTone} />
+              <Stat
+                label="Live speed"
+                value={liveSpeed}
+                hint={`Plan ${subscriber.downloadMbps ?? "—"}↓ ${subscriber.uploadMbps ?? "—"}↑ Mbps`}
               />
-            )}
-          </div>
-          <div className="p-5">
-            <div className="flex items-baseline justify-between gap-3">
-              <p className="text-xs font-medium text-muted-foreground">Router health · {subscriber.routerName}</p>
-              <p className="text-xs tabular-nums text-muted-foreground">Last 3 hours · {totalDown} min down</p>
-            </div>
-            {healthTrend === null ? (
-              <p className="mt-3 text-sm text-muted-foreground">Reading router health…</p>
-            ) : (
-              <TrendChart
-                ariaLabel="Router downtime"
-                emptyText="No downtime recorded."
-                formatY={(value) => `${value} min`}
-                data={healthTrend.map((point) => ({ x: point.label, y: point.minutes }))}
+              <Stat
+                label="Outstanding"
+                value={outstandingDue ? `KSh ${subscriber.billing.outstanding}` : "KSh 0"}
+                valueClass={outstandingDue ? "text-destructive" : "text-success"}
+                hint={`Due ${subscriber.billing.nextDueDate ?? "—"}`}
               />
-            )}
+              <Stat label="Access expires" value={subscriber.billing.expiry ?? "—"} hint={billing.label} />
+            </div>
           </div>
-        </div>
-        </section>
 
-        <aside className="grid content-start gap-4">
-          <section className="rounded-2xl border border-border bg-surface p-5 shadow-card">
-            <div className="flex items-center gap-2.5">
-              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
-                <KeyRound className="h-4 w-4" />
-              </span>
-              <h2 className="text-sm font-semibold">PPPoE credentials</h2>
-            </div>
-            <div className="mt-4 grid gap-3">
-              <div className="rounded-xl border border-border bg-surface-muted/40 p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs text-muted-foreground">Username</p>
+          <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4 border-t border-white/15 pt-4 sm:grid-cols-3 xl:grid-cols-6">
+            <Stat
+              label="Username"
+              value={
+                <>
+                  <code className="truncate">{subscriber.username}</code>
                   <button
                     type="button"
                     aria-label="Copy username"
                     title="Copy username"
-                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground transition hover:bg-surface-muted hover:text-foreground"
+                    className="shrink-0 text-primary-foreground/60 transition hover:text-white"
                     onClick={() => void navigator.clipboard.writeText(subscriber.username)}
                   >
                     <Copy className="h-3.5 w-3.5" />
                   </button>
-                </div>
-                <code className="mt-1 block truncate text-sm font-semibold">{subscriber.username}</code>
-              </div>
-              <div className="rounded-xl border border-border bg-surface-muted/40 p-3">
-                <div className="flex items-center justify-between gap-2">
-                  <p className="text-xs text-muted-foreground">Password</p>
-                  <span className="flex items-center gap-1">
-                    {password ? (
-                      <>
-                        <button
-                          type="button"
-                          aria-label="Copy password"
-                          title="Copy password"
-                          className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground transition hover:bg-surface-muted hover:text-foreground"
-                          onClick={() => void navigator.clipboard.writeText(password)}
-                        >
-                          <Copy className="h-3.5 w-3.5" />
-                        </button>
-                        <button
-                          type="button"
-                          aria-label="Hide password"
-                          title="Hide password"
-                          className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground transition hover:bg-surface-muted hover:text-foreground"
-                          onClick={() => setPassword("")}
-                        >
-                          <EyeOff className="h-3.5 w-3.5" />
-                        </button>
-                      </>
-                    ) : (
+                </>
+              }
+            />
+            <Stat
+              label="Password"
+              value={
+                <>
+                  <code className="truncate">{password || "••••••••••"}</code>
+                  {password ? (
+                    <>
                       <button
                         type="button"
-                        aria-label="Show password"
-                        title="Show password"
-                        className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground transition hover:bg-surface-muted hover:text-foreground"
-                        onClick={() => void post("reveal", {})}
+                        aria-label="Copy password"
+                        title="Copy password"
+                        className="shrink-0 text-primary-foreground/60 transition hover:text-white"
+                        onClick={() => void navigator.clipboard.writeText(password)}
                       >
-                        <Eye className="h-3.5 w-3.5" />
+                        <Copy className="h-3.5 w-3.5" />
                       </button>
-                    )}
-                  </span>
+                      <button
+                        type="button"
+                        aria-label="Hide password"
+                        title="Hide password"
+                        className="shrink-0 text-primary-foreground/60 transition hover:text-white"
+                        onClick={() => setPassword("")}
+                      >
+                        <EyeOff className="h-3.5 w-3.5" />
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      aria-label="Show password"
+                      title="Show password"
+                      className="shrink-0 text-primary-foreground/60 transition hover:text-white"
+                      onClick={() => {
+                        setDialog("password");
+                        void post("reveal", {});
+                      }}
+                    >
+                      <Eye className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </>
+              }
+              hint={
+                <button
+                  type="button"
+                  className="font-medium text-primary-foreground/70 underline-offset-2 transition hover:text-white hover:underline"
+                  onClick={() => setDialog("password")}
+                >
+                  Reset
+                </button>
+              }
+            />
+            <Stat label="IP" value={subscriber.live.ip || "Not connected"} />
+            <Stat label="MAC" value={subscriber.live.mac || "—"} />
+            <Stat label="Uptime" value={subscriber.live.uptime || "—"} />
+            <Stat label="Last seen" value={subscriber.live.lastSeen ?? "Never"} />
+          </div>
+
+          {profileOpen ? (
+            <div className="mt-5 rounded-2xl bg-white/10 p-4 backdrop-blur-sm">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h2 className="text-xs font-semibold uppercase tracking-wide text-primary-foreground/70">Client details</h2>
+                <button
+                  type="button"
+                  className="rounded-lg bg-white/15 px-3 py-1.5 text-xs font-semibold transition hover:bg-white/25"
+                  onClick={() => setDialog("edit")}
+                >
+                  Edit
+                </button>
+              </div>
+              <dl className="mt-3 grid gap-x-8 sm:grid-cols-2">
+                {[
+                  { label: "Phone", value: subscriber.phone || "—" },
+                  { label: "Email", value: subscriber.email || "—" },
+                  { label: "Building", value: subscriber.buildingName || "—" },
+                  { label: "House", value: subscriber.houseNumber || "—" },
+                  { label: "Device serial", value: subscriber.serial || "—" },
+                  { label: "IP assignment", value: subscriber.staticIp || "From pool" },
+                  { label: "Router", value: subscriber.routerName || "—" },
+                  { label: "Package", value: subscriber.packageName || "—" },
+                ].map((item) => (
+                  <div key={item.label} className="flex items-baseline justify-between gap-3 border-b border-white/10 py-2">
+                    <dt className="text-xs text-primary-foreground/60">{item.label}</dt>
+                    <dd className="min-w-0 break-words text-right text-sm font-medium">{item.value}</dd>
+                  </div>
+                ))}
+              </dl>
+            </div>
+          ) : null}
+        </div>
+      </section>
+
+      <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
+        <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2.5 px-5 pt-5 sm:px-6">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
+                <Activity className="h-4 w-4" />
+              </span>
+              <h2 className="text-sm font-semibold">Activity</h2>
+              <p className="ml-auto text-xs text-muted-foreground">
+                30 days {bytes(subscriber.usage.monthBytesIn + subscriber.usage.monthBytesOut)} ({bytes(subscriber.usage.monthBytesIn)}↓ {bytes(subscriber.usage.monthBytesOut)}↑)
+              </p>
+            </div>
+            <div className="grid sm:grid-cols-2 sm:divide-x sm:divide-border">
+              <div className="p-5">
+                <div className="flex items-baseline justify-between gap-3">
+                  <p className="text-xs font-medium text-muted-foreground">Online activity</p>
+                  <p className="text-xs tabular-nums text-muted-foreground">Last 3 hours · {totalOnline} min online</p>
                 </div>
-                <code className="mt-1 block truncate text-sm font-semibold">{password || "••••••••••"}</code>
+                {usageTrend === null ? (
+                  <p className="mt-3 text-sm text-muted-foreground">Reading activity…</p>
+                ) : (
+                  <TrendChart
+                    ariaLabel="Online activity"
+                    emptyText="No activity in the last 3 hours."
+                    formatY={(value) => `${value} min`}
+                    data={usageTrend.map((point) => ({ x: point.label, y: point.minutes }))}
+                  />
+                )}
+              </div>
+              <div className="border-t border-border p-5 sm:border-t-0">
+                <div className="flex items-baseline justify-between gap-3">
+                  <p className="text-xs font-medium text-muted-foreground">Router health · {subscriber.routerName}</p>
+                  <p className="text-xs tabular-nums text-muted-foreground">Last 3 hours · {totalDown} min down</p>
+                </div>
+                {healthTrend === null ? (
+                  <p className="mt-3 text-sm text-muted-foreground">Reading router health…</p>
+                ) : (
+                  <TrendChart
+                    ariaLabel="Router downtime"
+                    emptyText="No downtime recorded."
+                    formatY={(value) => `${value} min`}
+                    data={healthTrend.map((point) => ({ x: point.label, y: point.minutes }))}
+                  />
+                )}
               </div>
             </div>
-            <div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-3">
-              <p className="text-xs text-muted-foreground">Enter these on the customer's router or CPE.</p>
-              <button
-                type="button"
-                className="shrink-0 text-xs font-semibold text-primary hover:underline"
-                onClick={() => void post("password", {})}
-              >
-                Reset
-              </button>
-            </div>
-          </section>
 
-          <section className="rounded-2xl border border-border bg-surface p-5 shadow-card">
-            <div className="flex items-center gap-2.5">
-              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
-                <Wifi className="h-4 w-4" />
-              </span>
-              <h2 className="text-sm font-semibold">Live connection</h2>
-              <span className={`ml-auto h-2.5 w-2.5 rounded-full ${connectionDot}`} aria-hidden="true" />
-            </div>
-            <dl className="mt-3 divide-y divide-border">
-              {[
-                { label: "State", value: connectionLabel },
-                { label: "IP", value: subscriber.live.ip || "Not connected" },
-                { label: "MAC", value: subscriber.live.mac || "—" },
-                { label: "Uptime", value: subscriber.live.uptime || "—" },
-                { label: "Router", value: subscriber.live.router },
-                { label: "Last seen", value: subscriber.live.lastSeen ?? "Never" },
-              ].map((item) => (
-                <div key={item.label} className="flex items-baseline justify-between gap-3 py-2.5">
-                  <dt className="text-xs text-muted-foreground">{item.label}</dt>
-                  <dd className="min-w-0 break-words text-right text-sm font-medium text-foreground">{item.value}</dd>
+            <div className="border-t border-border p-5">
+              <div className="flex items-baseline justify-between gap-3">
+                <p className="text-xs font-medium text-muted-foreground">Devices</p>
+                <p className="text-xs tabular-nums text-muted-foreground">
+                  {devicesOnline > 0 ? `${devicesOnline} connected` : "None connected"} · {devices.length} seen
+                </p>
+              </div>
+              {devices.length === 0 ? (
+                <p className="mt-3 text-sm text-muted-foreground">No devices have connected yet.</p>
+              ) : (
+                <div className="mt-3 overflow-x-auto">
+                  <table className="w-full min-w-[34rem] text-left text-sm">
+                    <thead className="text-xs text-muted-foreground">
+                      <tr>
+                        <th className="py-2">Device</th>
+                        <th className="py-2">Status</th>
+                        <th className="py-2">Connected for</th>
+                        <th className="py-2">Last seen</th>
+                        <th className="py-2">Data</th>
+                        <th className="py-2">Sessions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {devices.map((device) => (
+                        <tr key={device.mac} className="border-t border-border">
+                          <td className="py-2"><code className="text-xs">{device.mac}</code></td>
+                          <td className="py-2">
+                            {device.online ? (
+                              <span className="font-medium text-success">Online{device.ip ? ` · ${device.ip}` : ""}</span>
+                            ) : (
+                              <span className="text-muted-foreground">Offline</span>
+                            )}
+                          </td>
+                          <td className="py-2 tabular-nums">{device.online ? device.onlineFor : duration(device.seconds)}</td>
+                          <td className="py-2">{device.lastSeen ?? "Never"}</td>
+                          <td className="py-2">{bytes(device.bytesIn + device.bytesOut)}</td>
+                          <td className="py-2">{device.sessions}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
-              ))}
-            </dl>
-          </section>
-        </aside>
-      </div>
+              )}
+            </div>
+
+            <Section
+              title="Sessions &amp; activity"
+              open={openSection === "history"}
+              onToggle={toggleSection("history")}
+              action={
+                <SecondaryButton
+                  type="button"
+                  className="min-h-8 px-3"
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    void exportSessions();
+                  }}
+                >
+                  Export CSV
+                </SecondaryButton>
+              }
+            >
+              <div className="grid gap-6 lg:grid-cols-2">
+                <div>
+                  <h3 className="text-sm font-semibold">Sessions</h3>
+                  <div className="mt-3 overflow-x-auto">
+                    <table className="w-full min-w-[32rem] text-left text-sm">
+                      <thead className="text-xs text-muted-foreground">
+                        <tr>
+                          <th className="py-2">Started</th>
+                          <th className="py-2">Ended</th>
+                          <th className="py-2">Duration</th>
+                          <th className="py-2">Downloaded</th>
+                          <th className="py-2">Uploaded</th>
+                          <th className="py-2">Ended because</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {subscriber.sessions.length === 0 ? <tr><td colSpan={6} className="py-3 text-muted-foreground">No sessions yet.</td></tr> : null}
+                        {subscriber.sessions.map((session) => (
+                          <tr key={`${session.login}-${session.ip}`} className="border-t border-border">
+                            <td className="py-2">{session.login ?? "—"}</td>
+                            <td className="py-2">{session.logout ?? <span className="text-success">Still connected</span>}</td>
+                            <td className="py-2">{duration(session.duration)}</td>
+                            <td className="py-2">{bytes(session.bytesIn)}</td>
+                            <td className="py-2">{bytes(session.bytesOut)}</td>
+                            <td className="py-2">{session.cause || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+                <div>
+                  <h3 className="text-sm font-semibold">Activity log</h3>
+                  {subscriber.events.length === 0 ? (
+                    <p className="mt-3 text-sm text-muted-foreground">No activity yet.</p>
+                  ) : (
+                    <ul className="mt-3 grid gap-2 text-sm">
+                      {subscriber.events.map((event) => (
+                        <li key={`${event.at}-${event.action}`} className="flex flex-wrap items-baseline gap-2 border-b border-border py-2">
+                          <span className="text-muted-foreground tabular-nums">{event.at}</span>
+                          <span className="font-medium">{event.action}</span>
+                          {event.reason ? <span className="text-muted-foreground">{event.reason}</span> : null}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              </div>
+            </Section>
+          </div>
+      </section>
 
       {message ? <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{message}</p> : null}
 
@@ -1012,6 +1002,95 @@ export function PppoeCustomerPage() {
           <input id="terminate-reason" className="field" value={reason} onChange={(event) => setReason(event.target.value)} />
         </FormField>
       </ActionDialog>
+
+      <Dialog.Root open={dialog === "password"} onOpenChange={(next) => { if (!next) closeDialog(); }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+          <Dialog.Content className="fixed left-[50%] top-[50%] z-50 grid w-full max-w-md translate-x-[-50%] translate-y-[-50%] gap-4 rounded-xl border border-border bg-surface p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
+            <div>
+              <Dialog.Title className="text-base font-semibold text-foreground">PPPoE password</Dialog.Title>
+              <Dialog.Description className="mt-2 text-sm text-muted-foreground">
+                Show the current password or reset it. After a reset the customer needs the new password to connect.
+              </Dialog.Description>
+            </div>
+            <div className="rounded-xl border border-border bg-surface-muted/40 p-3">
+              <div className="flex items-center justify-between gap-2">
+                <p className="text-xs text-muted-foreground">Password for {subscriber.username}</p>
+                <span className="flex items-center gap-1">
+                  {password ? (
+                    <>
+                      <button
+                        type="button"
+                        aria-label="Copy password"
+                        title="Copy password"
+                        className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground transition hover:bg-surface-muted hover:text-foreground"
+                        onClick={() => void navigator.clipboard.writeText(password)}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Hide password"
+                        title="Hide password"
+                        className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground transition hover:bg-surface-muted hover:text-foreground"
+                        onClick={() => setPassword("")}
+                      >
+                        <EyeOff className="h-3.5 w-3.5" />
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      aria-label="Show password"
+                      title="Show password"
+                      className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground transition hover:bg-surface-muted hover:text-foreground"
+                      onClick={() => void post("reveal", {})}
+                    >
+                      <Eye className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </span>
+              </div>
+              <code className="mt-1 block truncate text-sm font-semibold">{password || "••••••••••"}</code>
+            </div>
+            {message ? <p className="text-sm text-destructive">{message}</p> : null}
+            <div className="flex flex-wrap justify-end gap-2">
+              <SecondaryButton type="button" onClick={closeDialog}>Close</SecondaryButton>
+              <PrimaryButton type="button" onClick={() => void post("password", {})}>Reset password</PrimaryButton>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
+      <Dialog.Root open={dialog === "edit"} onOpenChange={(next) => { if (!next) closeDialog(); }}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
+          <Dialog.Content className="fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 rounded-xl border border-border bg-surface p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
+            <div>
+              <Dialog.Title className="text-base font-semibold text-foreground">Edit customer details</Dialog.Title>
+              <Dialog.Description className="mt-2 text-sm text-muted-foreground">
+                Update the customer's contact and installation details.
+              </Dialog.Description>
+            </div>
+            <form className="grid gap-4" onSubmit={(event) => void saveEdit(event)}>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <FormField id="edit-firstName" label="First name"><input id="edit-firstName" className="field" name="firstName" defaultValue={subscriber.firstName} /></FormField>
+                <FormField id="edit-lastName" label="Last name"><input id="edit-lastName" className="field" name="lastName" defaultValue={subscriber.lastName} /></FormField>
+                <FormField id="edit-phone" label="Phone"><input id="edit-phone" className="field" name="phone" defaultValue={subscriber.phone} /></FormField>
+                <FormField id="edit-email" label="Email"><input id="edit-email" className="field" name="email" defaultValue={subscriber.email} /></FormField>
+                <FormField id="edit-buildingName" label="Building"><input id="edit-buildingName" className="field" name="buildingName" defaultValue={subscriber.buildingName} /></FormField>
+                <FormField id="edit-houseNumber" label="House number"><input id="edit-houseNumber" className="field" name="houseNumber" defaultValue={subscriber.houseNumber} /></FormField>
+                <FormField id="edit-serial" label="Device serial"><input id="edit-serial" className="field" name="serial" defaultValue={subscriber.serial} /></FormField>
+              </div>
+              {message ? <p className="text-sm text-destructive">{message}</p> : null}
+              <div className="flex flex-wrap justify-end gap-2">
+                <SecondaryButton type="button" onClick={closeDialog}>Cancel</SecondaryButton>
+                <PrimaryButton type="submit">Save</PrimaryButton>
+              </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
     </div>
   );
 }

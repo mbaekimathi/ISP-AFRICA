@@ -239,7 +239,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
                         Approve
                       </SecondaryButton>
                     ) : client.status === "expired" || client.status === "disconnected" || client.status === "cancelled" ? (
-                      <SecondaryButton to={home(`/pppoe/${client.id}?recharge=1`)}>Recharge</SecondaryButton>
+                      <SecondaryButton to={`${home(`/pppoe/${client.id}/transactions`)}?pay=1`}>Recharge</SecondaryButton>
                     ) : (
                       <SecondaryButton type="button" disabled={busy === client.id} onClick={() => void act(client.id, client.status === "suspended" ? "reactivate" : "suspend")}>
                         {client.status === "suspended" ? "Continue" : "Suspend"}

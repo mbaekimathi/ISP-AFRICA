@@ -1791,7 +1791,7 @@ class Handler(BaseHTTPRequestHandler):
                     WHERE e.subscriber_id = s.id ORDER BY e.created_at DESC LIMIT 1) AS last_action
             FROM pppoe_subscribers s
             JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
-            JOIN isp_mikrotik_devices d ON d.id = s.router_id
+            LEFT JOIN isp_mikrotik_devices d ON d.id = s.router_id
             WHERE s.client_id = %s
             """,
             (client_id,),
@@ -2260,13 +2260,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def delete_mikrotik(self, cursor, device_id, token):
         client_id = self.require_client(cursor, token)
-        self.mikrotik_row(cursor, device_id, client_id)
-        cursor.execute(
-            "SELECT id FROM pppoe_subscribers WHERE router_id = %s AND client_id = %s LIMIT 1",
-            (device_id, client_id),
+        router = self.mikrotik_row(cursor, device_id, client_id)
+        pppoe_store.disconnect_router_clients(
+            cursor, client_id, device_id, client_id, f"Router {router['name']} was deleted."
         )
-        if cursor.fetchone():
-            raise ApiError(400, "That router still has clients. Disconnect them before deleting it.")
         cursor.execute("SELECT nasname FROM isp_radius_nas WHERE router_id = %s", (device_id,))
         nas = cursor.fetchone()
         if nas and nas.get("nasname"):
@@ -2423,13 +2420,17 @@ class Handler(BaseHTTPRequestHandler):
 
     def push_pppoe_enforcement(self, cursor, device_id, client_id, enforced):
         cursor.execute(
-            "SELECT tunnel_ip, api_secret FROM isp_mikrotik_devices WHERE id = %s AND client_id = %s",
+            "SELECT tunnel_ip, api_secret, pppoe_interface, port_plan FROM isp_mikrotik_devices WHERE id = %s AND client_id = %s",
             (device_id, client_id),
         )
         row = cursor.fetchone()
         if not row or not row.get("api_secret") or not row.get("tunnel_ip"):
             raise routeros_api.RouterError("Router access is not saved yet, so nothing was changed on the router.")
         password = routeros_api.open_password(row["api_secret"])
+        plan = self.read_port_plan(row)
+        access = (row.get("pppoe_interface") or "") or next(
+            (name for name, uses in plan.items() if "pppoe" in uses), ""
+        )
         radius = None
         if enforced:
             pppoe_store.sync_router_access(cursor, client_id, device_id)
@@ -2442,8 +2443,12 @@ class Handler(BaseHTTPRequestHandler):
             cursor.execute("SELECT secret_sealed FROM isp_radius_nas WHERE router_id = %s", (device_id,))
             nas = cursor.fetchone()
             secret = routeros_api.open_password(nas["secret_sealed"]) if nas and nas.get("secret_sealed") else ""
-            radius = {"address": os.environ.get("ISP_RADIUS_HOST", "10.88.0.1"), "secret": secret}
-        routeros_api.apply_pppoe_enforcement(row["tunnel_ip"], password, enforced, radius=radius)
+            radius = {
+                "address": os.environ.get("ISP_RADIUS_HOST", "10.88.0.1"),
+                "secret": secret,
+                "source": row["tunnel_ip"],
+            }
+        routeros_api.apply_pppoe_enforcement(row["tunnel_ip"], password, enforced, radius=radius, access=access or None)
 
     def save_port_uses(self, cursor, device_id, token, payload):
         client_id = self.require_client(cursor, token)

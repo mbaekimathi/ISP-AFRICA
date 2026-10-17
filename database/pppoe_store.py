@@ -336,12 +336,20 @@ def ensure_nas(cursor, router):
     return secret
 
 
-def send_disconnect(host, secret, username):
+def send_disconnect(host, secret, username, session_id="", framed=""):
     if not host or not secret:
         return "queued"
     identifier = secrets.randbelow(256)
     user = username.encode()
     attributes = bytes([1, len(user) + 2]) + user
+    if session_id:
+        sid = session_id.encode()
+        attributes += bytes([44, len(sid) + 2]) + sid
+    if framed:
+        try:
+            attributes += bytes([8, 6]) + socket.inet_aton(framed)
+        except OSError:
+            pass
     length = 20 + len(attributes)
     head = bytes([40, identifier, length >> 8, length & 255])
     authenticator = hashlib.md5(head + bytes(16) + attributes + secret.encode()).digest()
@@ -731,7 +739,7 @@ def list_subscribers(cursor, client_id, query, service="pppoe"):
         FROM pppoe_subscribers s
         JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
         JOIN isp_packages p ON p.id = s.package_id
-        JOIN isp_mikrotik_devices d ON d.id = s.router_id
+        LEFT JOIN isp_mikrotik_devices d ON d.id = s.router_id
         WHERE {' AND '.join(where)}
         ORDER BY s.first_name, s.last_name
     """
@@ -770,12 +778,12 @@ def require_owned(cursor, client_id, subscriber_id):
         SELECT s.*, sub.billing_status, sub.expiry_date, sub.price, sub.next_due_date, sub.billing_cycle,
                sub.cycle_days, sub.grace_days, sub.auto_renew, sub.discount, sub.discount_reason, sub.start_date AS sub_start,
                p.name AS package_name, p.download_mbps, p.upload_mbps,
-               d.name AS router_name, d.tunnel_status, d.tunnel_ip,
+               d.name AS router_name, d.tunnel_status, d.tunnel_ip, d.api_secret,
                (SELECT e.action FROM pppoe_events e WHERE e.subscriber_id = s.id ORDER BY e.created_at DESC LIMIT 1) AS last_action
         FROM pppoe_subscribers s
         JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
         JOIN isp_packages p ON p.id = s.package_id
-        JOIN isp_mikrotik_devices d ON d.id = s.router_id
+        LEFT JOIN isp_mikrotik_devices d ON d.id = s.router_id
         WHERE s.id = %s AND s.client_id = %s
         """,
         (subscriber_id, client_id),
@@ -826,7 +834,9 @@ def subscriber_detail(cursor, client_id, subscriber_id):
         "uptime": (current or {}).get("uptime") or "",
         "router": row["router_name"],
         "lastSeen": (current or {}).get("lastSeen"),
+        "rates": live_rates(cursor, row) if body["connection"] == "online" else None,
     }
+    body["devices"] = device_rows(cursor, row)
     return body
 
 
@@ -868,6 +878,154 @@ def current_session(cursor, username):
     }
 
 
+def session_device(cursor, row):
+    """(host, api_secret) for the NAS actually holding the open session.
+
+    Falls back to the assigned router when there is no live session — the
+    subscriber's router_id can point at a deleted device.
+    """
+    host = row.get("tunnel_ip")
+    secret = row.get("api_secret")
+    username = row.get("pppoe_username")
+    if not username:
+        return host, secret
+    cursor.execute(
+        "SELECT nasipaddress FROM radacct WHERE username = %s AND acctstoptime IS NULL LIMIT 1",
+        (username,),
+    )
+    session = cursor.fetchone()
+    if session and session.get("nasipaddress"):
+        cursor.execute(
+            "SELECT tunnel_ip, api_secret FROM isp_mikrotik_devices WHERE tunnel_ip = %s LIMIT 1",
+            (session["nasipaddress"],),
+        )
+        device = cursor.fetchone()
+        if device and device.get("api_secret"):
+            host, secret = device["tunnel_ip"], device["api_secret"]
+    return host, secret
+
+
+def live_rates(cursor, row):
+    """Best-effort instantaneous throughput for the subscriber's dynamic PPPoE interface."""
+    username = row.get("pppoe_username")
+    if not username:
+        return None
+    host, secret = session_device(cursor, row)
+    if not host or not secret:
+        return None
+    try:
+        return routeros_api.subscriber_rates(host, routeros_api.open_password(secret), username)
+    except Exception:
+        return None
+
+
+def device_rows(cursor, row):
+    """Per-device view of a subscriber's sessions, keyed by the dialing MAC.
+
+    Live sessions come straight from the NAS (real uptime + byte counters);
+    radacct provides per-device history and lifetime totals. When the router
+    is reachable it is the authority on which devices are online — a stale
+    open radacct row is not enough to mark a device connected.
+    """
+    username = row.get("pppoe_username") or ""
+    devices = []
+    if not username:
+        return devices
+    cursor.execute(
+        """
+        SELECT callingstationid AS mac,
+               COUNT(*) AS sessions,
+               COALESCE(SUM(CASE WHEN acctstoptime IS NOT NULL THEN acctsessiontime ELSE 0 END), 0) AS seconds,
+               COALESCE(SUM(CASE WHEN acctstoptime IS NOT NULL THEN acctinputoctets ELSE 0 END), 0) AS bytes_in,
+               COALESCE(SUM(CASE WHEN acctstoptime IS NOT NULL THEN acctoutputoctets ELSE 0 END), 0) AS bytes_out,
+               COALESCE(SUM(CASE WHEN acctstoptime IS NULL THEN acctsessiontime ELSE 0 END), 0) AS open_seconds,
+               COALESCE(SUM(CASE WHEN acctstoptime IS NULL THEN acctinputoctets ELSE 0 END), 0) AS open_bytes_in,
+               COALESCE(SUM(CASE WHEN acctstoptime IS NULL THEN acctoutputoctets ELSE 0 END), 0) AS open_bytes_out,
+               MAX(COALESCE(acctstoptime, acctupdatetime, acctstarttime)) AS last_seen,
+               MAX(acctstoptime IS NULL) AS is_online,
+               MAX(CASE WHEN acctstoptime IS NULL THEN acctstarttime END) AS online_since,
+               MAX(CASE WHEN acctstoptime IS NULL THEN framedipaddress END) AS ip
+        FROM radacct
+        WHERE username = %s AND callingstationid IS NOT NULL AND callingstationid <> ''
+        GROUP BY callingstationid
+        ORDER BY is_online DESC, last_seen DESC
+        """,
+        (username,),
+    )
+    rows = cursor.fetchall()
+    live = {}
+    router_seen = False
+    host, secret = session_device(cursor, row)
+    if host and secret:
+        try:
+            for session in routeros_api.live_sessions(host, routeros_api.open_password(secret), username):
+                live[routeros_api.norm_mac(session["mac"])] = session
+            router_seen = True
+        except Exception:
+            live = {}
+    now = datetime.now()
+    seen = set()
+    for item in rows:
+        mac = item.get("mac") or ""
+        key = routeros_api.norm_mac(mac)
+        seen.add(key)
+        seconds = int(item.get("seconds") or 0)
+        bytes_in = int(item.get("bytes_in") or 0)
+        bytes_out = int(item.get("bytes_out") or 0)
+        since = item.get("online_since")
+        ip = item.get("ip") or ""
+        last_seen = item.get("last_seen")
+        online = False
+        online_for = ""
+        current = live.get(key)
+        if current is not None:
+            online = True
+            ip = current.get("ip") or ip
+            online_for = current.get("uptime") or ""
+            seconds += int(current.get("seconds") or 0)
+            bytes_in += int(current.get("bytesIn") or 0)
+            bytes_out += int(current.get("bytesOut") or 0)
+            last_seen = now
+        elif not router_seen and isinstance(since, datetime):
+            # Router unreachable — trust the accounting state instead.
+            online = True
+            online_for = str(now - since).split(".", 1)[0]
+            seconds += max(int(item.get("open_seconds") or 0), int((now - since).total_seconds()))
+            bytes_in += int(item.get("open_bytes_in") or 0)
+            bytes_out += int(item.get("open_bytes_out") or 0)
+        devices.append(
+            {
+                "mac": mac,
+                "ip": ip,
+                "sessions": int(item.get("sessions") or 0),
+                "seconds": seconds,
+                "bytesIn": bytes_in,
+                "bytesOut": bytes_out,
+                "online": online,
+                "onlineFor": online_for,
+                "lastSeen": stamp(last_seen),
+            }
+        )
+    for key, current in live.items():
+        if key in seen:
+            continue
+        devices.insert(
+            0,
+            {
+                "mac": current.get("mac") or "",
+                "ip": current.get("ip") or "",
+                "sessions": 1,
+                "seconds": int(current.get("seconds") or 0),
+                "bytesIn": int(current.get("bytesIn") or 0),
+                "bytesOut": int(current.get("bytesOut") or 0),
+                "online": True,
+                "onlineFor": current.get("uptime") or "",
+                "lastSeen": stamp(now),
+            },
+        )
+    return devices
+
+
 def session_rows(cursor, username, limit, offset):
     cursor.execute("SELECT COUNT(*) AS total FROM radacct WHERE username = %s", (username,))
     total = int(cursor.fetchone()["total"])
@@ -906,7 +1064,7 @@ def general_usage(cursor, client_id, service):
                COALESCE(SUM(CASE WHEN a.acctstarttime >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN a.acctinputoctets ELSE 0 END), 0) AS month_in,
                COALESCE(SUM(CASE WHEN a.acctstarttime >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN a.acctoutputoctets ELSE 0 END), 0) AS month_out
         FROM pppoe_subscribers s
-        JOIN isp_mikrotik_devices d ON d.id = s.router_id
+        LEFT JOIN isp_mikrotik_devices d ON d.id = s.router_id
         LEFT JOIN radacct a ON a.username = s.pppoe_username
         WHERE s.client_id = %s AND s.service = %s
         GROUP BY s.id, s.first_name, s.last_name, s.pppoe_username, d.name
@@ -1115,6 +1273,41 @@ def apply_plan(cursor, row, active):
 
 
 def coa_for(cursor, row, username):
+    """Disconnect-Request to the NAS that actually holds the session.
+
+    radacct.nasipaddress is where the PPPoE session really lives; a subscriber's
+    router_id can be stale (deleted/ migrated router) and sending the DM there
+    silently drops nothing. Falls back to the assigned router when no session is
+    open, so the next dial still starts clean.
+    """
+    cursor.execute(
+        """
+        SELECT nasipaddress, acctsessionid, framedipaddress
+        FROM radacct WHERE username = %s AND acctstoptime IS NULL
+        """,
+        (username,),
+    )
+    sessions = cursor.fetchall()
+    if sessions:
+        result = "queued"
+        for session in sessions:
+            host = (session.get("nasipaddress") or "").strip()
+            if not host:
+                continue
+            cursor.execute("SELECT secret FROM nas WHERE nasname = %s LIMIT 1", (host,))
+            nas = cursor.fetchone()
+            if not nas or not nas.get("secret"):
+                continue
+            outcome = send_disconnect(
+                host,
+                nas["secret"],
+                username,
+                session.get("acctsessionid") or "",
+                session.get("framedipaddress") or "",
+            )
+            if outcome != "queued":
+                result = outcome
+        return result
     cursor.execute("SELECT secret_sealed, nasname FROM isp_radius_nas WHERE router_id = %s", (row["router_id"],))
     nas = cursor.fetchone()
     if not nas:
@@ -1124,6 +1317,36 @@ def coa_for(cursor, row, username):
     except routeros_api.RouterError:
         return "queued"
     return send_disconnect(nas["nasname"], secret, username)
+
+
+def disconnect_router_clients(cursor, client_id, router_id, actor_id, reason):
+    """Disconnect every client still assigned to a router that is being deleted."""
+    cursor.execute(
+        """
+        SELECT s.id, s.status, s.password_sealed, s.pppoe_username, s.package_id, s.session_limit,
+               s.static_ip, s.router_id, sub.expiry_date, p.download_mbps, p.upload_mbps
+        FROM pppoe_subscribers s
+        JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
+        JOIN isp_packages p ON p.id = s.package_id
+        WHERE s.client_id = %s AND s.router_id = %s
+        """,
+        (client_id, router_id),
+    )
+    count = 0
+    for row in cursor.fetchall():
+        try:
+            apply_plan(cursor, row, False)
+        except routeros_api.RouterError:
+            pass
+        cursor.execute("UPDATE pppoe_subscribers SET status = 'disconnected' WHERE id = %s", (row["id"],))
+        cursor.execute(
+            "UPDATE pppoe_subscriptions SET billing_status = 'cancelled' WHERE subscriber_id = %s",
+            (row["id"],),
+        )
+        log_event(cursor, client_id, row["id"], actor_id, "disconnected", reason)
+        coa_for(cursor, row, row["pppoe_username"])
+        count += 1
+    return count
 
 
 def reconcile(cursor, client_id):
@@ -1556,7 +1779,9 @@ def dispatch(cursor, method, path, payload, token, query):
         row = require_owned(cursor, client_id, subscriber_id)
         live = current_session(cursor, row["pppoe_username"])
         label = pppoe_service.connection_label(int(row["open_sessions"] or 0), int(row["any_sessions"] or 0) > 0, row["tunnel_status"])
-        return {"connection": label, "live": live, "status": row["status"], "billingStatus": row["billing_status"]}, None
+        rates = live_rates(cursor, row) if label == "online" else None
+        devices = device_rows(cursor, row)
+        return {"connection": label, "live": live, "status": row["status"], "billingStatus": row["billing_status"], "rates": rates, "devices": devices}, None
     if method != "POST":
         return None
     actions = {

@@ -7,6 +7,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pppoe_service
 import pppoe_store
+import routeros_api
 
 
 TODAY = date(2026, 10, 16)
@@ -169,6 +170,53 @@ class PppoeValidationTests(unittest.TestCase):
         self.assertEqual(len(deletes), 2)
         self.assertGreaterEqual(len(inserts), 2)
         self.assertTrue(all(args[0] == "0712345678" for args in inserts))
+
+    def test_coa_reaches_the_nas_that_holds_the_session(self):
+        """A subscriber bound to a deleted router is still kicked on the NAS it actually dialed."""
+
+        class SessionCursor(MemoryCursor):
+            def fetchall(self):
+                sql, _args = self.statements[-1]
+                if sql.startswith("SELECT nasipaddress"):
+                    return [{"nasipaddress": "10.88.0.2", "acctsessionid": "sess-1", "framedipaddress": "10.10.0.2"}]
+                return []
+
+            def fetchone(self):
+                sql, _args = self.statements[-1]
+                if sql.startswith("SELECT secret FROM nas"):
+                    return {"secret": "nas-secret"}
+                return None
+
+        sent = []
+        original = pppoe_store.send_disconnect
+        pppoe_store.send_disconnect = lambda *args: sent.append(args) or "sent"
+        try:
+            result = pppoe_store.coa_for(SessionCursor(), {"router_id": "deleted-router"}, "254795606115")
+        finally:
+            pppoe_store.send_disconnect = original
+        self.assertEqual(result, "sent")
+        self.assertEqual(sent, [("10.88.0.2", "nas-secret", "254795606115", "sess-1", "10.10.0.2")])
+
+    def test_coa_falls_back_to_the_assigned_router_without_a_live_session(self):
+        class IdleCursor(MemoryCursor):
+            def fetchall(self):
+                return []
+
+            def fetchone(self):
+                sql, _args = self.statements[-1]
+                if sql.startswith("SELECT secret_sealed"):
+                    return {"secret_sealed": routeros_api.seal_password("router-secret"), "nasname": "10.88.0.9"}
+                return None
+
+        sent = []
+        original = pppoe_store.send_disconnect
+        pppoe_store.send_disconnect = lambda *args: sent.append(args) or "sent"
+        try:
+            result = pppoe_store.coa_for(IdleCursor(), {"router_id": "router-1"}, "254795606115")
+        finally:
+            pppoe_store.send_disconnect = original
+        self.assertEqual(result, "sent")
+        self.assertEqual(sent, [("10.88.0.9", "router-secret", "254795606115")])
 
 
 if __name__ == "__main__":
