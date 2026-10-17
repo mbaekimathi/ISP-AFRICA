@@ -2489,6 +2489,25 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
         usernames,
         "SELECT username FROM radacct a WHERE a.username IN ({marks}) AND a.acctstoptime IS NULL",
     )
+    # Live view straight from the router — radacct only fills in when RADIUS
+    # accounting is on, so /ip/hotspot/active is the source of truth for who
+    # is actually surfing right now.
+    live = []
+    router_reachable = False
+    macs = [row.get("mac")] + [voucher["redeemed_mac"] for voucher in vouchers]
+    if row.get("tunnel_ip") and row.get("api_secret"):
+        try:
+            live = routeros_api.hotspot_active_sessions(
+                row["tunnel_ip"],
+                routeros_api.open_password(row["api_secret"]),
+                usernames=usernames,
+                macs=macs,
+            )
+            router_reachable = True
+        except (routeros_api.RouterError, OSError):
+            live = []
+    for entry in live:
+        entry["label"] = labels.get(entry["username"]) or entry["username"] or entry["mac"]
     sessions = radacct_for_usernames(
         cursor,
         usernames,
@@ -2576,8 +2595,10 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
             "authorized": bool(row["authorized"]),
             "endedAt": stamp(row.get("ended_at")),
             "deleted": bool(row.get("deleted")),
-            "connection": "online" if open_sessions else "offline",
+            "connection": "online" if (open_sessions or live) else "offline",
         },
+        "live": live,
+        "routerReachable": router_reachable,
         "vouchers": [
             {
                 "id": voucher["id"],

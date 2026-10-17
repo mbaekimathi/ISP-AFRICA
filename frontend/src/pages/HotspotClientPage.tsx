@@ -37,6 +37,18 @@ type GuestSession = {
 
 type TimelineEvent = { at: string | null; event: string; detail: string };
 
+type LiveSession = {
+  username: string;
+  label: string;
+  ip: string;
+  mac: string;
+  uptime: string;
+  idleTime: string;
+  sessionTimeLeft: string;
+  bytesIn: number;
+  bytesOut: number;
+};
+
 type GuestClient = {
   id: string;
   phone: string;
@@ -64,6 +76,8 @@ type GuestDetail = {
   usage: { bytesIn: number; bytesOut: number; sessions: number; firstSeen: string | null; lastSeen: string | null };
   sessions: GuestSession[];
   timeline: TimelineEvent[];
+  live: LiveSession[];
+  routerReachable: boolean;
 };
 
 const statusTone: Record<string, "active" | "due" | "critical" | "paused" | "neutral"> = {
@@ -124,6 +138,11 @@ export function HotspotClientPage() {
 
   useEffect(() => {
     load();
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    const timer = window.setInterval(refreshIfVisible, 8000);
+    return () => window.clearInterval(timer);
   }, [purchaseId]);
 
   async function act(action: string, body?: Record<string, number>) {
@@ -283,6 +302,60 @@ export function HotspotClientPage() {
               <p className="mt-1 text-sm font-semibold leading-7">{detail.usage.lastSeen ?? "Never"}</p>
             </article>
           </div>
+
+          <section className="mt-6 rounded-xl border border-border bg-surface p-5">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <h2 className="font-semibold">Live now</h2>
+              {detail.routerReachable ? (
+                <StatusBadge tone={detail.live.length ? "active" : "paused"}>
+                  {detail.live.length ? `${detail.live.length} device${detail.live.length === 1 ? "" : "s"} online` : "Nobody surfing"}
+                </StatusBadge>
+              ) : (
+                <StatusBadge tone="critical">Router unreachable</StatusBadge>
+              )}
+            </div>
+            {!detail.routerReachable ? (
+              <p className="mt-2 text-xs leading-5 text-muted-foreground">
+                Live device data comes straight from the router. It did not answer — check that the management tunnel
+                and the saved API login still work for {client.routerName || "this router"}.
+              </p>
+            ) : null}
+            {detail.routerReachable && detail.live.length === 0 ? (
+              <p className="mt-2 text-sm text-muted-foreground">This guest has no active session on the router right now.</p>
+            ) : null}
+            {detail.live.length ? (
+              <div className="mt-3 overflow-x-auto">
+                <table className="min-w-[44rem] w-full text-left text-sm">
+                  <thead className="border-b border-border text-xs text-muted-foreground">
+                    <tr>
+                      <th className="px-2 py-2 font-medium">Account</th>
+                      <th className="px-2 py-2 font-medium">IP</th>
+                      <th className="px-2 py-2 font-medium">MAC</th>
+                      <th className="px-2 py-2 font-medium">Uptime</th>
+                      <th className="px-2 py-2 font-medium">Idle</th>
+                      <th className="px-2 py-2 font-medium">Time left</th>
+                      <th className="px-2 py-2 font-medium">Down / Up</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detail.live.map((session) => (
+                      <tr key={session.username || session.mac} className="border-b border-border last:border-0">
+                        <td className="px-2 py-2 font-medium">{session.label || session.username || "—"}</td>
+                        <td className="px-2 py-2">{session.ip || "—"}</td>
+                        <td className="px-2 py-2 text-xs text-muted-foreground">{session.mac || "—"}</td>
+                        <td className="px-2 py-2">{session.uptime || "—"}</td>
+                        <td className="px-2 py-2">{session.idleTime || "—"}</td>
+                        <td className="px-2 py-2">{session.sessionTimeLeft || "—"}</td>
+                        <td className="px-2 py-2">
+                          {bytes(session.bytesIn)} / {bytes(session.bytesOut)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </section>
 
           <div className="mt-6 grid gap-6 lg:grid-cols-2">
             <section className="rounded-xl border border-border bg-surface p-5">

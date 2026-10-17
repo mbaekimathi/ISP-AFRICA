@@ -2262,6 +2262,54 @@ def revoke_hotspot_client(host, password, usernames, timeout=12, port=API_PORT, 
     return {"removed": removed, "dropped": dropped}
 
 
+def _count(value):
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def hotspot_active_sessions(host, password, usernames=None, macs=None, timeout=8, port=API_PORT, opener=None):
+    """Live /ip/hotspot/active rows matching the guest's usernames or MACs."""
+    wanted_users = {str(name) for name in (usernames or []) if str(name or "").strip()}
+    wanted_macs = {str(mac).strip().upper() for mac in (macs or []) if str(mac or "").strip()}
+    if not wanted_users and not wanted_macs:
+        return []
+    connect = opener or socket.create_connection
+    try:
+        sock = connect((host, port), timeout)
+    except OSError as error:
+        raise RouterError("The management tunnel did not answer.") from error
+    try:
+        sock.settimeout(timeout)
+        reader = ByteReader(sock)
+        login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
+        if any(row.get("ret") for row in login):
+            raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
+        rows = talk(sock, reader, ["/ip/hotspot/active/print"])
+    finally:
+        sock.close()
+    live = []
+    for row in rows:
+        user = str(row.get("user") or "")
+        mac = str(row.get("mac-address") or "").upper()
+        if user not in wanted_users and mac not in wanted_macs:
+            continue
+        live.append(
+            {
+                "username": user,
+                "ip": row.get("address") or "",
+                "mac": mac,
+                "uptime": row.get("uptime") or "",
+                "idleTime": row.get("idle-time") or "",
+                "sessionTimeLeft": row.get("session-time-left") or "",
+                "bytesIn": _count(row.get("bytes-in")),
+                "bytesOut": _count(row.get("bytes-out")),
+            }
+        )
+    return live
+
+
 def apply_uplink_plan(host, password, commands, timeout=4, port=API_PORT, opener=None):
     """Move ordinary default-route and source NAT preference. Nothing else."""
     connect = opener or socket.create_connection
