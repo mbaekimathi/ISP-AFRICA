@@ -2199,6 +2199,101 @@ def list_transactions(cursor, client_id, query):
     }
 
 
+def list_hotspot_clients(cursor, client_id, query):
+    """Hotspot guests: one row per purchase, status derived from its vouchers.
+
+    Hotspot buyers never become pppoe_subscribers rows — they exist only as
+    purchases and single-use vouchers, so the clients page reads from them.
+    """
+    where = ["h.client_id = %s"]
+    args = [client_id]
+    router = (query.get("router") or [""])[0]
+    package = (query.get("package") or [""])[0]
+    status = (query.get("status") or [""])[0]
+    billing = (query.get("billing") or [""])[0]
+    search = (query.get("q") or [""])[0].strip()
+    if router:
+        where.append("h.device_id = %s")
+        args.append(router)
+    if package:
+        where.append("h.package_id = %s")
+        args.append(package)
+    if billing:
+        where.append("h.status = %s")
+        args.append(billing)
+    if search:
+        where.append(
+            """(h.phone LIKE %s OR h.mac LIKE %s OR EXISTS (
+                SELECT 1 FROM hotspot_vouchers v
+                WHERE v.purchase_id = h.id AND (v.code LIKE %s OR v.username LIKE %s)
+            ))"""
+        )
+        like = f"%{search}%"
+        args.extend([like, like, like, like])
+    try:
+        limit = min(1000, max(1, int((query.get("limit") or ["1000"])[0])))
+        offset = max(0, int((query.get("offset") or ["0"])[0]))
+    except ValueError as error:
+        raise PppoeError(400, "Enter a valid page size.") from error
+    cursor.execute(
+        f"""
+        SELECT h.id, h.phone, h.mac, h.status, h.amount, h.paid_at, h.created_at,
+               d.name AS router_name, pkg.name AS package_name,
+               (SELECT GROUP_CONCAT(v.code ORDER BY v.issued_at SEPARATOR ', ') FROM hotspot_vouchers v WHERE v.purchase_id = h.id) AS codes,
+               (SELECT COUNT(*) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used') AS used_vouchers,
+               (SELECT MAX(TIMESTAMPADD(SECOND, v.seconds, v.used_at)) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used' AND v.used_at IS NOT NULL) AS surf_until
+        FROM hotspot_purchases h
+        LEFT JOIN isp_mikrotik_devices d ON d.id = h.device_id
+        LEFT JOIN isp_packages pkg ON pkg.id = h.package_id
+        WHERE {' AND '.join(where)}
+        ORDER BY h.created_at DESC
+        """,
+        args,
+    )
+    rows = []
+    now = datetime.now()
+    for item in cursor.fetchall():
+        used = int(item["used_vouchers"] or 0)
+        surf_until = item["surf_until"] if isinstance(item["surf_until"], datetime) else None
+        if item["status"] == "paid":
+            router_status = "surfing" if used and (not surf_until or surf_until > now) else "expired" if used else "not_surfing"
+        elif item["status"] == "pending":
+            router_status = "pending_activation"
+        else:
+            router_status = "disconnected"
+        rows.append(
+            {
+                "id": item["id"],
+                "firstName": "Hotspot",
+                "lastName": "guest",
+                "phone": item["phone"],
+                "username": item["codes"] or item["mac"],
+                "routerName": item.get("router_name") or "",
+                "packageName": item.get("package_name") or "",
+                "status": "active" if item["status"] == "paid" else item["status"],
+                "connection": "online" if router_status == "surfing" else "offline",
+                "routerStatus": router_status,
+                "billingStatus": item["status"],
+                "expiry": stamp(surf_until) if surf_until else stamp(item["paid_at"] or item["created_at"]),
+                "price": format(Decimal(item["amount"]), ".2f"),
+            }
+        )
+    router_states = {"surfing", "not_surfing", "expired", "suspended", "disconnecting", "disconnected", "pending_activation"}
+    if status in router_states:
+        rows = [row for row in rows if row["routerStatus"] == status]
+    elif status in {"online", "offline"}:
+        rows = [row for row in rows if row["connection"] == status]
+    total = len(rows)
+    return {
+        "subscribers": rows[offset:offset + limit],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "routers": list_routers(cursor, client_id),
+        "packages": [{"id": item["id"], "name": item["name"]} for item in cursor_packages(cursor, client_id)],
+    }
+
+
 def parse_daraja_callback(payload):
     """(checkout_id, result_code, description, receipt, phone) from a Daraja STK callback."""
     callback = ((payload or {}).get("Body") or {}).get("stkCallback") or {}
@@ -2263,7 +2358,7 @@ def dispatch(cursor, method, path, payload, token, query):
         client_id = client_id_from(cursor, token)
         return {"packages": packages_for_router(cursor, client_id, router_id)}, None
     if path == "/api/hotspot/subscribers" and method == "GET":
-        return list_subscribers(cursor, client_id_from(cursor, token), query, "hotspot"), None
+        return list_hotspot_clients(cursor, client_id_from(cursor, token), query), None
     if path == "/api/hotspot/usage" and method == "GET":
         return general_usage(cursor, client_id_from(cursor, token), "hotspot"), None
     if path == "/api/billings/transactions" and method == "GET":

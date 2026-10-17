@@ -190,9 +190,10 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
             <option value="">Any billing</option>
             <option value="pending">Pending</option>
             <option value="paid">Paid</option>
-            <option value="overdue">Overdue</option>
-            <option value="suspended">Suspended</option>
-            <option value="cancelled">Cancelled</option>
+            {kind === "hotspot" ? <option value="failed">Failed</option> : null}
+            {kind === "pppoe" ? <option value="overdue">Overdue</option> : null}
+            {kind === "pppoe" ? <option value="suspended">Suspended</option> : null}
+            {kind === "pppoe" ? <option value="cancelled">Cancelled</option> : null}
           </select>
         </label>
       </form>
@@ -237,9 +238,10 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
                 <td className="px-3 py-3">{client.expiry ?? "—"}</td>
                 <td className="px-3 py-3">
                   <div className="flex flex-wrap gap-2">
-                    <SecondaryButton to={home(`/pppoe/${client.id}`)}>View</SecondaryButton>
-                    <SecondaryButton to={home(`/pppoe/${client.id}?edit=1`)}>Edit</SecondaryButton>
-                    {client.status === "pending_activation" ? (
+                    {kind === "hotspot" ? <span className="text-muted-foreground">—</span> : null}
+                    {kind === "pppoe" ? <SecondaryButton to={home(`/pppoe/${client.id}`)}>View</SecondaryButton> : null}
+                    {kind === "pppoe" ? <SecondaryButton to={home(`/pppoe/${client.id}?edit=1`)}>Edit</SecondaryButton> : null}
+                    {kind === "pppoe" ? (client.status === "pending_activation" ? (
                       <SecondaryButton type="button" disabled={busy === client.id} onClick={() => void act(client.id, "activate")}>
                         Approve
                       </SecondaryButton>
@@ -249,8 +251,8 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
                       <SecondaryButton type="button" disabled={busy === client.id} onClick={() => void act(client.id, client.status === "suspended" ? "reactivate" : "suspend")}>
                         {client.status === "suspended" ? "Continue" : "Suspend"}
                       </SecondaryButton>
-                    )}
-                    {client.routerStatus === "surfing" || client.routerStatus === "expired_online" || client.routerStatus === "suspended_online" ? (
+                    )) : null}
+                    {kind === "pppoe" && (client.routerStatus === "surfing" || client.routerStatus === "expired_online" || client.routerStatus === "suspended_online") ? (
                       <SecondaryButton type="button" disabled={busy === client.id} onClick={() => void act(client.id, "disconnect")}>Disconnect</SecondaryButton>
                     ) : null}
                   </div>
