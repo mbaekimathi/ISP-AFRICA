@@ -61,7 +61,7 @@ export type Subscriber = {
 
 type PackageOption = { id: string; name: string; price: string };
 type RouterOption = { id: string; name: string };
-type DialogKind = "suspend" | "package" | "migrate" | "disconnect" | "terminate" | "password" | "edit";
+type DialogKind = "suspend" | "package" | "migrate" | "disconnect" | "terminate" | "password" | "edit" | "delete";
 type Tone = "active" | "due" | "paused" | "neutral";
 type TrendPoint = { label: string; date: string; minutes: number; drops: number };
 
@@ -466,6 +466,16 @@ export function PppoeCustomerPage() {
     closeDialog();
   }
 
+  async function removeCustomer() {
+    setMessage("");
+    try {
+      await apiRequest(`/api/pppoe/subscribers/${subscriberId}/delete`, { method: "POST", body: JSON.stringify({}) });
+      navigate(home("/clients"));
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "That customer could not be deleted.");
+    }
+  }
+
   async function exportSessions() {
     const body = await apiRequest<{ csv?: string; filename?: string }>(`/api/pppoe/subscribers/${subscriberId}/sessions?export=csv&limit=500`);
     if (!body.csv) return;
@@ -568,6 +578,8 @@ export function PppoeCustomerPage() {
     },
     { label: "Edit customer details", onClick: () => setDialog("edit") },
     ...(ended ? [] : [{ label: "divider", onClick: () => undefined }, { label: "End service", danger: true, onClick: () => setDialog("terminate") }]),
+    { label: "divider", onClick: () => undefined },
+    { label: "Delete customer", danger: true, onClick: () => setDialog("delete") },
   ];
 
   return (
@@ -1046,6 +1058,16 @@ export function PppoeCustomerPage() {
           <input id="terminate-reason" className="field" value={reason} onChange={(event) => setReason(event.target.value)} />
         </FormField>
       </ActionDialog>
+
+      <ActionDialog
+        open={dialog === "delete"}
+        onClose={closeDialog}
+        title="Delete this customer"
+        description="Access is revoked, live sessions are dropped, and the customer leaves the clients list. Payment and usage history is kept."
+        confirmLabel="Delete customer"
+        destructive
+        onConfirm={removeCustomer}
+      />
 
       <Dialog.Root open={dialog === "password"} onOpenChange={(next) => { if (!next) closeDialog(); }}>
         <Dialog.Portal>
