@@ -64,7 +64,7 @@ class PppoeValidationTests(unittest.TestCase):
         checked = pppoe_service.validate_pppoe_provisioning(payload(), context(), TODAY)
         self.assertEqual(checked["errors"], [])
         plan = checked["normalized"]
-        self.assertEqual(plan["username"], "254712345678")
+        self.assertEqual(plan["username"], "0712345678")
         self.assertEqual(plan["status"], "active")
         self.assertEqual(plan["staticIp"], "10.10.0.2")
         self.assertEqual(plan["rateLimit"], "5M/10M")
@@ -168,7 +168,7 @@ class PppoeValidationTests(unittest.TestCase):
         inserts = [args for sql, args in cursor.statements if sql.startswith("INSERT INTO radcheck")]
         self.assertEqual(len(deletes), 2)
         self.assertGreaterEqual(len(inserts), 2)
-        self.assertTrue(all(args[0] == "254712345678" for args in inserts))
+        self.assertTrue(all(args[0] == "0712345678" for args in inserts))
 
 
 if __name__ == "__main__":

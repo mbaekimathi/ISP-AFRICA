@@ -13,6 +13,8 @@ import socket
 import struct
 import threading
 
+import pppoe_service
+
 AUTH_PORT = 1812
 ACCT_PORT = 1813
 STATUS = {}
@@ -357,10 +359,12 @@ def reply_attributes(cursor, username, extra):
     return encoded + extra
 
 
-def open_sessions(cursor, username):
+def open_sessions(cursor, usernames):
+    names = list(usernames)
+    marks = ", ".join(["%s"] * len(names))
     cursor.execute(
-        "SELECT COUNT(*) AS open_count FROM radacct WHERE username = %s AND acctstoptime IS NULL",
-        (username,),
+        f"SELECT COUNT(*) AS open_count FROM radacct WHERE username IN ({marks}) AND acctstoptime IS NULL",
+        names,
     )
     return int(cursor.fetchone()["open_count"])
 
@@ -373,19 +377,25 @@ def authenticate(cursor, packet, source_ip):
     username = attr_text(packet["attrs"], 1)
     if not username:
         return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", 80 in packet["attrs"])
-    cursor.execute("SELECT attribute, value FROM radcheck WHERE username = %s", (username,))
-    checks = {row["attribute"]: row["value"] for row in cursor.fetchall()}
+    candidates = [username] + sorted(alias for alias in pppoe_service.phone_variants(username) if alias != username)
+    marks = ", ".join(["%s"] * len(candidates))
+    cursor.execute(f"SELECT username, attribute, value FROM radcheck WHERE username IN ({marks})", candidates)
+    by_user = {}
+    for row in cursor.fetchall():
+        by_user.setdefault(row["username"], {})[row["attribute"]] = row["value"]
+    stored = next((name for name in candidates if name in by_user), "")
+    checks = by_user.get(stored, {})
     cleartext = checks.get("Cleartext-Password")
     if checks.get("Auth-Type") == "Reject" or not cleartext:
         return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", 80 in packet["attrs"])
     limit = int(checks.get("Simultaneous-Use") or 1)
-    if open_sessions(cursor, username) >= limit:
+    if open_sessions(cursor, set(candidates) | {stored}) >= limit:
         return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", 80 in packet["attrs"])
     ok, extra = verify_password(packet, secret, cleartext)
     if not ok:
         print(f"event=radius-auth result=reject user={username} source={source_ip}", flush=True)
         return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", 80 in packet["attrs"])
-    attrs = reply_attributes(cursor, username, extra)
+    attrs = reply_attributes(cursor, stored, extra)
     print(f"event=radius-auth result=accept user={username} source={source_ip}", flush=True)
     return build_response(ACCESS_ACCEPT, packet["id"], packet["auth"], secret, attrs, 80 in packet["attrs"])
 

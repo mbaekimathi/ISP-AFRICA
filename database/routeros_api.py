@@ -859,7 +859,7 @@ def _configure_subscriber_radius(sock, reader, radius):
     talk(sock, reader, ["/radius/incoming/set", "=accept=yes"])
     filters = talk(sock, reader, ["/ip/firewall/filter/print"])
     if not any(row.get("comment") == PPPOE_COA and _row_id(row) for row in filters):
-        talk(
+        _add_placed(
             sock,
             reader,
             [
@@ -888,6 +888,14 @@ def _move_filter(sock, reader, rule_id, destination):
         talk(sock, reader, ["/ip/firewall/filter/move", f"=numbers={rule_id}", f"=destination={destination}"])
     except RouterError:
         pass
+
+
+def _add_placed(sock, reader, words):
+    """Add a rule near the top, falling back to a plain add when placement before a builtin entry is refused."""
+    try:
+        talk(sock, reader, words)
+    except RouterError:
+        talk(sock, reader, [word for word in words if not word.startswith("=place-before=")])
 
 
 def _enable_pppoe(sock, reader, iface, servers, radius=None):
@@ -952,7 +960,7 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
         if row.get("comment") in PPPOE_FILTERS and _row_id(row):
             talk(sock, reader, ["/ip/firewall/filter/remove", f"=.id={_row_id(row)}"])
     for protocol, comment in (("udp", PPPOE_DNS_UDP), ("tcp", PPPOE_DNS_TCP)):
-        talk(
+        _add_placed(
             sock,
             reader,
             [
@@ -969,7 +977,7 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
     _portal_nat(sock, reader)
     portal_ip, portal_port = _portal_target(radius)
     rules = [
-        ["/ip/firewall/filter/add", "=chain=forward", "=action=drop", "=connection-state=new", f"=in-interface={iface}", f"=comment={PPPOE_DROP}", "=place-before=0"],
+        ["/ip/firewall/filter/add", "=chain=forward", "=action=drop", f"=in-interface={iface}", f"=comment={PPPOE_DROP}", "=place-before=0"],
         ["/ip/firewall/filter/add", "=chain=forward", "=action=drop", "=out-interface=all-ppp", f"=comment={PPPOE_DROP_PPP_BACK}", "=place-before=0"],
         ["/ip/firewall/filter/add", "=chain=forward", "=action=drop", "=in-interface=all-ppp", f"=comment={PPPOE_DROP_PPP}", "=place-before=0"],
         ["/ip/firewall/filter/add", "=chain=forward", "=action=drop", f"=dst-address-list={PPPOE_EXPIRED}", f"=comment={PPPOE_EXPIRED_DROP_BACK}", "=place-before=0"],
@@ -984,7 +992,7 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
         ["/ip/firewall/filter/add", "=chain=forward", "=action=accept", f"=src-address-list={PPPOE_SUBSCRIBED}", f"=comment={PPPOE_ALLOW}", "=place-before=0"],
     ]
     for rule in rules:
-        talk(sock, reader, rule)
+        _add_placed(sock, reader, rule)
     rows = talk(sock, reader, ["/ip/firewall/filter/print"])
     ours = {row.get("comment"): _row_id(row) for row in rows if row.get("comment") in PPPOE_FILTERS}
     anchor = next(
@@ -1144,6 +1152,11 @@ def apply_pppoe_enforcement(host, password, enforced, timeout=12, port=API_PORT,
         iface = _pppoe_port(interfaces, servers)
         if not _safe_iface(iface):
             raise RouterError("This router has no port for PPPoE, so nothing was changed.")
+        try:
+            bridges = talk(sock, reader, ["/interface/bridge/port/print"])
+        except RouterError:
+            bridges = []
+        iface = _bridge_target(bridges, iface)
         if enforced:
             _enable_pppoe(sock, reader, iface, servers, radius)
         else:
@@ -1505,7 +1518,7 @@ def _portal_nat(sock, reader):
             talk(sock, reader, ["/ip/firewall/nat/remove", f"=.id={_row_id(row)}"])
     anchor = next((_row_id(row) for row in nats if row.get("comment") == NO_NAT and _row_id(row)), "0")
     for address_list in (PPPOE_EXPIRED, PPPOE_SUSPENDED):
-        talk(
+        _add_placed(
             sock,
             reader,
             [
@@ -1520,7 +1533,7 @@ def _portal_nat(sock, reader):
                 f"=place-before={anchor}",
             ],
         )
-    talk(
+    _add_placed(
         sock,
         reader,
         [
@@ -1681,6 +1694,11 @@ def apply_hotspot_access(host, password, enabled, timeout=12, port=API_PORT, ope
         iface = _hotspot_port(interfaces, spots)
         if not _safe_iface(iface):
             raise RouterError("This router has no port for the hotspot, so nothing was changed.")
+        try:
+            bridges = talk(sock, reader, ["/interface/bridge/port/print"])
+        except RouterError:
+            bridges = []
+        iface = _bridge_target(bridges, iface)
         if enabled:
             _enable_hotspot(sock, reader, iface, spots)
         else:

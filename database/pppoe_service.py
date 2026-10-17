@@ -36,6 +36,18 @@ def normalize_phone(value):
     return normalized
 
 
+def phone_variants(value):
+    """Every Kenyan format this value could be dialed as. Empty unless the digits look like a phone."""
+    digits = "".join(character for character in str(value or "") if character.isdigit())
+    if digits.startswith("254") and len(digits) == 12 and digits[3] in "17":
+        return {digits, "0" + digits[3:], digits[3:]}
+    if digits.startswith("0") and len(digits) == 10 and digits[1] in "17":
+        return {digits, "254" + digits[1:], digits[1:]}
+    if len(digits) == 9 and digits[0] in "17":
+        return {digits, "0" + digits, "254" + digits}
+    return set()
+
+
 def generate_password(length=10):
     count = 10 if not isinstance(length, int) else min(12, max(8, length))
     return "".join(secrets.choice(PASSWORD_ALPHABET) for _ in range(count))
@@ -140,11 +152,18 @@ def validate_pppoe_provisioning(payload, context, today=None):
         issue(errors, "buildingName", "Enter a shorter building name.")
     if len(house) > 40:
         issue(errors, "houseNumber", "Enter a shorter house number.")
-    username = str(payload.get("username") or phone or "").strip()
+    entered_phone = "".join(character for character in str(payload.get("phone") or "") if character.isdigit())
+    username = str(payload.get("username") or entered_phone or "").strip()
     if not USERNAME_PATTERN.fullmatch(username):
         issue(errors, "username", "Use 3 to 64 letters, numbers, hyphens, or underscores.")
-    elif username.lower() in {item.lower() for item in context.get("usernames", [])}:
-        issue(errors, "username", "That PPPoE username is already used.")
+    else:
+        stored = {str(item) for item in context.get("usernames", [])}
+        taken = {item.lower() for item in stored}
+        for item in stored:
+            taken.update(alias.lower() for alias in phone_variants(item))
+        collision = username.lower() in taken or bool({alias.lower() for alias in phone_variants(username)} & taken)
+        if collision:
+            issue(errors, "username", "That PPPoE username is already used.")
     if phone and phone in {str(item) for item in context.get("phones", [])}:
         issue(errors, "phone", "That phone number is already registered.")
     password = str(payload.get("password", ""))

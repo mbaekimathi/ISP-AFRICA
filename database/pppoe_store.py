@@ -638,10 +638,12 @@ def check_username(cursor, client_id, username):
     if not allow_username_check(client_id):
         raise PppoeError(429, "Too many username checks. Wait a moment and try again.")
     text = str(username or "").strip()
-    cursor.execute("SELECT id FROM pppoe_subscribers WHERE LOWER(pppoe_username) = LOWER(%s)", (text,))
+    candidates = {text.lower()} | {alias.lower() for alias in pppoe_service.phone_variants(text)}
+    marks = ", ".join(["%s"] * len(candidates))
+    cursor.execute(f"SELECT id FROM pppoe_subscribers WHERE LOWER(pppoe_username) IN ({marks})", list(candidates))
     taken = cursor.fetchone() is not None
     if not taken:
-        cursor.execute("SELECT id FROM radcheck WHERE LOWER(username) = LOWER(%s)", (text,))
+        cursor.execute(f"SELECT id FROM radcheck WHERE LOWER(username) IN ({marks})", list(candidates))
         taken = cursor.fetchone() is not None
     return {"username": text, "available": not taken}
 
