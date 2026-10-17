@@ -332,5 +332,46 @@ class VoucherTests(unittest.TestCase):
         self.assertIsNone(pppoe_store.voucher_detail(cursor, "ZZZZ-ZZZZ-ZZZZ"))
 
 
+class DarajaCallbackTests(unittest.TestCase):
+    def test_parse_extracts_the_real_mpesa_code(self):
+        payload = {
+            "Body": {
+                "stkCallback": {
+                    "CheckoutRequestID": "ws_CO_17102026_123456",
+                    "ResultCode": 0,
+                    "ResultDesc": "The service request is processed successfully.",
+                    "CallbackMetadata": {
+                        "Item": [
+                            {"Name": "Amount", "Value": 500},
+                            {"Name": "MpesaReceiptNumber", "Value": "TJK4H2ABCD"},
+                            {"Name": "TransactionDate", "Value": 20261017120000},
+                            {"Name": "PhoneNumber", "Value": 254712345678},
+                        ]
+                    },
+                }
+            }
+        }
+        checkout_id, code, desc, receipt, phone = pppoe_store.parse_daraja_callback(payload)
+        self.assertEqual(checkout_id, "ws_CO_17102026_123456")
+        self.assertEqual(code, 0)
+        self.assertEqual(receipt, "TJK4H2ABCD")
+        self.assertEqual(phone, "254712345678")
+
+    def test_parse_handles_a_declined_callback(self):
+        payload = {
+            "Body": {
+                "stkCallback": {
+                    "CheckoutRequestID": "ws_CO_999",
+                    "ResultCode": 1032,
+                    "ResultDesc": "Request cancelled by user",
+                }
+            }
+        }
+        checkout_id, code, desc, receipt, _ = pppoe_store.parse_daraja_callback(payload)
+        self.assertEqual(code, 1032)
+        self.assertEqual(receipt, "")
+        self.assertIn("cancelled", desc)
+
+
 if __name__ == "__main__":
     unittest.main()

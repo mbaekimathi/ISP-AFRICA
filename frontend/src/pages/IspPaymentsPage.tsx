@@ -375,13 +375,13 @@ export function IspPaymentsPage() {
             <FormField
               id="daraja-callback-url"
               label="Callback URL"
-              hint="Where Daraja posts STK push results. Leave empty to use the portal's default URL."
+              hint="Where Daraja posts STK push results — set it to https://<your-domain>/api/daraja/callback so the real M-Pesa code is saved."
             >
               <input
                 id="daraja-callback-url"
                 className="field"
                 inputMode="url"
-                placeholder="https://portal.example.com/callback"
+                placeholder="https://portal.example.com/api/daraja/callback"
                 value={draft.callbackUrl}
                 onChange={(event) => update("callbackUrl", event.target.value)}
               />

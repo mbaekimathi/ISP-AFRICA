@@ -1166,6 +1166,7 @@ def ensure_schema():
                 ("periods", "periods INT NOT NULL DEFAULT 1"),
                 ("login_url", "login_url VARCHAR(255) NOT NULL DEFAULT ''"),
                 ("orig_url", "orig_url VARCHAR(255) NOT NULL DEFAULT ''"),
+                ("mpesa_code", "mpesa_code VARCHAR(20) NOT NULL DEFAULT ''"),
             ):
                 cursor.execute("SHOW COLUMNS FROM hotspot_purchases LIKE %s", (column,))
                 if cursor.fetchone() is None:
@@ -1609,6 +1610,8 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST" and path == "/api/employee/approve":
             require_reviewer(cursor, token.get("isp_employee_session"))
             return {"employee": self.approve_employee(cursor, str(payload.get("id", "")))}, None
+        if method == "POST" and path == "/api/daraja/callback":
+            return {"callback": pppoe_store.record_daraja_callback(cursor, payload)}, None
         if method == "GET" and path == "/api/health":
             return self.health(cursor), None
         if method == "GET" and path == "/api/dashboard/summary":

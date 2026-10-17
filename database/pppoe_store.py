@@ -139,6 +139,9 @@ def ensure_schema(cursor):
         )
         """
     )
+    cursor.execute("SHOW COLUMNS FROM pppoe_stk_requests LIKE 'mpesa_code'")
+    if cursor.fetchone() is None:
+        cursor.execute("ALTER TABLE pppoe_stk_requests ADD COLUMN mpesa_code VARCHAR(20) NOT NULL DEFAULT ''")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS pppoe_vouchers (
@@ -2060,7 +2063,10 @@ def list_transactions(cursor, client_id, query):
         f"""
         SELECT p.id, p.amount, p.method, p.mpesa_reference, p.created_at,
                s.first_name, s.last_name, s.phone, s.pppoe_username, s.service,
-               pkg.name AS package_name
+               pkg.name AS package_name,
+               (SELECT st.mpesa_code FROM pppoe_stk_requests st
+                WHERE st.checkout_id LIKE CONCAT(p.mpesa_reference, '%') AND st.mpesa_code <> ''
+                LIMIT 1) AS mpesa_code
         FROM pppoe_payments p
         JOIN pppoe_subscribers s ON s.id = p.subscriber_id
         LEFT JOIN isp_packages pkg ON pkg.id = s.package_id
@@ -2075,7 +2081,7 @@ def list_transactions(cursor, client_id, query):
                 "id": f"pay-{item['id']}",
                 "kind": "payment",
                 "detail": item.get("package_name") or item["method"],
-                "reference": item["mpesa_reference"] or "",
+                "reference": item.get("mpesa_code") or item["mpesa_reference"] or "",
                 "amount": format(Decimal(item["amount"]), ".2f"),
                 "status": "paid",
                 "createdAt": stamp(item["created_at"]),
@@ -2119,7 +2125,7 @@ def list_transactions(cursor, client_id, query):
     clause, args = window("r.created_at")
     cursor.execute(
         f"""
-        SELECT r.id, r.amount, r.phone, r.checkout_id, r.status, r.created_at,
+        SELECT r.id, r.amount, r.phone, r.checkout_id, r.mpesa_code, r.status, r.created_at,
                s.first_name, s.last_name, s.pppoe_username, s.service,
                pkg.name AS package_name
         FROM pppoe_stk_requests r
@@ -2141,7 +2147,7 @@ def list_transactions(cursor, client_id, query):
                 "contact": item["phone"] or item["pppoe_username"],
                 "service": item["service"],
                 "detail": detail,
-                "reference": item["checkout_id"],
+                "reference": item.get("mpesa_code") or item["checkout_id"],
                 "amount": format(Decimal(item["amount"]), ".2f"),
                 "status": item["status"],
                 "createdAt": stamp(item["created_at"]),
@@ -2152,7 +2158,7 @@ def list_transactions(cursor, client_id, query):
         clause, args = window("h.created_at")
         cursor.execute(
             f"""
-            SELECT h.id, h.amount, h.phone, h.checkout_id, h.mac, h.status, h.devices, h.periods, h.created_at,
+            SELECT h.id, h.amount, h.phone, h.checkout_id, h.mpesa_code, h.mac, h.status, h.devices, h.periods, h.created_at,
                    d.name AS router_name, pkg.name AS package_name
             FROM hotspot_purchases h
             LEFT JOIN isp_mikrotik_devices d ON d.id = h.device_id
@@ -2179,7 +2185,7 @@ def list_transactions(cursor, client_id, query):
                     "contact": item["phone"] or item["mac"],
                     "service": "hotspot",
                     "detail": " · ".join(detail_parts),
-                    "reference": item["checkout_id"],
+                    "reference": item.get("mpesa_code") or item["checkout_id"],
                     "amount": format(Decimal(item["amount"]), ".2f"),
                     "status": item["status"],
                     "createdAt": stamp(item["created_at"]),
@@ -2193,6 +2199,51 @@ def list_transactions(cursor, client_id, query):
         "collected": format(collected, ".2f"),
         "outstanding": format(outstanding, ".2f"),
     }
+
+
+def parse_daraja_callback(payload):
+    """(checkout_id, result_code, description, receipt, phone) from a Daraja STK callback."""
+    callback = ((payload or {}).get("Body") or {}).get("stkCallback") or {}
+    checkout_id = str(callback.get("CheckoutRequestID") or "").strip()[:64]
+    result_code = callback.get("ResultCode")
+    description = str(callback.get("ResultDesc") or "").strip()
+    receipt = ""
+    phone = ""
+    for item in ((callback.get("CallbackMetadata") or {}).get("Item") or []):
+        name = str(item.get("Name") or "")
+        if name == "MpesaReceiptNumber":
+            receipt = str(item.get("Value") or "").strip()[:20]
+        elif name == "PhoneNumber":
+            phone = str(item.get("Value") or "").strip()[:20]
+    return checkout_id, result_code, description, receipt, phone
+
+
+def record_daraja_callback(cursor, payload):
+    """Persist the real M-Pesa receipt code from a Daraja STK callback.
+
+    The code lands on the STK request and the hotspot purchase, and any
+    payment/invoice already written against the checkout id gets its
+    reference rewritten so the billings page shows the M-Pesa code.
+    """
+    checkout_id, result_code, description, receipt, _phone = parse_daraja_callback(payload)
+    if not checkout_id:
+        raise PppoeError(400, "The callback did not include a checkout id.")
+    if str(result_code) == "0" and receipt:
+        cursor.execute("UPDATE pppoe_stk_requests SET mpesa_code = %s WHERE checkout_id = %s", (receipt, checkout_id))
+        cursor.execute("UPDATE hotspot_purchases SET mpesa_code = %s WHERE checkout_id = %s", (receipt, checkout_id))
+        cursor.execute("UPDATE pppoe_payments SET mpesa_reference = %s WHERE mpesa_reference = %s", (receipt, checkout_id[:40]))
+        cursor.execute("UPDATE pppoe_invoices SET mpesa_reference = %s WHERE mpesa_reference = %s", (receipt, checkout_id[:40]))
+    elif str(result_code) != "0":
+        reason = (description or "Payment was declined.")[:255]
+        cursor.execute(
+            "UPDATE pppoe_stk_requests SET status = 'failed', last_error = %s WHERE checkout_id = %s AND status = 'pending'",
+            (reason, checkout_id),
+        )
+        cursor.execute(
+            "UPDATE hotspot_purchases SET status = 'failed' WHERE checkout_id = %s AND status = 'pending'",
+            (checkout_id,),
+        )
+    return {"checkoutId": checkout_id, "receipt": receipt, "resultCode": result_code}
 
 
 def dispatch(cursor, method, path, payload, token, query):

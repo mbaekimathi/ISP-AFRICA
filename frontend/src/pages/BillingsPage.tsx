@@ -213,7 +213,7 @@ export function BillingsPage() {
               <th className="px-3 py-3 font-medium">Service</th>
               <th className="px-3 py-3 font-medium">Type</th>
               <th className="px-3 py-3 font-medium">Details</th>
-              <th className="px-3 py-3 font-medium">Reference</th>
+              <th className="px-3 py-3 font-medium">M-Pesa code</th>
               <th className="px-3 py-3 text-right font-medium">Amount</th>
               <th className="px-3 py-3 font-medium">Status</th>
             </tr>

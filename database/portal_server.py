@@ -1309,7 +1309,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 cursor.execute(
                     """
                     SELECT r.id, r.client_id, r.subscriber_id, r.package_id, r.package_price,
-                           r.amount, r.checkout_id, r.status, r.last_error, r.created_at,
+                           r.amount, r.checkout_id, r.mpesa_code, r.status, r.last_error, r.created_at,
                            p.name AS package_name
                     FROM pppoe_stk_requests r
                     LEFT JOIN isp_packages p ON p.id = r.package_id
@@ -1381,7 +1381,10 @@ class PortalHandler(BaseHTTPRequestHandler):
                         cursor,
                         request["client_id"],
                         request["subscriber_id"],
-                        {"amount": format(request["amount"], ".2f"), "mpesaReference": checkout_id[:40]},
+                        {
+                            "amount": format(request["amount"], ".2f"),
+                            "mpesaReference": (request.get("mpesa_code") or checkout_id)[:40],
+                        },
                     )
                     cursor.execute(
                         "UPDATE pppoe_stk_requests SET status = 'paid', paid_at = NOW() WHERE checkout_id = %s",
