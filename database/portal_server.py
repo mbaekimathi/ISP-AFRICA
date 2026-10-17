@@ -1567,6 +1567,23 @@ class PortalHandler(BaseHTTPRequestHandler):
                         (checkout_id,),
                     )
                     db.commit()
+                except pppoe_store.PppoeError as error:
+                    # A validation failure (amount too small, no package price)
+                    # never succeeds on retry — end the request instead of
+                    # bouncing it back to pending forever.
+                    db.rollback()
+                    reason = str(error)
+                    if confirmed:
+                        reason += " The payment was received — contact the provider to apply it."
+                    try:
+                        cursor.execute(
+                            "UPDATE pppoe_stk_requests SET status = 'failed', last_error = %s WHERE checkout_id = %s",
+                            (reason[:255], checkout_id),
+                        )
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+                    return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
                 except Exception as error:
                     db.rollback()
                     try:
