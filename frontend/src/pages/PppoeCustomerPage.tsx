@@ -480,17 +480,19 @@ export function PppoeCustomerPage() {
       <span className="text-primary">↑</span> {rateLabel(rates.rxBps)}
     </>
   ) : subscriber.connection === "online" ? "—" : "Offline";
+  const lastSeenMs = stampMs(subscriber.live.lastSeen);
+  const seenFor = lastSeenMs ? elapsedLabel(lastSeenMs) : null;
   let statusHint: string;
   let statusTone = "";
   if (subscriber.connection === "online") {
-    statusHint = `Surfing for ${elapsedLabel(surfSinceRef.current ?? Date.now())}`;
+    statusHint = `Online for ${subscriber.live.uptime || elapsedLabel(surfSinceRef.current ?? Date.now())}`;
     statusTone = "text-success";
-  } else if (subscriber.connection === "offline") {
-    const lastSeen = stampMs(subscriber.live.lastSeen);
-    statusHint = lastSeen ? `Disconnected for ${elapsedLabel(lastSeen)}` : "Last seen never";
+  } else if (ended) {
+    statusHint = seenFor ? `Disconnected for ${seenFor}` : "Disconnected";
     statusTone = "text-destructive";
   } else {
-    statusHint = `Last seen ${subscriber.live.lastSeen ?? "never"}`;
+    statusHint = seenFor ? `Not surfing for ${seenFor}` : "Never connected";
+    statusTone = "text-warning";
   }
 
   // The browser fires a "toggle" event on <details> both for user clicks and
