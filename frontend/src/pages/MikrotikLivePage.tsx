@@ -152,7 +152,7 @@ function StatCard({ label, value, detail, meter }: { label: string; value: strin
   return (
     <article className="px-5 py-4">
       <p className="text-xs font-medium text-muted-foreground">{label}</p>
-      <p className="mt-1.5 text-2xl font-semibold tracking-tight tabular-nums">{value}</p>
+      <p className="mt-1.5 text-xl font-semibold tracking-tight tabular-nums sm:text-2xl">{value}</p>
       <p className="mt-1 text-xs leading-5 text-muted-foreground">{detail}</p>
       {meter != null ? (
         <div className="live-meter mt-3">

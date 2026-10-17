@@ -69,7 +69,7 @@ function Metric({
   const body = (
     <article className={cn("h-full rounded-xl border bg-surface px-4 py-4", toneClass)}>
       <h3 className="text-xs text-muted-foreground">{label}</h3>
-      <p className="mt-1 text-2xl font-semibold tabular-nums tracking-tight">{value}</p>
+      <p className="mt-1 text-xl font-semibold tabular-nums tracking-tight sm:text-2xl">{value}</p>
       <p className="mt-1 text-xs leading-5 text-muted-foreground">{detail}</p>
     </article>
   );

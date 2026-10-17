@@ -344,9 +344,11 @@
     top: 50%;
     z-index: 50;
     display: grid;
-    width: 100%;
+    width: calc(100% - 2rem);
     max-width: 28rem;
+    max-height: calc(100dvh - 2rem);
     gap: 1rem;
+    overflow-y: auto;
     transform: translate(-50%, -50%);
     border: 1px solid var(--border);
     border-radius: var(--radius);
@@ -444,7 +446,7 @@
 
 .live-panel {
   border: 1px solid rgb(var(--border-rgb) / 0.9);
-  border-radius: 0.9rem;
+  border-radius: var(--radius);
   background: rgb(var(--surface-rgb));
   box-shadow: var(--shadow-card);
 }

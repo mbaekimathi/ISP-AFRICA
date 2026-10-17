@@ -65,15 +65,15 @@ export function ClientUsagePage({ kind }: { kind: "pppoe" | "hotspot" }) {
           <div className="mt-6 grid gap-3 sm:grid-cols-3">
             <article className="rounded-xl border border-border bg-surface p-4">
               <p className="text-xs text-muted-foreground">Clients</p>
-              <p className="mt-1 text-2xl font-semibold">{report.total}</p>
+              <p className="mt-1 text-xl font-semibold sm:text-2xl">{report.total}</p>
             </article>
             <article className="rounded-xl border border-border bg-surface p-4">
               <p className="text-xs text-muted-foreground">Download, 30 days</p>
-              <p className="mt-1 text-2xl font-semibold">{bytes(report.monthBytesIn)}</p>
+              <p className="mt-1 text-xl font-semibold sm:text-2xl">{bytes(report.monthBytesIn)}</p>
             </article>
             <article className="rounded-xl border border-border bg-surface p-4">
               <p className="text-xs text-muted-foreground">Upload, 30 days</p>
-              <p className="mt-1 text-2xl font-semibold">{bytes(report.monthBytesOut)}</p>
+              <p className="mt-1 text-xl font-semibold sm:text-2xl">{bytes(report.monthBytesOut)}</p>
             </article>
           </div>
           <section className="mt-4 rounded-xl border border-border bg-surface p-5">

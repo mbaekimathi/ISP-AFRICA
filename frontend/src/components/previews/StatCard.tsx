@@ -12,7 +12,7 @@ export function StatCard({
   return (
     <article className="rounded-xl border border-border bg-surface p-4 shadow-card">
       <p className="text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</p>
-      <p className="mt-2 text-2xl font-semibold tracking-tight text-foreground">{value}</p>
+      <p className="mt-2 text-xl font-semibold tracking-tight text-foreground sm:text-2xl">{value}</p>
       <p className="mt-1 text-sm text-muted-foreground">{detail}</p>
     </article>
   );
