@@ -2294,6 +2294,83 @@ def list_hotspot_clients(cursor, client_id, query):
     }
 
 
+def hotspot_usage(cursor, client_id):
+    """Usage for hotspot guests — radacct is keyed by the hs- usernames.
+
+    Each purchase's paying device surfs under h.username, and every redeemed
+    voucher surfs under v.username; both join back to the purchase for the
+    phone, router, and voucher code shown on the report.
+    """
+    identities = """
+        SELECT h.client_id, h.device_id, h.phone, v.username, v.code
+        FROM hotspot_vouchers v
+        JOIN hotspot_purchases h ON h.id = v.purchase_id
+        UNION ALL
+        SELECT h.client_id, h.device_id, h.phone, h.username, NULL AS code
+        FROM hotspot_purchases h
+        WHERE h.username IS NOT NULL AND h.username <> ''
+    """
+    cursor.execute(
+        f"""
+        SELECT ids.username, ids.code, ids.phone, d.name AS router_name,
+               COUNT(a.radacctid) AS sessions,
+               COALESCE(SUM(CASE WHEN a.acctstarttime >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN a.acctinputoctets ELSE 0 END), 0) AS month_in,
+               COALESCE(SUM(CASE WHEN a.acctstarttime >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN a.acctoutputoctets ELSE 0 END), 0) AS month_out
+        FROM ({identities}) ids
+        LEFT JOIN radacct a ON a.username = ids.username
+        LEFT JOIN isp_mikrotik_devices d ON d.id = ids.device_id
+        WHERE ids.client_id = %s
+        GROUP BY ids.username, ids.code, ids.phone, d.name
+        ORDER BY (month_in + month_out) DESC, ids.username
+        """,
+        (client_id,),
+    )
+    clients = []
+    month_in = 0
+    month_out = 0
+    for row in cursor.fetchall():
+        download = int(row["month_in"] or 0)
+        upload = int(row["month_out"] or 0)
+        month_in += download
+        month_out += upload
+        clients.append(
+            {
+                "id": row["username"],
+                "firstName": row["phone"] or "Hotspot guest",
+                "lastName": "",
+                "username": row["code"] or row["username"],
+                "routerName": row["router_name"],
+                "sessions": int(row["sessions"] or 0),
+                "bytesIn": download,
+                "bytesOut": upload,
+            }
+        )
+    cursor.execute(
+        f"""
+        SELECT DATE(a.acctstarttime) AS day, COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
+               COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
+        FROM radacct a
+        JOIN ({identities}) ids ON ids.username = a.username
+        WHERE ids.client_id = %s AND a.acctstarttime >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
+        GROUP BY DATE(a.acctstarttime)
+        ORDER BY day
+        """,
+        (client_id,),
+    )
+    days = [
+        {"day": stamp(row["day"]), "bytesIn": int(row["bytes_in"]), "bytesOut": int(row["bytes_out"])}
+        for row in cursor.fetchall()
+    ]
+    return {
+        "service": "hotspot",
+        "clients": clients,
+        "total": len(clients),
+        "monthBytesIn": month_in,
+        "monthBytesOut": month_out,
+        "days": days,
+    }
+
+
 def parse_daraja_callback(payload):
     """(checkout_id, result_code, description, receipt, phone) from a Daraja STK callback."""
     callback = ((payload or {}).get("Body") or {}).get("stkCallback") or {}
@@ -2360,7 +2437,7 @@ def dispatch(cursor, method, path, payload, token, query):
     if path == "/api/hotspot/subscribers" and method == "GET":
         return list_hotspot_clients(cursor, client_id_from(cursor, token), query), None
     if path == "/api/hotspot/usage" and method == "GET":
-        return general_usage(cursor, client_id_from(cursor, token), "hotspot"), None
+        return hotspot_usage(cursor, client_id_from(cursor, token)), None
     if path == "/api/billings/transactions" and method == "GET":
         return list_transactions(cursor, client_id_from(cursor, token), query), None
     if not path.startswith("/api/pppoe"):

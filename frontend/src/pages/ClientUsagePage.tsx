@@ -9,6 +9,7 @@ type UsageClient = {
   lastName: string;
   username: string;
   routerName: string;
+  sessions?: number;
   bytesIn: number;
   bytesOut: number;
 };
@@ -64,7 +65,7 @@ export function ClientUsagePage({ kind }: { kind: "pppoe" | "hotspot" }) {
         <>
           <div className="mt-6 grid gap-3 sm:grid-cols-3">
             <article className="rounded-xl border border-border bg-surface p-4">
-              <p className="text-xs text-muted-foreground">Clients</p>
+              <p className="text-xs text-muted-foreground">{kind === "hotspot" ? "Guest devices" : "Clients"}</p>
               <p className="mt-1 text-xl font-semibold sm:text-2xl">{report.total}</p>
             </article>
             <article className="rounded-xl border border-border bg-surface p-4">
@@ -94,9 +95,10 @@ export function ClientUsagePage({ kind }: { kind: "pppoe" | "hotspot" }) {
             <table className="min-w-[40rem] w-full text-left text-sm">
               <thead className="border-b border-border text-xs text-muted-foreground">
                 <tr>
-                  <th className="px-3 py-3 font-medium">Client</th>
-                  <th className="px-3 py-3 font-medium">Username</th>
+                  <th className="px-3 py-3 font-medium">{kind === "hotspot" ? "Phone" : "Client"}</th>
+                  <th className="px-3 py-3 font-medium">{kind === "hotspot" ? "Voucher / device" : "Username"}</th>
                   <th className="px-3 py-3 font-medium">Router</th>
+                  {kind === "hotspot" ? <th className="px-3 py-3 font-medium">Sessions</th> : null}
                   <th className="px-3 py-3 font-medium">Download</th>
                   <th className="px-3 py-3 font-medium">Upload</th>
                   <th className="px-3 py-3 font-medium">Total</th>
@@ -105,7 +107,11 @@ export function ClientUsagePage({ kind }: { kind: "pppoe" | "hotspot" }) {
               <tbody>
                 {report.clients.length === 0 ? (
                   <tr>
-                    <td colSpan={6} className="px-3 py-6 text-muted-foreground">No {label} clients are registered yet.</td>
+                    <td colSpan={kind === "hotspot" ? 7 : 6} className="px-3 py-6 text-muted-foreground">
+                      {kind === "hotspot"
+                        ? "No hotspot usage has been accounted yet — guest sessions appear here after their first login."
+                        : `No ${label} clients are registered yet.`}
+                    </td>
                   </tr>
                 ) : null}
                 {report.clients.map((client) => (
@@ -113,6 +119,7 @@ export function ClientUsagePage({ kind }: { kind: "pppoe" | "hotspot" }) {
                     <td className="px-3 py-3 font-medium">{client.firstName} {client.lastName}</td>
                     <td className="px-3 py-3">{client.username}</td>
                     <td className="px-3 py-3">{client.routerName}</td>
+                    {kind === "hotspot" ? <td className="px-3 py-3">{client.sessions ?? 0}</td> : null}
                     <td className="px-3 py-3">{bytes(client.bytesIn)}</td>
                     <td className="px-3 py-3">{bytes(client.bytesOut)}</td>
                     <td className="px-3 py-3">{bytes(client.bytesIn + client.bytesOut)}</td>
