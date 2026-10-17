@@ -3468,6 +3468,10 @@ class Handler(BaseHTTPRequestHandler):
                     client_id,
                 ),
             )
+            cursor.execute(
+                "UPDATE pppoe_subscriptions SET price = %s WHERE package_id = %s",
+                (fields["price"], package_id),
+            )
             return {"package": public_package(self.package_row(cursor, package_id, client_id))}, None
         if action == "suspend":
             if row["status"] == "suspended":
@@ -3722,6 +3726,10 @@ class Handler(BaseHTTPRequestHandler):
                         row.get("image_data_url") or None,
                         current["id"],
                     ),
+                )
+                cursor.execute(
+                    "UPDATE pppoe_subscriptions SET price = %s WHERE package_id = %s",
+                    (row["price"], current["id"]),
                 )
                 continue
             cursor.execute(

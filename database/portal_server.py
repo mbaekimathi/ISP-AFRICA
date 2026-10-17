@@ -20,6 +20,7 @@ directly.
 """
 
 import base64
+import hashlib
 import json
 import os
 import re
@@ -332,11 +333,13 @@ def pppoe_packages(cursor, client_id, router_id):
 
 def pppoe_offers(cursor, row):
     """Active PPPoE packages for this router, with the subscriber's own
-    package kept on the list even after it is suspended or archived."""
+    package kept on the list even after it is suspended or archived.
+
+    Prices always come from isp_packages so a package edit shows up here
+    immediately; the subscription's frozen price is only used when the
+    package itself is no longer on sale."""
     offers = pppoe_packages(cursor, row["client_id"], str(row.get("router_id") or ""))
     own = next((offer for offer in offers if str(offer["id"]) == str(row["package_id"])), None)
-    if own is not None:
-        own["price"] = row["price"]
     if own is None:
         offers.insert(
             0,
@@ -422,7 +425,9 @@ const BRAND={json.dumps(BRAND)};
 const DONE={json.dumps(DONE_ICON)};
 const PKG={json.dumps(pkg_js)};
 const CYCLE={cycle};
+const SIG={json.dumps(pay_signature(row, offers, payment))};
 let cid=null;
+let dirty=false;
 function money(cents){{return 'KSh '+(cents%100?(cents/100).toFixed(2):String(cents/100));}}
 function sel(){{const p=document.querySelector('input[name=pkg]:checked');return p?p.value:'';}}
 function refresh(){{
@@ -466,7 +471,29 @@ async function pay(){{
  else document.getElementById('msg').innerHTML='<div class=err>'+(b.error||'Could not start the payment.')+'</div>';
 }}
 document.querySelectorAll('input[name=pkg]').forEach(function(r){{r.addEventListener('change',pickpkg);}});
-const amtbox=document.getElementById('amount');if(amtbox)amtbox.addEventListener('input',refresh);
+const amtbox=document.getElementById('amount');if(amtbox)amtbox.addEventListener('input',function(){{dirty=true;refresh();}});
+function saveState(){{
+ try{{
+  sessionStorage.setItem('recharge',JSON.stringify({{p:sel(),ph:(document.getElementById('phone')||{{}}).value||'',am:dirty?amtbox.value:''}}));
+ }}catch(e){{}}
+}}
+async function fresh(){{
+ if(cid)return;
+ try{{
+  const r=await fetch('/pay/offers');const b=await r.json();
+  if(!b.sig||b.state!=='sale'||b.sig!==SIG){{saveState();location.reload();}}
+ }}catch(e){{}}
+}}
+try{{
+ const s=JSON.parse(sessionStorage.getItem('recharge')||'null');
+ if(s){{sessionStorage.removeItem('recharge');
+  const inp=document.querySelector('input[name=pkg][value="'+s.p+'"]');if(inp)inp.checked=true;
+  const ph=document.getElementById('phone');if(ph&&s.ph)ph.value=s.ph;
+  if(amtbox&&s.am){{amtbox.value=s.am;dirty=true;}}
+ }}
+}}catch(e){{}}
+setInterval(fresh,15000);
+document.addEventListener('visibilitychange',function(){{if(!document.hidden)fresh();}});
 refresh();
 </script>"""
     manual = ""
@@ -690,6 +717,35 @@ def hotspot_packages(cursor, client_id, device_id):
     return offers
 
 
+def offers_signature(offers, extra=""):
+    """Fingerprint of everything the pay pages render — when it changes an
+    open page reloads once instead of showing a stale price or package."""
+    parts = [str(extra)]
+    for offer in offers:
+        parts.append(
+            "|".join(
+                str(offer.get(key) or "")
+                for key in (
+                    "id", "name", "price", "download_mbps", "upload_mbps", "period",
+                    "simultaneous_devices", "devices", "validity_amount", "validity_unit",
+                    "extra_device_price", "extra_period_price", "image_data_url",
+                )
+            )
+        )
+    return hashlib.sha1("\x00".join(parts).encode()).hexdigest()
+
+
+def pay_signature(row, offers, payment):
+    return offers_signature(
+        offers,
+        f"{int(bool(payment))}|{row['package_id']}|{row['price']}|{row['cycle_days']}",
+    )
+
+
+def hotspot_signature(offers, payment):
+    return offers_signature(offers, str(int(bool(payment))))
+
+
 def validity_label(amount, unit):
     amount = int(amount or 0)
     unit = str(unit or "days")
@@ -842,6 +898,7 @@ const BRAND={json.dumps(BRAND)};
 const DONE={json.dumps(DONE_ICON)};
 const WARNI={json.dumps(WARN_ICON)};
 const PKG={json.dumps(pkg_js)};
+const SIG={json.dumps(hotspot_signature(offers, payment))};
 let MODE='{mode}';
 let cid=null;
 function money(cents){{return 'KSh '+(cents%100?(cents/100).toFixed(2):String(cents/100));}}
@@ -933,6 +990,28 @@ async function pay(){{
 }}
 document.querySelectorAll('input[name=pkg]').forEach(function(r){{r.addEventListener('change',refresh);}});
 document.querySelectorAll('.cust input').forEach(function(i){{i.addEventListener('input',refresh);}});
+function saveState(){{
+ try{{
+  sessionStorage.setItem('hsForm',JSON.stringify({{m:MODE,p:sel(),ph:(document.getElementById('phone')||{{}}).value||''}}));
+ }}catch(e){{}}
+}}
+async function fresh(){{
+ if(cid)return;
+ try{{
+  const r=await fetch('/hotspot/offers?d='+encodeURIComponent(CTX.device));const b=await r.json();
+  if(!b.sig||b.state!=='sale'||b.sig!==SIG){{saveState();location.reload();}}
+ }}catch(e){{}}
+}}
+try{{
+ const s=JSON.parse(sessionStorage.getItem('hsForm')||'null');
+ if(s){{sessionStorage.removeItem('hsForm');
+  if(s.m&&s.m!==MODE)pick_mode(s.m);
+  const inp=document.querySelector('input[name=pkg][value="'+s.p+'"]');if(inp)inp.checked=true;
+  const ph=document.getElementById('phone');if(ph&&s.ph)ph.value=s.ph;
+ }}
+}}catch(e){{}}
+setInterval(fresh,15000);
+document.addEventListener('visibilitychange',function(){{if(!document.hidden)fresh();}});
 refresh();
 </script>"""
     redeem = """
@@ -1149,6 +1228,8 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urlparse(self.path).path
+        if path == "/pay/offers":
+            return self.pay_offers()
         if path == "/pay/status":
             return self.pay_status(parse_qs(urlparse(self.path).query).get("id", [""])[0])
         if path == "/thank-you":
@@ -1177,6 +1258,8 @@ class PortalHandler(BaseHTTPRequestHandler):
             return self._send(body)
         if path == "/hotspot/status":
             return self.hotspot_status(query.get("id", [""])[0])
+        if path == "/hotspot/offers":
+            return self.hotspot_offers(query)
         if path != "/hotspot":
             return self._send(b"not found", 404, "text/plain")
         ctx = {key: query.get(key, [""])[0] for key in ("ip", "mac", "login", "orig")}
@@ -1324,6 +1407,24 @@ class PortalHandler(BaseHTTPRequestHandler):
         if purchase:
             return self._send(thankyou_hotspot_page(receipt))
         return self._send(thankyou_page(voucher))
+
+    def pay_offers(self):
+        """Fresh offer fingerprint for an open pay page — the page reloads
+        itself when this differs from what it rendered."""
+        row = self._subscriber()
+        if not row:
+            return self._send(b'{"state":"unknown"}', 200, "application/json")
+        if row["status"] == "suspended":
+            return self._send(b'{"state":"paused"}', 200, "application/json")
+        db = self.server.connect()
+        try:
+            with db.cursor() as cursor:
+                payment = daraja_settings(cursor, row["client_id"])
+                offers = pppoe_offers(cursor, row)
+        finally:
+            db.close()
+        body = json.dumps({"state": "sale", "sig": pay_signature(row, offers, payment)}).encode()
+        return self._send(body, 200, "application/json")
 
     def pay_status(self, checkout_id):
         """Poll Daraja, then credit the subscriber exactly once per paid request."""
@@ -1549,6 +1650,20 @@ class PortalHandler(BaseHTTPRequestHandler):
             f"{pending['seconds']}s",
         )
         return {"username": username, "password": secret, "authorized": True, "online": bool(report.get("online"))}
+
+    def hotspot_offers(self, query):
+        db = self.server.connect()
+        try:
+            with db.cursor() as cursor:
+                device = hotspot_device(cursor, self.client_address[0], query.get("d", [""])[0])
+                if not device:
+                    return self._send(b'{"state":"unknown"}', 200, "application/json")
+                offers = hotspot_packages(cursor, device["client_id"], device["id"])
+                payment = daraja_settings(cursor, device["client_id"])
+        finally:
+            db.close()
+        body = json.dumps({"state": "sale", "sig": hotspot_signature(offers, payment)}).encode()
+        return self._send(body, 200, "application/json")
 
     def hotspot_status(self, checkout_id):
         db = self.server.connect()
