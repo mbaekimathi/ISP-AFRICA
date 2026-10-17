@@ -167,6 +167,17 @@ into `isp-centric.conf` and tells routers to dial it — then
 `sudo ufw allow 51821/udp`. The two tunnels coexist on separate ports and
 separate networks (`10.9.0.0/24` vs `10.88.0.0/24`).
 
+## Updating the VPS
+
+```bash
+cd /opt/isp && sudo bash deploy/update-vps.sh
+```
+
+It fetches `origin/main`, stashes stray local edits (recover with
+`git stash pop`), installs Python deps, rebuilds the frontend only when its
+sources changed (Node 20+ needed — the existing `dist/` is kept otherwise),
+restarts the service, and prints the health check.
+
 ## Troubleshooting
 
 | Symptom | Cause / fix |
