@@ -127,7 +127,7 @@ export function SignUpPage() {
     <div className="page-shell py-14">
       <div className="form-card">
         <Logo />
-        <h1 className="mt-6 text-3xl font-semibold tracking-tight">Sign up</h1>
+        <h1 className="mt-6 text-2xl font-semibold tracking-tight sm:text-3xl">Sign up</h1>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
           Create an account with your 6-digit login code and 6-digit password. It is saved in ISP-DB as pending. The username, email, phone number, and login code must be different from every employee account. The unique ISP client account opens only after approval.
         </p>
@@ -284,7 +284,7 @@ export function SignUpPage() {
               </PrimaryButton>
             ) : (
               <PrimaryButton type="submit" disabled={pending}>
-                {pending ? "Creating account..." : "Create account"}
+                {pending ? "Creating account…" : "Create account"}
               </PrimaryButton>
             )}
           </div>

@@ -410,7 +410,7 @@ def load_router(cursor, client_id, router_id):
 def load_package(cursor, client_id, package_id):
     cursor.execute(
         """
-        SELECT id, name, price, download_mbps, upload_mbps, status, availability_routers
+        SELECT id, name, price, download_mbps, upload_mbps, status, availability_routers, simultaneous_devices
         FROM isp_packages
         WHERE id = %s AND client_id = %s
         """,
@@ -430,6 +430,7 @@ def load_package(cursor, client_id, package_id):
         "downloadMbps": int(row["download_mbps"]),
         "uploadMbps": int(row["upload_mbps"]),
         "status": row["status"],
+        "devices": int(row["simultaneous_devices"] or 0),
         "routers": routers if isinstance(routers, list) else [],
     }
 
@@ -576,7 +577,14 @@ def register_subscriber(cursor, client_id, payload):
             invoice_id = create_invoice(cursor, client_id, subscriber_id, format(net, ".2f"), "subscription", invoice_status)
             if Decimal(plan["initialPayment"]) > 0:
                 create_payment(cursor, client_id, subscriber_id, invoice_id, plan["initialPayment"], "manual", payload.get("mpesaReference"))
-        write_radius(cursor, plan["username"], plan)
+        write_radius(
+            cursor,
+            plan["username"],
+            {
+                **plan,
+                "sessionLimit": effective_session_limit(plan["sessionLimit"], (context.get("package") or {}).get("devices")),
+            },
+        )
         issued = ensure_nas(cursor, context["router"])
         log_event(cursor, client_id, subscriber_id, client_id, "register", plan["status"])
         finish(cursor)
@@ -777,7 +785,7 @@ def require_owned(cursor, client_id, subscriber_id):
         """
         SELECT s.*, sub.billing_status, sub.expiry_date, sub.price, sub.next_due_date, sub.billing_cycle,
                sub.cycle_days, sub.grace_days, sub.auto_renew, sub.discount, sub.discount_reason, sub.start_date AS sub_start,
-               p.name AS package_name, p.download_mbps, p.upload_mbps,
+               p.name AS package_name, p.download_mbps, p.upload_mbps, p.simultaneous_devices AS package_devices,
                d.name AS router_name, d.tunnel_status, d.tunnel_ip, d.api_secret,
                (SELECT e.action FROM pppoe_events e WHERE e.subscriber_id = s.id ORDER BY e.created_at DESC LIMIT 1) AS last_action
         FROM pppoe_subscribers s
@@ -1221,12 +1229,25 @@ def event_rows(cursor, subscriber_id):
     return [{"action": row["action"], "reason": row["reason"], "at": stamp(row["created_at"])} for row in cursor.fetchall()]
 
 
+UNLIMITED_SESSIONS = 255
+
+
+def effective_session_limit(session_limit, package_devices):
+    """How many sessions may stay open. A package device count above zero can
+    only widen the per-subscriber limit, never take back sessions an admin
+    already granted; zero on the package means unlimited."""
+    devices = int(package_devices or 0)
+    if devices <= 0:
+        return UNLIMITED_SESSIONS
+    return max(int(session_limit or 1), devices)
+
+
 def plan_from_saved(row, active):
     password = routeros_api.open_password(row["password_sealed"])
     return {
         "password": password,
         "status": row["status"],
-        "sessionLimit": int(row["session_limit"]),
+        "sessionLimit": effective_session_limit(row["session_limit"], row.get("package_devices")),
         "radiusActive": active,
         "expiryDate": stamp(row.get("expiry_date")),
         "staticIp": row["static_ip"] or None,
@@ -1254,7 +1275,8 @@ def sync_router_access(cursor, client_id, router_id):
     cursor.execute(
         """
         SELECT s.id, s.status, s.password_sealed, s.pppoe_username, s.package_id, s.session_limit,
-               s.static_ip, sub.expiry_date, sub.billing_status, p.download_mbps, p.upload_mbps
+               s.static_ip, sub.expiry_date, sub.billing_status, p.download_mbps, p.upload_mbps,
+               p.simultaneous_devices AS package_devices
         FROM pppoe_subscribers s
         JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
         JOIN isp_packages p ON p.id = s.package_id
@@ -1324,7 +1346,8 @@ def disconnect_router_clients(cursor, client_id, router_id, actor_id, reason):
     cursor.execute(
         """
         SELECT s.id, s.status, s.password_sealed, s.pppoe_username, s.package_id, s.session_limit,
-               s.static_ip, s.router_id, sub.expiry_date, p.download_mbps, p.upload_mbps
+               s.static_ip, s.router_id, sub.expiry_date, p.download_mbps, p.upload_mbps,
+               p.simultaneous_devices AS package_devices
         FROM pppoe_subscribers s
         JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
         JOIN isp_packages p ON p.id = s.package_id
@@ -1355,7 +1378,7 @@ def reconcile(cursor, client_id):
         """
         SELECT s.id, s.status, s.start_date, s.password_sealed, s.pppoe_username, s.package_id, s.session_limit,
                s.static_ip, s.router_id, sub.expiry_date, sub.billing_status, sub.next_due_date,
-               p.download_mbps, p.upload_mbps
+               p.download_mbps, p.upload_mbps, p.simultaneous_devices AS package_devices
         FROM pppoe_subscribers s
         JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
         JOIN isp_packages p ON p.id = s.package_id
@@ -1591,7 +1614,9 @@ def disconnect(cursor, client_id, subscriber_id, payload):
         body = set_status(cursor, client_id, subscriber_id, "disconnected", "cancelled", reason, False)
         return body
     open_count = int(row.get("open_sessions") or 0)
-    action = pppoe_service.duplicate_session_action(open_count, int(row["session_limit"]))
+    action = pppoe_service.duplicate_session_action(
+        open_count, effective_session_limit(row["session_limit"], row.get("package_devices"))
+    )
     coa = coa_for(cursor, row, row["pppoe_username"])
     log_event(cursor, client_id, subscriber_id, client_id, "disconnect", action)
     body = subscriber_detail(cursor, client_id, subscriber_id)

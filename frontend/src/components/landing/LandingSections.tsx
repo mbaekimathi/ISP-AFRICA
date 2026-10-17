@@ -19,7 +19,7 @@ export function HeroSection() {
           <p className="inline-flex items-center rounded-full border border-border bg-surface/80 px-3 py-1 text-xs font-semibold uppercase tracking-[0.14em] text-primary">
             ISP billing and network operations
           </p>
-          <h1 className="mt-5 text-4xl font-semibold tracking-tight text-foreground sm:text-5xl lg:text-[3.35rem] lg:leading-[1.08]">
+          <h1 className="mt-5 text-3xl font-semibold tracking-tight text-foreground sm:text-5xl lg:text-[3.35rem] lg:leading-[1.08]">
             One Platform. <span className="hero-highlight">Complete Control of Your ISP.</span>
           </h1>
           <p className="mt-5 max-w-xl text-base leading-7 text-muted-foreground sm:text-lg">

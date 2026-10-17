@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
+import { PageHeader } from "@/components/ui/DetailGrid";
 import { FormField } from "@/components/ui/FormField";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
@@ -167,13 +168,10 @@ export function OnboardMikrotikPage() {
   return (
     <div className="page-shell py-8">
       <div className={`mx-auto grid gap-6 ${device ? "max-w-3xl" : "max-w-md"}`}>
-        <div>
-          <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">MikroTik</p>
-          <h1 className="mt-2 text-3xl font-semibold tracking-tight">Onboard a router</h1>
-          <p className="mt-2 text-sm leading-6 text-muted-foreground">
-            Name the router, copy one script, and paste it into WinBox Terminal. The script reads that router and applies the matching setup. The router then connects out on its own.
-          </p>
-        </div>
+        <PageHeader
+          title="Onboard a router"
+          description="Name the router, copy one script, and paste it into WinBox Terminal. The script reads that router and applies the matching setup. The router then connects out on its own."
+        />
 
         <section className="rounded-2xl border border-border bg-surface p-6 shadow-card">
           {error ? (
@@ -223,7 +221,7 @@ export function OnboardMikrotikPage() {
                 </div>
               </fieldset>
               <PrimaryButton type="submit" disabled={pending}>
-                {pending ? "Preparing script..." : "Generate script"}
+                {pending ? "Preparing script…" : "Generate script"}
               </PrimaryButton>
             </form>
           ) : null}
@@ -279,7 +277,7 @@ export function OnboardMikrotikPage() {
                     <span>WinBox still connects to the router after the paste.</span>
                   </label>
                   <SecondaryButton type="button" onClick={() => void finish()} disabled={!readyToFinish || pending || finished}>
-                    {finished ? "Waiting for the router" : pending ? "Saving..." : "Finish"}
+                    {finished ? "Waiting for the router" : pending ? "Saving…" : "Finish"}
                   </SecondaryButton>
                 </div>
               ) : null}

@@ -60,7 +60,7 @@ export function LoginPage() {
     <div className="page-shell flex min-h-[70vh] items-center py-14">
       <div className="form-card">
         <Logo />
-        <h1 className="mt-6 text-3xl font-semibold tracking-tight">Login</h1>
+        <h1 className="mt-6 text-2xl font-semibold tracking-tight sm:text-3xl">Login</h1>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
           Sign in with the 6-digit login code and the 6-digit password from your account.
         </p>
@@ -105,7 +105,7 @@ export function LoginPage() {
             </p>
           ) : null}
           <PrimaryButton type="submit" disabled={pending}>
-            {pending ? "Signing in..." : "Login"}
+            {pending ? "Signing in…" : "Login"}
           </PrimaryButton>
         </form>
         <p className="mt-6 text-sm text-muted-foreground">

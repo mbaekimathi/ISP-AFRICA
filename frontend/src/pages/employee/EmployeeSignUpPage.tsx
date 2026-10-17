@@ -127,7 +127,7 @@ export function EmployeeSignUpPage() {
       <div className="form-card">
         <Logo variant="employee" />
         <p className="mt-6 text-xs font-semibold uppercase tracking-[0.16em] text-accent">Employees</p>
-        <h1 className="mt-2 text-3xl font-semibold tracking-tight">Employee sign up</h1>
+        <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">Employee sign up</h1>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
           The account is saved in ISP-DB as pending. The username, email, phone number, and login code must be different from every ISP client account. After approval, a role can be allocated: Director, Supervisor, Customer Care, Technician, IT Support, Dispatcher, or Sales.
         </p>
@@ -186,7 +186,7 @@ export function EmployeeSignUpPage() {
               </PrimaryButton>
             ) : (
               <PrimaryButton type="submit" disabled={pending}>
-                {pending ? "Creating account..." : "Create employee account"}
+                {pending ? "Creating account…" : "Create employee account"}
               </PrimaryButton>
             )}
           </div>

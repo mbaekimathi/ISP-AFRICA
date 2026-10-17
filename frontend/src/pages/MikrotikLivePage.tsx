@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { PrimaryButton } from "@/components/ui/Buttons";
+import { PageHeader } from "@/components/ui/DetailGrid";
 import { FormField } from "@/components/ui/FormField";
 import { TunnelNotification } from "@/components/ui/TunnelNotification";
 import { usePageMeta } from "@/hooks/usePageMeta";
@@ -93,14 +94,14 @@ function HealthTrend({
           <p className="text-xs font-medium text-muted-foreground">{caption}</p>
           <p className="mt-0.5 text-xs tabular-nums text-muted-foreground">{total} min down</p>
         </div>
-        <div className="flex flex-wrap gap-1" role="tablist" aria-label="Health range">
+        <div className="grid grid-cols-5 gap-1 rounded-lg bg-surface-muted p-1" role="tablist" aria-label="Health range">
           {healthRanges.map((item) => (
             <button
               key={item.id}
               type="button"
               role="tab"
               aria-selected={range === item.id}
-              className={`min-h-8 rounded-md px-2.5 text-xs font-medium ${range === item.id ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:bg-surface-muted"}`}
+              className={`min-h-8 rounded-md px-2 text-xs font-medium ${range === item.id ? "bg-surface text-foreground shadow-sm" : "text-muted-foreground"}`}
               onClick={() => onRange(item.id)}
             >
               {item.label}
@@ -287,12 +288,13 @@ export function MikrotikLivePage() {
   const cpu = Math.max(0, Math.min(100, Number(live?.cpuLoad) || 0));
   const memory = usedPercent(live?.freeMemory, live?.totalMemory);
   const statusLabel = live?.sample ? "Sample" : live?.reachable ? "Running" : apiReady ? "Not answering" : "Access not saved";
-  const statusTone = live?.sample ? "bg-amber-500" : live?.reachable ? "bg-emerald-500" : "bg-muted-foreground";
+  const statusTone = live?.sample ? "bg-warning" : live?.reachable ? "bg-success" : "bg-muted-foreground";
 
   const notice = live?.message && !/development sample/i.test(live.message) ? live.message : "";
 
   return (
     <div className="page-shell py-8">
+      <PageHeader title={title} description="Live running state read from the router." />
       {tunnelStatus !== "unknown" ? (
         <TunnelNotification
           tunnelStatus={tunnelStatus}
@@ -334,7 +336,7 @@ export function MikrotikLivePage() {
           </FormField>
           <div className="mt-4">
             <PrimaryButton type="submit" disabled={saving || password.length < 12}>
-              {saving ? "Saving access..." : "Access router"}
+              {saving ? "Saving access…" : "Access router"}
             </PrimaryButton>
           </div>
         </form>
@@ -381,7 +383,7 @@ export function MikrotikLivePage() {
                       <td className="px-5 py-3 text-muted-foreground">{item.type || "—"}</td>
                       <td className="px-5 py-3">
                         <span className="inline-flex items-center gap-2">
-                          <span className={`h-1.5 w-1.5 rounded-full ${item.disabled ? "bg-muted-foreground" : item.running ? "bg-emerald-500" : "bg-rose-500"}`} />
+                          <span className={`h-1.5 w-1.5 rounded-full ${item.disabled ? "bg-muted-foreground" : item.running ? "bg-success" : "bg-destructive"}`} />
                           {item.disabled ? "Disabled" : item.running ? "Running" : "Down"}
                         </span>
                       </td>

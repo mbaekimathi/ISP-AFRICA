@@ -117,7 +117,7 @@ export function CompanyPaymentsPage() {
   }
 
   return (
-    <div className="page-shell py-10">
+    <div className="page-shell py-8">
       <PageHeader
         title="Company payments"
         description="Set up the company Daraja API credentials and the company payment gateway. Saved secrets stay hidden and are kept when you leave those fields unchanged."

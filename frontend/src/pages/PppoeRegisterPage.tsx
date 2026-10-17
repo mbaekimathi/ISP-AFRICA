@@ -315,7 +315,7 @@ export function PppoeRegisterPage() {
           </div>
         </details>
         <div className="flex flex-wrap gap-2">
-          <PrimaryButton type="submit" disabled={saving}>{saving ? "Saving..." : "Save & Register"}</PrimaryButton>
+          <PrimaryButton type="submit" disabled={saving}>{saving ? "Saving…" : "Save & Register"}</PrimaryButton>
           <SecondaryButton type="button" disabled={saving} onClick={() => void submit(true)}>Save & Add Another</SecondaryButton>
           <SecondaryButton to={user ? clientPage(user, "/clients") : "/clients"}>Cancel</SecondaryButton>
         </div>

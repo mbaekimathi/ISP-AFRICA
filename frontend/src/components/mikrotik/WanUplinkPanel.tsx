@@ -264,7 +264,7 @@ export function WanUplinkPanel({ deviceId, version, ports, sample = false }: { d
               {state.mode === "manual-single" ? (
                 <div className="mt-3">
                   <PrimaryButton type="button" disabled={uplink.active || Boolean(busy) || job?.status === "queued" || job?.status === "running"} onClick={() => void chooseUplink(uplink.interface)}>
-                    {uplink.active ? "In use" : busy === uplink.interface ? "Checking..." : "Use this uplink"}
+                    {uplink.active ? "In use" : busy === uplink.interface ? "Checking…" : "Use this uplink"}
                   </PrimaryButton>
                 </div>
               ) : null}
@@ -286,7 +286,7 @@ export function WanUplinkPanel({ deviceId, version, ports, sample = false }: { d
           Cancel switch
         </SecondaryButton>
       ) : null}
-      {job ? <p className="mt-3 text-sm text-muted-foreground">{job.status === "running" || job.status === "queued" ? "Checking the router and updating the uplink..." : job.error || "The uplink was updated."}</p> : null}
+      {job ? <p className="mt-3 text-sm text-muted-foreground">{job.status === "running" || job.status === "queued" ? "Checking the router and updating the uplink…" : job.error || "The uplink was updated."}</p> : null}
       {state.audit.length > 0 ? (
         <ul className="mt-4 grid gap-2 text-sm text-muted-foreground">
           {state.audit.map((row) => (
@@ -296,7 +296,7 @@ export function WanUplinkPanel({ deviceId, version, ports, sample = false }: { d
           ))}
         </ul>
       ) : null}
-      {error ? <p className="mt-3 text-sm text-warning">{error}</p> : null}
+      {error ? <p className="mt-3 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{error}</p> : null}
     </section>
   );
 }

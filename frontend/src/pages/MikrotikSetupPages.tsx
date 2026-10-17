@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
+import { PageHeader } from "@/components/ui/DetailGrid";
 import { FormField } from "@/components/ui/FormField";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { TunnelNotification } from "@/components/ui/TunnelNotification";
@@ -102,7 +103,8 @@ function SetupFrame({
   usePageMeta(`${title} — ISP CENTRIC`, description);
   return (
     <div className="page-shell py-8">
-      <div className={wide ? "" : "max-w-3xl"}>{children}</div>
+      <PageHeader title={title} description={description} />
+      <div className={`mt-6 ${wide ? "" : "max-w-3xl"}`}>{children}</div>
     </div>
   );
 }
@@ -232,7 +234,7 @@ export function MikrotikPortPage() {
         return;
       }
       setApplying(true);
-      setApplyNote("Updating the router...");
+      setApplyNote("Updating the router…");
       apiRequest<{ applied: boolean; message: string; portPlan?: Record<string, PortUse[]> }>(`/api/mikrotiks/${deviceId}/ports`, {
         method: "POST",
         body: JSON.stringify({ ports: recorded }),
@@ -292,7 +294,7 @@ export function MikrotikPortPage() {
 
   return (
     <SetupFrame wide title="Port setup" description="Each port is the internet uplink, a customer connection, or the local network.">
-      {error ? <p className="mb-4 text-sm text-warning">{error}</p> : null}
+      {error ? <p className="mb-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{error}</p> : null}
       {device && !device.apiReady ? (
         <form
           className="mb-4 max-w-md rounded-xl border border-border bg-surface p-5"
@@ -312,10 +314,10 @@ export function MikrotikPortPage() {
           >
             <input id="port-api-password" className="field" type="password" autoComplete="off" value={password} onChange={(event) => setPassword(event.target.value)} />
           </FormField>
-          {accessError ? <p className="mt-3 text-sm text-warning">{accessError}</p> : null}
+          {accessError ? <p className="mt-3 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{accessError}</p> : null}
           <div className="mt-4">
             <PrimaryButton type="submit" disabled={saving || password.length < 12}>
-              {saving ? "Saving access..." : "Access router"}
+              {saving ? "Saving access…" : "Access router"}
             </PrimaryButton>
           </div>
         </form>
@@ -329,7 +331,7 @@ export function MikrotikPortPage() {
             </p>
           </div>
           <SecondaryButton type="button" disabled={reading || !device?.apiReady} onClick={reload}>
-            {reading ? "Reading ports..." : "Detect again"}
+            {reading ? "Reading ports…" : "Detect again"}
           </SecondaryButton>
         </div>
         {liveMessage ? <p className="mt-3 text-sm text-muted-foreground">{liveMessage}</p> : null}
@@ -419,7 +421,7 @@ export function MikrotikPortPage() {
             </ul>
           </>
         )}
-        {applyNote ? <p className="mt-4 text-sm text-muted-foreground">{applying ? "Updating the router..." : applyNote}</p> : null}
+        {applyNote ? <p className="mt-4 text-sm text-muted-foreground">{applying ? "Updating the router…" : applyNote}</p> : null}
         {applyNote && !applying ? <RouterWriteNotice note={applyNote} /> : null}
       </div>
       <WanUplinkPanel
@@ -450,7 +452,7 @@ export function MikrotikPppoePage() {
     const mine = ++requestId.current;
     setEnforced(next);
     setSaving(true);
-    setNote("Updating the router...");
+    setNote("Updating the router…");
     apiRequest<{ device: RouterRecord; applied: boolean; message: string }>(`/api/mikrotiks/${deviceId}/pppoe`, {
       method: "POST",
       body: JSON.stringify({ enforced: next, push: true }),
@@ -477,7 +479,7 @@ export function MikrotikPppoePage() {
 
   return (
     <SetupFrame title="PPPoE setup" description="Turn PPPoE enforcement on to require a PPPoE login, or off to let clients use the internet with DHCP.">
-      {error ? <p className="mb-4 text-sm text-warning">{error}</p> : null}
+      {error ? <p className="mb-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{error}</p> : null}
       <div className="grid gap-4 rounded-xl border border-border bg-surface p-5">
         <div className="flex items-center justify-between gap-4 rounded-xl border border-border px-4 py-3">
           <div>
@@ -505,7 +507,7 @@ export function MikrotikPppoePage() {
           </button>
         </div>
         <p id="pppoe-apply-note" className="text-sm text-muted-foreground">
-          {saving ? "Updating the router..." : note || "Click the switch to turn enforcement on or off. The router is updated to match."}
+          {saving ? "Updating the router…" : note || "Click the switch to turn enforcement on or off. The router is updated to match."}
         </p>
         {note && !saving ? <RouterWriteNotice note={note} /> : null}
       </div>
@@ -531,7 +533,7 @@ export function MikrotikHotspotPage() {
     const mine = ++requestId.current;
     setEnabled(next);
     setSaving(true);
-    setNote("Updating the router...");
+    setNote("Updating the router…");
     apiRequest<{ device: RouterRecord; applied: boolean; message: string }>(`/api/mikrotiks/${deviceId}/hotspot`, {
       method: "POST",
       body: JSON.stringify({ enabled: next, push: true }),
@@ -558,7 +560,7 @@ export function MikrotikHotspotPage() {
 
   return (
     <SetupFrame title="Hotspot setup" description="Turn the hotspot on so connected users can reach it, or off so they cannot reach the hotspot or the internet.">
-      {error ? <p className="mb-4 text-sm text-warning">{error}</p> : null}
+      {error ? <p className="mb-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{error}</p> : null}
       <div className="grid gap-4 rounded-xl border border-border bg-surface p-5">
         <div className="flex items-center justify-between gap-4 rounded-xl border border-border px-4 py-3">
           <div>
@@ -586,7 +588,7 @@ export function MikrotikHotspotPage() {
           </button>
         </div>
         <p id="hotspot-apply-note" className="text-sm text-muted-foreground">
-          {saving ? "Updating the router..." : note || "Click the switch to turn the hotspot on or off. The router is updated to match."}
+          {saving ? "Updating the router…" : note || "Click the switch to turn the hotspot on or off. The router is updated to match."}
         </p>
         {note && !saving ? <RouterWriteNotice note={note} /> : null}
       </div>
@@ -744,7 +746,7 @@ export function MikrotikRouterSetupPage() {
           polling={false}
         />
       ) : null}
-      {error ? <p className="mb-4 text-sm text-warning">{error}</p> : null}
+      {error ? <p className="mb-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{error}</p> : null}
       {device ? (
         <p className="mb-4 text-sm text-muted-foreground">
           {device.role || "No access method"} · tunnel {device.tunnelIp} ({device.tunnelStatus}) · RouterOS {device.routerosVersion || "unknown"}
@@ -908,7 +910,7 @@ export function MikrotikRecoveryPage() {
       title="WinBox recovery"
       description="If WinBox still opens from the same LAN, use the MAC address, paste the script you need, and press Enter. The restore script reboots the router from the onboarding backup."
     >
-      {error ? <p className="mb-4 text-sm text-warning">{error}</p> : null}
+      {error ? <p className="mb-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{error}</p> : null}
       <section className="rounded-xl border border-border bg-surface p-5">
         <h2 className="font-semibold">Restore the onboarding backup</h2>
         <p className="mt-2 text-sm text-muted-foreground">This loads {backup || "the saved backup"} and restarts the router.</p>

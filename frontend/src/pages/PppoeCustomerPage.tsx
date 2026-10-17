@@ -155,8 +155,8 @@ function ActionDialog({
   return (
     <Dialog.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-        <Dialog.Content className="fixed left-[50%] top-[50%] z-50 grid w-full max-w-md translate-x-[-50%] translate-y-[-50%] gap-4 rounded-xl border border-border bg-surface p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="dialog-content">
           <div>
             <Dialog.Title className="text-base font-semibold text-foreground">{title}</Dialog.Title>
             <Dialog.Description className="mt-2 text-sm text-muted-foreground">{description}</Dialog.Description>
@@ -479,7 +479,7 @@ export function PppoeCustomerPage() {
   }
 
   if (!subscriber) {
-    return <div className="page-shell py-8 text-sm text-muted-foreground">{message || "Loading PPPoE client..."}</div>;
+    return <div className="page-shell py-8 text-sm text-muted-foreground">{message || "Loading PPPoE client…"}</div>;
   }
 
   const totalOnline = (usageTrend ?? []).reduce((sum, point) => sum + point.minutes, 0);
@@ -668,7 +668,7 @@ export function PppoeCustomerPage() {
               </div>
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
-                  <h1 className="truncate text-2xl font-semibold tracking-tight">
+                  <h1 className="truncate text-xl font-semibold tracking-tight sm:text-2xl">
                     {subscriber.firstName} {subscriber.lastName}
                   </h1>
                   <span className="shrink-0 rounded-full bg-white/15 px-2.5 py-0.5 text-[11px] font-semibold">{status.label}</span>
@@ -1046,8 +1046,8 @@ export function PppoeCustomerPage() {
 
       <Dialog.Root open={dialog === "password"} onOpenChange={(next) => { if (!next) closeDialog(); }}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-          <Dialog.Content className="fixed left-[50%] top-[50%] z-50 grid w-full max-w-md translate-x-[-50%] translate-y-[-50%] gap-4 rounded-xl border border-border bg-surface p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content">
             <div>
               <Dialog.Title className="text-base font-semibold text-foreground">PPPoE password</Dialog.Title>
               <Dialog.Description className="mt-2 text-sm text-muted-foreground">
@@ -1105,8 +1105,8 @@ export function PppoeCustomerPage() {
 
       <Dialog.Root open={dialog === "edit"} onOpenChange={(next) => { if (!next) closeDialog(); }}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-          <Dialog.Content className="fixed left-[50%] top-[50%] z-50 grid w-full max-w-lg translate-x-[-50%] translate-y-[-50%] gap-4 rounded-xl border border-border bg-surface p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content max-w-lg">
             <div>
               <Dialog.Title className="text-base font-semibold text-foreground">Edit customer details</Dialog.Title>
               <Dialog.Description className="mt-2 text-sm text-muted-foreground">

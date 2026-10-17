@@ -54,10 +54,10 @@ export function IspClientsPage() {
         </p>
       ) : null}
       {!loaded && !message ? (
-        <p className="mt-6 text-sm text-muted-foreground">Loading ISP clients...</p>
+        <p className="mt-6 text-sm text-muted-foreground">Loading ISP clients…</p>
       ) : null}
       {loaded && clients.length === 0 && !message ? (
-        <p className="mt-6 rounded-2xl border border-border bg-surface p-5 text-sm text-muted-foreground">No ISP clients are registered yet.</p>
+        <p className="mt-6 rounded-xl border border-border bg-surface p-5 text-sm text-muted-foreground">No ISP clients are registered yet.</p>
       ) : (
         <div className="mt-6 grid gap-4">
           {clients.map((client) => (
@@ -86,7 +86,7 @@ export function IspClientsPage() {
                       });
                   }}
                 >
-                  {openingId === client.id ? "Opening portal..." : "Open portal"}
+                  {openingId === client.id ? "Opening portal…" : "Open portal"}
                 </PrimaryButton>
               </div>
               <div className="mt-3">

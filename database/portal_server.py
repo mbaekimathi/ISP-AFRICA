@@ -30,7 +30,7 @@ import urllib.error
 import urllib.request
 import uuid
 from datetime import datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation, ROUND_CEILING
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
@@ -84,6 +84,7 @@ def identify(cursor, ip):
         SELECT s.id AS subscriber_id, s.client_id, s.first_name, s.last_name, s.phone,
                s.pppoe_username, s.status, s.router_id, s.package_id,
                p.name AS package_name, p.download_mbps, p.upload_mbps,
+               p.simultaneous_devices AS package_devices,
                sub.price, sub.billing_cycle, sub.cycle_days, sub.grace_days
         FROM radacct r
         JOIN pppoe_subscribers s ON s.pppoe_username = r.username
@@ -187,6 +188,7 @@ def pppoe_packages(cursor, client_id, router_id):
     cursor.execute(
         """
         SELECT p.id, p.name, p.price, p.download_mbps, p.upload_mbps, p.availability_routers,
+               p.simultaneous_devices,
                COALESCE(p.service_type, c.service_type, 'pppoe') AS service_type,
                COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
                COALESCE(p.validity_unit, c.validity_unit, 'months') AS validity_unit,
@@ -214,7 +216,10 @@ def pppoe_offers(cursor, row):
     """Active PPPoE packages for this router, with the subscriber's own
     package kept on the list even after it is suspended or archived."""
     offers = pppoe_packages(cursor, row["client_id"], str(row.get("router_id") or ""))
-    if not any(str(offer["id"]) == str(row["package_id"]) for offer in offers):
+    own = next((offer for offer in offers if str(offer["id"]) == str(row["package_id"])), None)
+    if own is not None:
+        own["price"] = row["price"]
+    if own is None:
         offers.insert(
             0,
             {
@@ -223,6 +228,7 @@ def pppoe_offers(cursor, row):
                 "price": row["price"],
                 "download_mbps": row["download_mbps"],
                 "upload_mbps": row["upload_mbps"],
+                "simultaneous_devices": row.get("package_devices"),
                 "image_data_url": None,
                 "period": f"{int(row['cycle_days'] or 30)} days",
             },
@@ -238,11 +244,13 @@ def pppoe_pick(offer, checked):
         if image.startswith("data:image/")
         else '<span class="pi noimg">Wi-Fi</span>'
     )
+    devices = int(offer.get("simultaneous_devices") or 0)
+    device_text = "Unlimited devices" if devices <= 0 else f"Up to {devices} device{'s' if devices != 1 else ''}"
     return f"""<label class="pick">
 <input type="radio" name="pkg" value="{esc(offer['id'])}"{' checked' if checked else ''}>
 {thumb}
 <span class=pd><span class="nm">{esc(offer['name'])}</span><br>
-<span class="sp">{int(offer['download_mbps'])}↓ / {int(offer['upload_mbps'])}↑ Mbps · {esc(offer['period'])}</span></span>
+<span class="sp">{int(offer['download_mbps'])}↓ / {int(offer['upload_mbps'])}↑ Mbps · {esc(offer['period'])} · {esc(device_text)}</span></span>
 <span class="pr">KSh {esc(ksh(price))}</span></label>"""
 
 
@@ -271,22 +279,43 @@ def pay_page(row, offers, payment):
     if not picks:
         picks = "<p class=note>No packages are on sale right now. Contact the provider to recharge your line.</p>"
     pkg_js = {str(offer["id"]): cents(offer["price"]) for offer in offers}
+    cycle = int(row["cycle_days"] or 30)
+    chosen_offer = next(
+        (offer for offer in offers if str(offer["id"]) == own or not own_listed), offers[0] if offers else None
+    )
+    default_price = ksh(chosen_offer["price"]) if chosen_offer else "0"
     stk = ""
     if payment:
         stk = f"""
 <label for=phone>M-Pesa number</label>
 <input id=phone inputmode=tel value="{phone}">
+<label for=amount>Amount (KSh)</label>
+<input id=amount inputmode=decimal value="{esc(default_price)}">
+<p class=hint id=days></p>
 <button id=paybtn onclick="pay()">Pay with M-Pesa</button>
 <div id=msg></div>
 <p class=hint>You'll get a prompt on the phone to approve. This page updates itself when payment lands.</p>
 <script>
 const PKG={json.dumps(pkg_js)};
+const CYCLE={cycle};
 let cid=null;
 function money(cents){{return 'KSh '+(cents%100?(cents/100).toFixed(2):String(cents/100));}}
 function sel(){{const p=document.querySelector('input[name=pkg]:checked');return p?p.value:'';}}
 function refresh(){{
  document.querySelectorAll('.pick').forEach(function(x){{const r=x.querySelector('input[name=pkg]');x.classList.toggle('on',!!(r&&r.checked));}});
- const b=document.getElementById('paybtn');const p=PKG[sel()];if(b&&p)b.textContent='Pay '+money(p)+' with M-Pesa';
+ const p=PKG[sel()];
+ const amt=document.getElementById('amount');
+ const c=Math.round(parseFloat(amt.value||'0')*100)||0;
+ const d=p?Math.floor(c*CYCLE/p):0;
+ const dd=document.getElementById('days');
+ if(dd)dd.textContent=p?(d>0?'Buys '+d+' day'+(d===1?'':'s')+' of internet.':'Too little — buys less than a day.'):'';
+ const b=document.getElementById('paybtn');
+ if(b)b.textContent=c>0?'Pay '+money(c)+' with M-Pesa':'Pay with M-Pesa';
+}}
+function pickpkg(){{
+ const p=PKG[sel()];const amt=document.getElementById('amount');
+ if(p&&amt)amt.value=String(p/100);
+ refresh();
 }}
 async function poll(){{
  if(!cid)return;
@@ -300,12 +329,13 @@ async function pay(){{
  const pkg=sel();
  if(!pkg){{document.getElementById('msg').innerHTML='<div class=err>Pick a package first.</div>';return;}}
  const btn=document.getElementById('paybtn');
- const r=await fetch('/pay',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{phone:document.getElementById('phone').value,packageId:pkg}})}});
+ const r=await fetch('/pay',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{phone:document.getElementById('phone').value,packageId:pkg,amount:document.getElementById('amount').value}})}});
  const b=await r.json();
  if(b.checkoutId){{cid=b.checkoutId;btn.disabled=true;document.getElementById('msg').innerHTML='<div class=note>Check the phone and approve the M-Pesa prompt…</div>';poll();}}
  else document.getElementById('msg').innerHTML='<div class=err>'+(b.error||'Could not start the payment.')+'</div>';
 }}
-document.querySelectorAll('input[name=pkg]').forEach(function(r){{r.addEventListener('change',refresh);}});
+document.querySelectorAll('input[name=pkg]').forEach(function(r){{r.addEventListener('change',pickpkg);}});
+const amtbox=document.getElementById('amount');if(amtbox)amtbox.addEventListener('input',refresh);
 refresh();
 </script>"""
     manual = ""
@@ -777,9 +807,23 @@ class PortalHandler(BaseHTTPRequestHandler):
             db.close()
         if not offer:
             return self._send(b'{"error":"Pick a package that is on sale."}', 400, "application/json")
-        amount = Decimal(offer["price"] or 0)
-        if amount <= 0:
+        price = Decimal(offer["price"] or 0)
+        if price <= 0:
             return self._send(b'{"error":"That package has no price set."}', 400, "application/json")
+        try:
+            amount = Decimal(str(payload.get("amount") or "")).quantize(Decimal("0.01"))
+        except InvalidOperation:
+            return self._send(b'{"error":"Enter the amount to recharge."}', 400, "application/json")
+        if amount <= 0 or amount > Decimal("99999999.99"):
+            return self._send(b'{"error":"Enter the amount to recharge."}', 400, "application/json")
+        period = int(row["cycle_days"] or 30)
+        if int(amount * period / price) < 1:
+            minimum = (price / period).quantize(Decimal("0.01"), rounding=ROUND_CEILING)
+            return self._send(
+                json.dumps({"error": f"That amount buys less than a day — top up at least KSh {ksh(minimum)}."}).encode(),
+                400,
+                "application/json",
+            )
         if not settings or not settings["passkey"]:
             return self._send(b'{"error":"M-Pesa prompts are not configured yet."}', 503, "application/json")
         try:
@@ -794,6 +838,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 "subscriber_id": row["subscriber_id"],
                 "client_id": row["client_id"],
                 "package_id": str(offer["id"]),
+                "package_price": format(price, ".2f"),
                 "amount": format(amount, ".2f"),
                 "at": datetime.now(),
             }
@@ -841,7 +886,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                             )
                             cursor.execute(
                                 "UPDATE pppoe_subscriptions SET package_id = %s, price = %s WHERE subscriber_id = %s",
-                                (pending["package_id"], pending["amount"], pending["subscriber_id"]),
+                                (pending["package_id"], pending.get("package_price") or pending["amount"], pending["subscriber_id"]),
                             )
                         pppoe_store.renew(
                             cursor,

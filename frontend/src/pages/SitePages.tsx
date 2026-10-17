@@ -64,7 +64,7 @@ export function DemoPage() {
       <div className="form-card">
         <div>
           <p className="text-xs font-semibold uppercase tracking-[0.16em] text-primary">Demo</p>
-          <h1 className="mt-3 text-4xl font-semibold tracking-tight">Request a demo</h1>
+          <h1 className="mt-3 text-3xl font-semibold tracking-tight sm:text-4xl">Request a demo</h1>
           <p className="mt-4 text-base leading-7 text-muted-foreground">
             Tell us who you are and which kind of network you operate. {pendingIntegrations.demoRequest.intro}
           </p>
@@ -141,7 +141,7 @@ export function PrivacyPage() {
 
   return (
     <article className="page-shell max-w-3xl py-16">
-      <h1 className="text-4xl font-semibold tracking-tight">Privacy Policy</h1>
+      <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Privacy Policy</h1>
       <p className="mt-4 text-base leading-7 text-muted-foreground">
         A privacy policy will be published before ISP CENTRIC collects customer or subscriber information. This landing page does not send form data to a server.
       </p>
@@ -160,7 +160,7 @@ export function TermsPage() {
 
   return (
     <article className="page-shell max-w-3xl py-16">
-      <h1 className="text-4xl font-semibold tracking-tight">Terms of Service</h1>
+      <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Terms of Service</h1>
       <p className="mt-4 text-base leading-7 text-muted-foreground">
         Terms of service will be published before the billing platform is offered for use. This website is a product introduction, not a service agreement.
       </p>

@@ -59,7 +59,7 @@ export function ClientUsagePage({ kind }: { kind: "pppoe" | "hotspot" }) {
           {message}
         </p>
       ) : null}
-      {!report && !message ? <p className="mt-6 text-sm text-muted-foreground">Loading usage...</p> : null}
+      {!report && !message ? <p className="mt-6 text-sm text-muted-foreground">Loading usage…</p> : null}
       {report ? (
         <>
           <div className="mt-6 grid gap-3 sm:grid-cols-3">

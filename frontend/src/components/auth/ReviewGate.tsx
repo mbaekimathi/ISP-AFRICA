@@ -27,7 +27,7 @@ export function ReviewGate({ children }: { children: ReactNode }) {
     return (
       <div>
         <div className="mx-auto max-w-xl rounded-2xl border border-border bg-surface p-6 shadow-card sm:p-8">
-          <h1 className="text-3xl font-semibold tracking-tight">Director sign-in required</h1>
+          <h1 className="text-2xl font-semibold tracking-tight sm:text-3xl">Director sign-in required</h1>
           <p className="mt-3 text-sm leading-6 text-muted-foreground">
             Account approval and role allocation are limited to a signed-in employee with the Director role.
             {employee ? " This signed-in employee does not have that role." : ""}

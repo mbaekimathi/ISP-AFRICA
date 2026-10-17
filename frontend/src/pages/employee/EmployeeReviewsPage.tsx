@@ -13,18 +13,21 @@ export function EmployeeReviewsPage() {
   const [employees, setEmployees] = useState<PublicEmployee[]>([]);
   const [roles, setRoles] = useState<Record<string, EmployeeRole | "">>({});
   const [message, setMessage] = useState("");
+  const [messageTone, setMessageTone] = useState<"success" | "error">("success");
 
   const pending = employees.filter((employee) => employee.status !== "approved");
   const approved = employees.filter((employee) => employee.status === "approved");
 
   useEffect(() => {
     listEmployeesForReview().then(setEmployees).catch((error: unknown) => {
+      setMessageTone("error");
       setMessage(error instanceof Error ? error.message : "Could not load employees.");
     });
   }, []);
 
   async function refresh(note: string) {
     setEmployees(await listEmployeesForReview());
+    setMessageTone("success");
     setMessage(note);
   }
 
@@ -37,14 +40,17 @@ export function EmployeeReviewsPage() {
           description="Approve a pending employee first. Allocate a role only after approval."
         />
         {message ? (
-          <p className="rounded-xl border border-success/30 bg-success/10 px-4 py-3 text-sm text-foreground" role="status">
+          <p
+            className={`rounded-xl border px-4 py-3 text-sm text-foreground ${messageTone === "error" ? "border-warning/40 bg-warning/10" : "border-success/30 bg-success/10"}`}
+            role={messageTone === "error" ? "alert" : "status"}
+          >
             {message}
           </p>
         ) : null}
         <section className="grid gap-4" aria-labelledby="employee-pending-heading">
           <h2 id="employee-pending-heading" className="text-xl font-semibold">Pending</h2>
           {pending.length === 0 ? (
-            <p className="rounded-2xl border border-border bg-surface p-5 text-sm text-muted-foreground">No employees are waiting.</p>
+            <p className="rounded-xl border border-border bg-surface p-5 text-sm text-muted-foreground">No employees are waiting.</p>
           ) : (
             pending.map((employee) => (
               <article key={employee.id} className="rounded-xl border border-border bg-surface p-5">
@@ -62,6 +68,7 @@ export function EmployeeReviewsPage() {
                     approve(employee.id)
                       .then(() => refresh("Employee approved. Allocate a role when you are ready."))
                       .catch((error: unknown) => {
+                        setMessageTone("error");
                         setMessage(error instanceof Error ? error.message : "Could not approve that employee.");
                       });
                   }}
@@ -130,6 +137,7 @@ export function EmployeeReviewsPage() {
                         allocateRole(employee.id, selected)
                           .then(() => refresh(`${employee.firstName} is allocated to ${employeeRoleLabel(selected)}.`))
                           .catch((error: unknown) => {
+                            setMessageTone("error");
                             setMessage(error instanceof Error ? error.message : "Could not allocate that role.");
                           });
                       }}

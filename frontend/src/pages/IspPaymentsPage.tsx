@@ -192,7 +192,7 @@ export function IspPaymentsPage() {
   }
 
   return (
-    <div className="page-shell py-10">
+    <div className="page-shell py-8">
       <PageHeader
         title="Payments"
         description="Set up this account’s Daraja API, or use the company payment settings. Saved secrets stay hidden and are kept when you leave those fields unchanged."

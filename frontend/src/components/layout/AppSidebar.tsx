@@ -73,7 +73,7 @@ export function AppSidebar({
   const linkClass = (active: boolean) =>
     cn(
       "rounded-lg px-3 py-2 text-sm font-medium text-sidebar-muted hover:bg-white/5 hover:text-sidebar-foreground",
-      active && "bg-sidebar-active text-white",
+      active && "bg-sidebar-active text-sidebar-foreground",
     );
 
   async function signOut() {
@@ -95,7 +95,7 @@ export function AppSidebar({
         <Link to={homeTo} className="inline-flex items-center gap-2.5 rounded-md px-1" onClick={onClose}>
           <LogoMark variant={variant} />
           <span className="whitespace-nowrap text-sm font-semibold tracking-tight">
-            ISP <span className="text-primary">CENTRIC</span>
+            ISP <span className="text-sidebar-foreground">CENTRIC</span>
           </span>
         </Link>
       </div>

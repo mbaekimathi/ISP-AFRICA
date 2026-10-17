@@ -60,7 +60,7 @@ export function EmployeeLoginPage() {
       <div className="form-card">
         <Logo variant="employee" />
         <p className="mt-6 text-xs font-semibold uppercase tracking-[0.16em] text-accent">Employees</p>
-        <h1 className="mt-2 text-3xl font-semibold tracking-tight">Employee login</h1>
+        <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">Employee login</h1>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
           Sign in with your 6-digit login code and 6-digit password. A role is available only after approval and allocation.
         </p>
@@ -105,7 +105,7 @@ export function EmployeeLoginPage() {
             </p>
           ) : null}
           <PrimaryButton type="submit" disabled={pending}>
-            {pending ? "Signing in..." : "Login"}
+            {pending ? "Signing in…" : "Login"}
           </PrimaryButton>
         </form>
         <p className="mt-6 text-sm text-muted-foreground">

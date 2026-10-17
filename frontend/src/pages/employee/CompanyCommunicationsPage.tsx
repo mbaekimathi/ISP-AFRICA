@@ -126,7 +126,7 @@ export function CompanyCommunicationsPage() {
   }
 
   return (
-    <div className="page-shell py-10">
+    <div className="page-shell py-8">
       <PageHeader
         title="Company communications"
         description="Set up the company SMS, WhatsApp, and email gateways. Saved keys and tokens stay hidden and are kept when those fields are left unchanged."

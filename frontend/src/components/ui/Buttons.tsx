@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, ReactNode } from "react";
+import { forwardRef, type ButtonHTMLAttributes, type ReactNode, type Ref } from "react";
 import { Link } from "react-router-dom";
 import { cn } from "@/lib/cn";
 
@@ -16,36 +16,43 @@ type ButtonProps = SharedProps & Omit<ButtonHTMLAttributes<HTMLButtonElement>, "
 function renderButton(
   classes: string,
   { to, className, children, type = "button", ...props }: ButtonProps,
+  ref: Ref<HTMLButtonElement | HTMLAnchorElement>,
 ) {
   const classNames = cn(classes, className);
   if (to) {
     return (
-      <Link to={to} className={classNames}>
+      <Link ref={ref as Ref<HTMLAnchorElement>} to={to} className={classNames}>
         {children}
       </Link>
     );
   }
 
   return (
-    <button type={type} className={classNames} {...props}>
+    <button ref={ref as Ref<HTMLButtonElement>} type={type} className={classNames} {...props}>
       {children}
     </button>
   );
 }
 
-export function PrimaryButton(props: ButtonProps) {
-  return renderButton(
-    cn(buttonBase, "bg-primary text-primary-foreground shadow-sm hover:bg-primary-hover"),
-    props,
-  );
-}
+export const PrimaryButton = forwardRef<HTMLButtonElement | HTMLAnchorElement, ButtonProps>(
+  function PrimaryButton(props, ref) {
+    return renderButton(
+      cn(buttonBase, "bg-primary text-primary-foreground shadow-sm hover:bg-primary-hover"),
+      props,
+      ref,
+    );
+  },
+);
 
-export function SecondaryButton(props: ButtonProps) {
-  return renderButton(
-    cn(
-      buttonBase,
-      "border border-border bg-surface text-foreground shadow-sm hover:bg-surface-muted",
-    ),
-    props,
-  );
-}
+export const SecondaryButton = forwardRef<HTMLButtonElement | HTMLAnchorElement, ButtonProps>(
+  function SecondaryButton(props, ref) {
+    return renderButton(
+      cn(
+        buttonBase,
+        "border border-border bg-surface text-foreground shadow-sm hover:bg-surface-muted",
+      ),
+      props,
+      ref,
+    );
+  },
+);

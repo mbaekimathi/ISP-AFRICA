@@ -81,6 +81,17 @@ def clean_package_fields(payload):
             )
         else:
             raise ApiError(400, "Choose whether the hotspot package is for one device or multiple devices.")
+    else:
+        raw_devices = payload.get("simultaneousDevices", payload.get("devices"))
+        if raw_devices in (None, ""):
+            devices = 0
+        else:
+            try:
+                devices = int(raw_devices)
+            except (TypeError, ValueError):
+                devices = -1
+            if not 0 <= devices <= 50 or (isinstance(raw_devices, float) and devices != raw_devices):
+                raise ApiError(400, "Enter a device limit from 1 to 50, or leave devices unlimited.")
     validity_amount, validity_unit = optional_duration(
         payload.get("validityAmount"),
         payload.get("validityUnit"),

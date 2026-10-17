@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Wifi } from "lucide-react";
 import { Link } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
-import { FormField } from "@/components/ui/FormField";
+import { FormField, FormPicker } from "@/components/ui/FormField";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
@@ -173,7 +173,7 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
         <div className="flex items-start justify-between gap-3">
           <div>
             <div className="flex flex-wrap items-center gap-2">
-              <h1 className="text-2xl font-semibold tracking-tight">{view.title}</h1>
+              <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{view.title}</h1>
               <StatusBadge tone={kind === "pppoe" ? "active" : "neutral"}>{kind === "pppoe" ? "PPPoE" : "Hotspot"}</StatusBadge>
             </div>
             <p className="mt-1 text-sm leading-6 text-muted-foreground">{view.lead}</p>
@@ -234,32 +234,19 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
             }}
           >
             {isHotspot && singleOffers.length > 0 && multiOffers.length > 0 ? (
-              <div className="grid grid-cols-2 gap-2" role="tablist" aria-label="How many devices">
-                {(
-                  [
-                    ["one", "One device"],
-                    ["multi", "Multiple devices"],
-                  ] as const
-                ).map(([value, label]) => (
-                  <button
-                    key={value}
-                    type="button"
-                    role="tab"
-                    aria-selected={mode === value}
-                    className={cn(
-                      "rounded-xl border px-4 py-2.5 text-sm font-semibold",
-                      mode === value ? "border-primary bg-primary/5 text-primary" : "border-border text-muted-foreground",
-                    )}
-                    onClick={() => chooseMode(value)}
-                  >
-                    {label}
-                  </button>
-                ))}
-              </div>
+              <FormPicker
+                label="How many devices"
+                options={[
+                  { id: "one", label: "One device" },
+                  { id: "multi", label: "Multiple devices" },
+                ]}
+                value={mode}
+                onChange={(id) => chooseMode(id as "one" | "multi")}
+              />
             ) : null}
             <fieldset className="grid gap-2">
               <legend className="text-sm font-medium">Package</legend>
-              {!loaded ? <p className="text-sm text-muted-foreground">Loading packages...</p> : null}
+              {!loaded ? <p className="text-sm text-muted-foreground">Loading packages…</p> : null}
               {formError ? (
                 <p className="text-sm text-destructive" role="alert">
                   {formError}
@@ -302,7 +289,15 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
                     <span className="block text-xs text-muted-foreground">
                       {offer.downloadMbps} Mbps down · {offer.uploadMbps} Mbps up{validityText(offer)}
                     </span>
-                    {isHotspot ? <span className="block text-xs text-muted-foreground">{offerDetail(offer)}</span> : null}
+                    <span className="block text-xs text-muted-foreground">
+                      {isHotspot
+                        ? offerDetail(offer)
+                        : deviceCount(offer) === 0
+                          ? "Unlimited devices"
+                          : deviceCount(offer) === 1
+                            ? "1 device"
+                            : `Up to ${deviceCount(offer)} devices`}
+                    </span>
                   </span>
                   <span className="text-sm font-semibold">{money(offer.price)}</span>
                 </label>
@@ -310,7 +305,7 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
               {customising && chosen ? (
                 <div className="grid gap-3 rounded-xl border border-primary/40 bg-primary/5 px-4 py-3">
                   <div className="grid gap-3 sm:grid-cols-2">
-                    <label className="grid gap-1 text-sm font-medium" htmlFor="wifi-devices">
+                    <label className="grid gap-1.5 text-sm font-medium" htmlFor="wifi-devices">
                       Devices
                       <input
                         id="wifi-devices"
@@ -323,7 +318,7 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
                         onChange={(event) => setDevices(Math.min(50, Math.max(1, Number(event.target.value) || 1)))}
                       />
                     </label>
-                    <label className="grid gap-1 text-sm font-medium" htmlFor="wifi-periods">
+                    <label className="grid gap-1.5 text-sm font-medium" htmlFor="wifi-periods">
                       Periods (1 = {unitLabel(chosen)})
                       <input
                         id="wifi-periods"

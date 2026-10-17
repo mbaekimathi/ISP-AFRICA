@@ -52,7 +52,7 @@ export function PppoeCustomerTransactionsPage() {
   }
 
   if (!subscriber) {
-    return <div className="page-shell py-8 text-sm text-muted-foreground">{message || "Loading transactions..."}</div>;
+    return <div className="page-shell py-8 text-sm text-muted-foreground">{message || "Loading transactions…"}</div>;
   }
 
   const home = (path: string) => (user ? clientPage(user, path) : path);
@@ -157,8 +157,8 @@ export function PppoeCustomerTransactionsPage() {
 
       <Dialog.Root open={payOpen} onOpenChange={setPayOpen}>
         <Dialog.Portal>
-          <Dialog.Overlay className="fixed inset-0 z-50 bg-black/50 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0" />
-          <Dialog.Content className="fixed left-[50%] top-[50%] z-50 grid w-full max-w-md translate-x-[-50%] translate-y-[-50%] gap-4 rounded-xl border border-border bg-surface p-6 shadow-lg duration-200 data-[state=open]:animate-in data-[state=closed]:animate-out data-[state=closed]:fade-out-0 data-[state=open]:fade-in-0 data-[state=closed]:zoom-out-95 data-[state=open]:zoom-in-95">
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content">
             <div>
               <Dialog.Title className="text-base font-semibold text-foreground">Record payment</Dialog.Title>
               <Dialog.Description className="mt-2 text-sm text-muted-foreground">

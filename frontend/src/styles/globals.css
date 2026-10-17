@@ -275,6 +275,13 @@
   ::selection {
     background: color-mix(in srgb, var(--primary) 28%, transparent);
   }
+
+  input[type="checkbox"],
+  input[type="radio"],
+  input[type="range"],
+  progress {
+    accent-color: var(--primary);
+  }
 }
 
 @layer components {
@@ -321,6 +328,52 @@
 
   .section-anchor {
     scroll-margin-top: calc(var(--header-height) + 1rem);
+  }
+
+  .dialog-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 50;
+    background: var(--overlay);
+    animation: dialog-fade var(--duration) var(--ease);
+  }
+
+  .dialog-content {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    z-index: 50;
+    display: grid;
+    width: 100%;
+    max-width: 28rem;
+    gap: 1rem;
+    transform: translate(-50%, -50%);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    background: var(--surface);
+    padding: 1.5rem;
+    box-shadow: var(--shadow-lift);
+    animation: dialog-in var(--duration) var(--ease);
+  }
+}
+
+@keyframes dialog-fade {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes dialog-in {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -48%) scale(0.97);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
   }
 }
 

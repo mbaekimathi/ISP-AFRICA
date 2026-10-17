@@ -59,7 +59,7 @@ export function ReviewsPage() {
             Pending
           </h2>
           {pending.length === 0 ? (
-            <p className="rounded-2xl border border-border bg-surface p-5 text-sm text-muted-foreground">No accounts are waiting.</p>
+            <p className="rounded-xl border border-border bg-surface p-5 text-sm text-muted-foreground">No accounts are waiting.</p>
           ) : (
             pending.map((account) => (
               <article key={account.id} className="rounded-xl border border-border bg-surface p-5">
@@ -98,7 +98,7 @@ export function ReviewsPage() {
           {approved.length === 0 ? (
             <p className="text-sm text-muted-foreground">No approved client accounts yet.</p>
           ) : (
-            <ul className="divide-y divide-border overflow-hidden rounded-2xl border border-border bg-surface">
+            <ul className="divide-y divide-border overflow-hidden rounded-xl border border-border bg-surface">
               {approved.map((account) => (
                 <li key={account.id} className="grid grid-cols-[minmax(0,1fr)_9rem] items-center gap-4 px-5 py-3 text-sm">
                   <span className="truncate font-medium text-foreground">

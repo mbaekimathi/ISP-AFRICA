@@ -123,7 +123,7 @@ export function IspCommunicationsPage() {
   }
 
   return (
-    <div className="page-shell py-10">
+    <div className="page-shell py-8">
       <PageHeader
         title="Communications"
         description="Set the SMS, WhatsApp, and email API for this account. Saved keys and tokens stay hidden and are kept when those fields are left unchanged."

@@ -146,11 +146,11 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
           load();
         }}
       >
-        <label className="grid gap-1 text-sm">
+        <label className="grid gap-1.5 text-sm font-medium">
           Search
           <input className="field" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name, phone, username, serial" />
         </label>
-        <label className="grid gap-1 text-sm">
+        <label className="grid gap-1.5 text-sm font-medium">
           Router
           <select className="field" value={router} onChange={(event) => setRouter(event.target.value)}>
             <option value="">All routers</option>
@@ -159,7 +159,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
             ))}
           </select>
         </label>
-        <label className="grid gap-1 text-sm">
+        <label className="grid gap-1.5 text-sm font-medium">
           Package
           <select className="field" value={pkg} onChange={(event) => setPkg(event.target.value)}>
             <option value="">All packages</option>
@@ -168,7 +168,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
             ))}
           </select>
         </label>
-        <label className="grid gap-1 text-sm">
+        <label className="grid gap-1.5 text-sm font-medium">
           Status
           <select className="field" value={status} onChange={(event) => setStatus(event.target.value)}>
             <option value="">Any router status</option>
@@ -184,7 +184,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
         <div className="flex items-end">
           <SecondaryButton type="submit">Search</SecondaryButton>
         </div>
-        <label className="grid gap-1 text-sm">
+        <label className="grid gap-1.5 text-sm font-medium">
           Billing
           <select className="field" value={billing} onChange={(event) => setBilling(event.target.value)}>
             <option value="">Any billing</option>
@@ -213,7 +213,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
           <tbody>
             {!page && !message ? (
               <tr>
-                <td colSpan={8} className="px-3 py-6 text-muted-foreground">Loading {label} clients...</td>
+                <td colSpan={8} className="px-3 py-6 text-muted-foreground">Loading {label} clients…</td>
               </tr>
             ) : null}
             {page?.subscribers.length === 0 ? (

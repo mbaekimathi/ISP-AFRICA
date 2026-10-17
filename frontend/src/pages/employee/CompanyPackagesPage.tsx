@@ -84,6 +84,8 @@ type Draft = {
   graceUnit: "" | TimeUnit;
   status: "" | PackageStatus;
   deviceMode: "" | "one" | "multiple";
+  devicesUnlimited: boolean;
+  devicesLimit: string;
   clients: string[];
   imageDataUrl: string;
 };
@@ -119,6 +121,8 @@ const emptyDraft: Draft = {
   graceUnit: "",
   status: "",
   deviceMode: "",
+  devicesUnlimited: true,
+  devicesLimit: "",
   clients: [],
   imageDataUrl: "",
 };
@@ -167,6 +171,7 @@ function payload(draft: Draft) {
     fairResetAmount: draft.fairEnabled ? draft.fairResetAmount.trim() : "",
     fairResetUnit: draft.fairEnabled ? draft.fairResetUnit : "",
     deviceMode: draft.serviceType === "hotspot" ? draft.deviceMode : "",
+    simultaneousDevices: draft.serviceType === "pppoe" ? (draft.devicesUnlimited ? 0 : Number(draft.devicesLimit)) : "",
     extraDevicePrice: draft.serviceType === "hotspot" && draft.deviceMode === "multiple" ? draft.extraDevicePrice.trim() : "",
     extraPeriodPrice: draft.serviceType === "hotspot" && draft.deviceMode === "multiple" ? draft.extraPeriodPrice.trim() : "",
     graceAmount: draft.graceAmount.trim(),
@@ -206,6 +211,8 @@ function draftFrom(record: PackageRecord): Draft {
     extraDevicePrice: record.extraDevicePrice ?? "",
     extraPeriodPrice: record.extraPeriodPrice ?? "",
     deviceMode: record.serviceType === "hotspot" ? (record.simultaneousDevices === 1 ? "one" : "multiple") : "",
+    devicesUnlimited: record.simultaneousDevices === 0,
+    devicesLimit: record.simultaneousDevices > 0 ? String(record.simultaneousDevices) : "",
     graceAmount: record.graceAmount == null ? "" : String(record.graceAmount),
     graceUnit: record.graceUnit ?? "",
     status: record.status,
@@ -650,6 +657,35 @@ function PackageFields({
             ) : null}
           </div>
         ) : null}
+        {draft.serviceType === "pppoe" ? (
+          <FormField
+            id={`${idPrefix}-devices`}
+            label="Devices"
+            hint="How many devices may connect at once. Leave it unlimited or set a limit."
+          >
+            <div className="grid gap-2 sm:grid-cols-2">
+              <select
+                id={`${idPrefix}-devices`}
+                className="field"
+                value={draft.devicesUnlimited ? "unlimited" : "limited"}
+                onChange={(event) => onChange({ ...draft, devicesUnlimited: event.target.value === "unlimited" })}
+              >
+                <option value="unlimited">Unlimited</option>
+                <option value="limited">Set a limit</option>
+              </select>
+              {!draft.devicesUnlimited ? (
+                <input
+                  className="field"
+                  inputMode="numeric"
+                  required
+                  placeholder="e.g. 3"
+                  value={draft.devicesLimit}
+                  onChange={(event) => set("devicesLimit", event.target.value)}
+                />
+              ) : null}
+            </div>
+          </FormField>
+        ) : null}
         <FormField id={`${idPrefix}-price`} label="Price (KSh)">
           <input
             id={`${idPrefix}-price`}
@@ -841,7 +877,7 @@ function periodLabel(amount: number | null, unit: TimeUnit | null) {
 }
 
 function deviceLabel(item: PackageRecord) {
-  if (item.serviceType !== "hotspot") return String(item.simultaneousDevices);
+  if (item.serviceType !== "hotspot") return item.simultaneousDevices === 0 ? "Unlimited" : String(item.simultaneousDevices);
   if (item.simultaneousDevices === 0) {
     return `Customer chooses · +KSh ${item.extraDevicePrice ?? "0"} per extra device · +KSh ${item.extraPeriodPrice ?? "0"} per extra period`;
   }
@@ -938,7 +974,7 @@ export function CompanyPackagesPage() {
   }
 
   return (
-    <div className="page-shell py-10">
+    <div className="page-shell py-8">
       <PageHeader
         title="Company packages"
         description="Register a company package. It is added to every selected ISP account as a default package."
