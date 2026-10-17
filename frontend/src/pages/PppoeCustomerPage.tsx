@@ -505,11 +505,21 @@ export function PppoeCustomerPage() {
   ) : subscriber.connection === "online" ? "—" : "Offline";
   const lastSeenMs = stampMs(subscriber.live.lastSeen);
   const seenFor = lastSeenMs ? elapsedLabel(lastSeenMs) : null;
+  const today = new Date();
+  const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
+  const expiryDay = (subscriber.expiry || "").slice(0, 10);
+  // status='expired' only lands once reconcile() runs on a list view; the
+  // expiry date itself is checked here so the detail page can't lag behind.
+  const expiredService = ended || subscriber.status === "expired" || (expiryDay !== "" && expiryDay < todayKey);
   let statusLabel: string;
   let statusHint: string;
   let statusTone = "";
   if (subscriber.connection === "online") {
-    if (suspended) {
+    if (expiredService) {
+      statusLabel = "Expired";
+      statusHint = `Session online for ${subscriber.live.uptime || elapsedLabel(surfSinceRef.current ?? Date.now())}`;
+      statusTone = "text-warning";
+    } else if (suspended) {
       statusLabel = "Paused";
       statusHint = `Restricted session for ${subscriber.live.uptime || elapsedLabel(surfSinceRef.current ?? Date.now())}`;
       statusTone = "text-warning";
@@ -518,7 +528,7 @@ export function PppoeCustomerPage() {
       statusHint = `Online for ${subscriber.live.uptime || elapsedLabel(surfSinceRef.current ?? Date.now())}`;
       statusTone = "text-success";
     }
-  } else if (ended) {
+  } else if (expiredService) {
     statusLabel = "Expired";
     statusHint = seenFor ? `Offline for ${seenFor}` : "Access ended";
     statusTone = "text-warning";
