@@ -16,6 +16,7 @@ import { BillingsPage } from "@/pages/BillingsPage";
 import { ClientsPage } from "@/pages/ClientsPage";
 import { ClientUsagePage } from "@/pages/ClientUsagePage";
 import { WifiPaymentPage } from "@/pages/WifiPaymentPage";
+import { HotspotClientPage } from "@/pages/HotspotClientPage";
 import { PppoeCustomerPage } from "@/pages/PppoeCustomerPage";
 import { PppoeCustomerTransactionsPage } from "@/pages/PppoeCustomerTransactionsPage";
 import { PppoeRegisterPage } from "@/pages/PppoeRegisterPage";
@@ -84,12 +85,14 @@ export function App() {
             <Route path="/clients/hotspot" element={<ClientsPage kind="hotspot" />} />
             <Route path="/clients/hotspot/payments" element={<WifiPaymentPage kind="hotspot" />} />
             <Route path="/clients/hotspot/usage" element={<ClientUsagePage kind="hotspot" />} />
+            <Route path="/hotspot/:purchaseId" element={<HotspotClientPage />} />
             <Route path="/:code/clients" element={<ClientsPage kind="pppoe" />} />
             <Route path="/:code/clients/payments" element={<WifiPaymentPage kind="pppoe" />} />
             <Route path="/:code/clients/usage" element={<ClientUsagePage kind="pppoe" />} />
             <Route path="/:code/clients/hotspot" element={<ClientsPage kind="hotspot" />} />
             <Route path="/:code/clients/hotspot/payments" element={<WifiPaymentPage kind="hotspot" />} />
             <Route path="/:code/clients/hotspot/usage" element={<ClientUsagePage kind="hotspot" />} />
+            <Route path="/:code/hotspot/:purchaseId" element={<HotspotClientPage />} />
             <Route path="/billings" element={<BillingsPage />} />
             <Route path="/:code/billings" element={<BillingsPage />} />
             <Route path="/account" element={<AccountPage />} />

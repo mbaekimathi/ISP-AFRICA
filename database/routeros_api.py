@@ -2231,6 +2231,37 @@ def authorize_hotspot_client(host, password, ip, mac, username, secret, profile,
     return {"applied": True, "online": online}
 
 
+def revoke_hotspot_client(host, password, usernames, timeout=12, port=API_PORT, opener=None):
+    """Delete paid hotspot users and kick any live sessions they still hold."""
+    names = {str(name) for name in usernames if str(name or "").strip()}
+    if not names:
+        raise RouterError("No hotspot usernames were provided.")
+    connect = opener or socket.create_connection
+    try:
+        sock = connect((host, port), timeout)
+    except OSError as error:
+        raise RouterError("The management tunnel did not answer.") from error
+    removed = 0
+    dropped = 0
+    try:
+        sock.settimeout(timeout)
+        reader = ByteReader(sock)
+        login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
+        if any(row.get("ret") for row in login):
+            raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
+        for row in talk(sock, reader, ["/ip/hotspot/active/print"]):
+            if row.get("user") in names and _row_id(row):
+                talk(sock, reader, ["/ip/hotspot/active/remove", f"=.id={_row_id(row)}"])
+                dropped += 1
+        for row in talk(sock, reader, ["/ip/hotspot/user/print"]):
+            if row.get("name") in names and _row_id(row):
+                talk(sock, reader, ["/ip/hotspot/user/remove", f"=.id={_row_id(row)}"])
+                removed += 1
+    finally:
+        sock.close()
+    return {"removed": removed, "dropped": dropped}
+
+
 def apply_uplink_plan(host, password, commands, timeout=4, port=API_PORT, opener=None):
     """Move ordinary default-route and source NAT preference. Nothing else."""
     connect = opener or socket.create_connection

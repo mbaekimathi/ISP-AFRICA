@@ -238,7 +238,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
                 <td className="px-3 py-3">{client.expiry ?? "—"}</td>
                 <td className="px-3 py-3">
                   <div className="flex flex-wrap gap-2">
-                    {kind === "hotspot" ? <span className="text-muted-foreground">—</span> : null}
+                    {kind === "hotspot" ? <SecondaryButton to={home(`/hotspot/${client.id}`)}>View</SecondaryButton> : null}
                     {kind === "pppoe" ? <SecondaryButton to={home(`/pppoe/${client.id}`)}>View</SecondaryButton> : null}
                     {kind === "pppoe" ? <SecondaryButton to={home(`/pppoe/${client.id}?edit=1`)}>Edit</SecondaryButton> : null}
                     {kind === "pppoe" ? (client.status === "pending_activation" ? (

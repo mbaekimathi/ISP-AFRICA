@@ -1168,6 +1168,8 @@ def ensure_schema():
                 ("login_url", "login_url VARCHAR(255) NOT NULL DEFAULT ''"),
                 ("orig_url", "orig_url VARCHAR(255) NOT NULL DEFAULT ''"),
                 ("mpesa_code", "mpesa_code VARCHAR(20) NOT NULL DEFAULT ''"),
+                ("deleted", "deleted TINYINT NOT NULL DEFAULT 0"),
+                ("ended_at", "ended_at TIMESTAMP NULL"),
             ):
                 cursor.execute("SHOW COLUMNS FROM hotspot_purchases LIKE %s", (column,))
                 if cursor.fetchone() is None:

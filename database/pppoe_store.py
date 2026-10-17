@@ -2205,7 +2205,7 @@ def list_hotspot_clients(cursor, client_id, query):
     Hotspot buyers never become pppoe_subscribers rows — they exist only as
     purchases and single-use vouchers, so the clients page reads from them.
     """
-    where = ["h.client_id = %s"]
+    where = ["h.client_id = %s", "h.deleted = 0"]
     args = [client_id]
     router = (query.get("router") or [""])[0]
     package = (query.get("package") or [""])[0]
@@ -2305,10 +2305,11 @@ def hotspot_usage(cursor, client_id):
         SELECT h.client_id, h.device_id, h.phone, v.username, v.code
         FROM hotspot_vouchers v
         JOIN hotspot_purchases h ON h.id = v.purchase_id
+        WHERE h.deleted = 0
         UNION ALL
         SELECT h.client_id, h.device_id, h.phone, h.username, NULL AS code
         FROM hotspot_purchases h
-        WHERE h.username IS NOT NULL AND h.username <> ''
+        WHERE h.deleted = 0 AND h.username IS NOT NULL AND h.username <> ''
     """
     cursor.execute(
         f"""
@@ -2369,6 +2370,322 @@ def hotspot_usage(cursor, client_id):
         "monthBytesOut": month_out,
         "days": days,
     }
+
+
+HOTSPOT_VALIDITY_SECONDS = {"hours": 3600, "days": 86400, "weeks": 604800, "months": 2592000}
+
+
+def hotspot_client_row(cursor, client_id, purchase_id):
+    cursor.execute(
+        """
+        SELECT h.id, h.client_id, h.device_id, h.package_id, h.phone, h.amount, h.checkout_id,
+               h.mac, h.ip, h.devices, h.periods, h.username, h.password, h.status, h.authorized,
+               h.mpesa_code, h.paid_at, h.created_at, h.deleted, h.ended_at,
+               d.name AS router_name, d.tunnel_ip, d.api_secret,
+               COALESCE(p.name, c.name, 'Wi-Fi bundle') AS package_name,
+               COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
+               COALESCE(p.validity_unit, c.validity_unit, 'days') AS validity_unit,
+               COALESCE(p.download_mbps, c.download_mbps, 0) AS download_mbps,
+               COALESCE(p.upload_mbps, c.upload_mbps, 0) AS upload_mbps
+        FROM hotspot_purchases h
+        LEFT JOIN isp_mikrotik_devices d ON d.id = h.device_id
+        LEFT JOIN isp_packages p ON p.id = h.package_id
+        LEFT JOIN company_packages c ON c.id = p.company_package_id
+        WHERE h.id = %s AND h.client_id = %s
+        """,
+        (str(purchase_id or "")[:36], client_id),
+    )
+    row = cursor.fetchone()
+    if not row:
+        raise PppoeError(404, "That hotspot client was not found.")
+    return row
+
+
+def hotspot_voucher_rows(cursor, purchase_id):
+    cursor.execute(
+        """
+        SELECT id, code, username, password, seconds, status, redeemed_ip, redeemed_mac, issued_at, used_at
+        FROM hotspot_vouchers WHERE purchase_id = %s ORDER BY issued_at, id
+        """,
+        (purchase_id,),
+    )
+    return cursor.fetchall()
+
+
+def issue_hotspot_voucher_rows(cursor, row, count, seconds):
+    """Mint single-use vouchers on a purchase. Same shape as the portal's issuer."""
+    issued = []
+    for _slot in range(max(1, int(count))):
+        code = voucher_code()
+        for _attempt in range(5):
+            cursor.execute("SELECT id FROM hotspot_vouchers WHERE code = %s", (code,))
+            if not cursor.fetchone():
+                break
+            code = voucher_code()
+        voucher_id = str(uuid.uuid4())
+        username = f"hs-{secrets.token_hex(4)}"
+        secret = secrets.token_hex(4)
+        cursor.execute(
+            """
+            INSERT INTO hotspot_vouchers
+              (id, client_id, purchase_id, device_id, package_id, code, username, password, seconds)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                voucher_id, row["client_id"], row["id"], str(row.get("device_id") or "")[:36],
+                str(row.get("package_id") or "")[:36], code, username, secret, int(seconds or 0),
+            ),
+        )
+        issued.append({"id": voucher_id, "code": code, "username": username, "password": secret, "status": "issued"})
+    return issued
+
+
+def hotspot_usernames(row, vouchers):
+    names = [voucher["username"] for voucher in vouchers if voucher.get("username")]
+    if row.get("username"):
+        names.append(row["username"])
+    return names
+
+
+def radacct_for_usernames(cursor, usernames, sql, extra_args=()):
+    """Run a radacct query against a dynamic username IN (...) list."""
+    if not usernames:
+        return []
+    marks = ", ".join(["%s"] * len(usernames))
+    cursor.execute(sql.format(marks=marks), [*usernames, *extra_args])
+    return cursor.fetchall()
+
+
+def hotspot_client_detail(cursor, client_id, purchase_id):
+    """Everything about one hotspot guest: purchase, vouchers, usage, timeline."""
+    row = hotspot_client_row(cursor, client_id, purchase_id)
+    vouchers = hotspot_voucher_rows(cursor, row["id"])
+    usernames = hotspot_usernames(row, vouchers)
+    labels = {voucher["username"]: voucher["code"] for voucher in vouchers}
+    if row.get("username"):
+        labels[row["username"]] = "This device"
+
+    usage = {"bytesIn": 0, "bytesOut": 0, "sessions": 0, "firstSeen": None, "lastSeen": None}
+    totals = radacct_for_usernames(
+        cursor,
+        usernames,
+        f"""
+        SELECT COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in, COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out,
+               COUNT(*) AS sessions, MIN(a.acctstarttime) AS first_seen, MAX(COALESCE(a.acctstoptime, a.acctstarttime)) AS last_seen
+        FROM radacct a WHERE a.username IN ({{marks}})
+        """,
+    )
+    if totals:
+        usage = {
+            "bytesIn": int(totals[0]["bytes_in"] or 0),
+            "bytesOut": int(totals[0]["bytes_out"] or 0),
+            "sessions": int(totals[0]["sessions"] or 0),
+            "firstSeen": stamp(totals[0]["first_seen"]),
+            "lastSeen": stamp(totals[0]["last_seen"]),
+        }
+
+    open_sessions = radacct_for_usernames(
+        cursor,
+        usernames,
+        "SELECT username FROM radacct a WHERE a.username IN ({marks}) AND a.acctstoptime IS NULL",
+    )
+    sessions = radacct_for_usernames(
+        cursor,
+        usernames,
+        f"""
+        SELECT a.username, a.acctstarttime, a.acctstoptime, a.acctsessiontime,
+               a.acctinputoctets, a.acctoutputoctets, a.framedipaddress, a.callingstationid, a.acctterminatecause
+        FROM radacct a WHERE a.username IN ({{marks}})
+        ORDER BY a.acctstarttime DESC LIMIT 20
+        """,
+    )
+
+    timeline = []
+    if row["created_at"]:
+        timeline.append(
+            {"at": stamp(row["created_at"]), "event": "Payment requested",
+             "detail": f"M-Pesa prompt to {row['phone']} for {row['package_name']}."}
+        )
+    if row["paid_at"]:
+        timeline.append(
+            {"at": stamp(row["paid_at"]), "event": "Paid",
+             "detail": f"KSh {format(Decimal(row['amount']), '.2f')} confirmed" + (f" — receipt {row['mpesa_code']}." if row.get("mpesa_code") else ".")}
+        )
+    elif row["status"] == "failed":
+        timeline.append({"at": stamp(row["created_at"]), "event": "Payment failed", "detail": "M-Pesa did not confirm this request."})
+    for voucher in vouchers:
+        if voucher["issued_at"]:
+            timeline.append({"at": stamp(voucher["issued_at"]), "event": "Voucher issued", "detail": voucher["code"]})
+        if voucher["used_at"]:
+            timeline.append(
+                {"at": stamp(voucher["used_at"]), "event": "Voucher redeemed",
+                 "detail": f"{voucher['code']} on {voucher['redeemed_mac'] or voucher['redeemed_ip'] or 'a device'}."}
+            )
+        if voucher["status"] == "void":
+            timeline.append({"at": stamp(voucher["used_at"] or voucher["issued_at"]), "event": "Voucher voided", "detail": voucher["code"]})
+    session_rows_out = []
+    for session in sessions:
+        live = session["acctstoptime"] is None
+        session_rows_out.append(
+            {
+                "username": session["username"],
+                "label": labels.get(session["username"]) or session["username"],
+                "start": stamp(session["acctstarttime"]),
+                "stop": stamp(session["acctstoptime"]),
+                "seconds": int(session["acctsessiontime"] or 0),
+                "bytesIn": int(session["acctinputoctets"] or 0),
+                "bytesOut": int(session["acctoutputoctets"] or 0),
+                "ip": session.get("framedipaddress") or "",
+                "mac": session.get("callingstationid") or "",
+                "cause": session.get("acctterminatecause") or "",
+                "live": live,
+            }
+        )
+        timeline.append(
+            {"at": stamp(session["acctstarttime"]), "event": "Started surfing",
+             "detail": f"{labels.get(session['username']) or session['username']} on {session.get('callingstationid') or 'a device'}."}
+        )
+        if session["acctstoptime"]:
+            cause = session.get("acctterminatecause") or "session ended"
+            timeline.append(
+                {"at": stamp(session["acctstoptime"]), "event": "Dropped",
+                 "detail": f"{labels.get(session['username']) or session['username']} — {str(cause).replace('-', ' ').lower()}."}
+            )
+    if row.get("ended_at"):
+        timeline.append({"at": stamp(row["ended_at"]), "event": "Access ended", "detail": "Removed by the account operator."})
+    timeline = [event for event in timeline if event["at"]]
+    timeline.sort(key=lambda event: event["at"], reverse=True)
+
+    return {
+        "client": {
+            "id": row["id"],
+            "phone": row["phone"],
+            "mac": row["mac"],
+            "ip": row["ip"],
+            "amount": format(Decimal(row["amount"]), ".2f"),
+            "status": row["status"],
+            "mpesaCode": row.get("mpesa_code") or "",
+            "checkoutId": row["checkout_id"],
+            "paidAt": stamp(row["paid_at"]),
+            "createdAt": stamp(row["created_at"]),
+            "packageName": row["package_name"],
+            "routerName": row.get("router_name") or "",
+            "devices": int(row["devices"] or 1),
+            "periods": int(row["periods"] or 1),
+            "username": row.get("username") or "",
+            "authorized": bool(row["authorized"]),
+            "endedAt": stamp(row.get("ended_at")),
+            "deleted": bool(row.get("deleted")),
+            "connection": "online" if open_sessions else "offline",
+        },
+        "vouchers": [
+            {
+                "id": voucher["id"],
+                "code": voucher["code"],
+                "username": voucher["username"],
+                "password": voucher["password"],
+                "seconds": int(voucher["seconds"] or 0),
+                "status": voucher["status"],
+                "redeemedIp": voucher["redeemed_ip"] or "",
+                "redeemedMac": voucher["redeemed_mac"] or "",
+                "issuedAt": stamp(voucher["issued_at"]),
+                "usedAt": stamp(voucher["used_at"]),
+            }
+            for voucher in vouchers
+        ],
+        "usage": usage,
+        "sessions": session_rows_out,
+        "timeline": timeline,
+    }
+
+
+def hotspot_revoke_access(cursor, row, vouchers):
+    """Kick live sessions, delete router hotspot users, and drop any RADIUS grants."""
+    usernames = hotspot_usernames(row, vouchers)
+    report = {"removed": 0, "dropped": 0}
+    if usernames and row.get("tunnel_ip") and row.get("api_secret"):
+        try:
+            report = routeros_api.revoke_hotspot_client(
+                row["tunnel_ip"], routeros_api.open_password(row["api_secret"]), usernames
+            )
+        except (routeros_api.RouterError, OSError):
+            pass
+    for name in usernames:
+        try:
+            coa_for(cursor, {"router_id": row["device_id"]}, name)
+        except Exception:
+            pass
+        for table in ("radcheck", "radreply", "radusergroup"):
+            cursor.execute(f"DELETE FROM {table} WHERE username = %s", (name,))
+    return report
+
+
+def hotspot_end_access(cursor, client_id, purchase_id):
+    row = hotspot_client_row(cursor, client_id, purchase_id)
+    vouchers = hotspot_voucher_rows(cursor, row["id"])
+    report = hotspot_revoke_access(cursor, row, vouchers)
+    cursor.execute(
+        "UPDATE hotspot_vouchers SET status = 'void' WHERE purchase_id = %s AND status <> 'void'",
+        (row["id"],),
+    )
+    cursor.execute(
+        "UPDATE hotspot_purchases SET authorized = 0, ended_at = NOW() WHERE id = %s",
+        (row["id"],),
+    )
+    return {"ended": True, "dropped": report.get("dropped", 0), "removed": report.get("removed", 0)}
+
+
+def hotspot_recharge(cursor, client_id, purchase_id, payload):
+    """Operator top-up: mint fresh vouchers, then try to put the buyer's device back online."""
+    row = hotspot_client_row(cursor, client_id, purchase_id)
+    try:
+        periods = min(60, max(1, int(payload.get("periods") or 1)))
+        count = min(50, max(1, int(payload.get("vouchers") or 1)))
+    except (TypeError, ValueError) as error:
+        raise PppoeError(400, "Enter a valid number of vouchers and periods.") from error
+    seconds = periods * HOTSPOT_VALIDITY_SECONDS.get(str(row["validity_unit"] or "days"), 86400) * int(row["validity_amount"] or 1)
+    vouchers = issue_hotspot_voucher_rows(cursor, row, count, seconds)
+    connected = False
+    if row.get("tunnel_ip") and row.get("api_secret") and row.get("mac"):
+        first = vouchers[0]
+        profile = f"hs-{str(row['package_id'])[:8]}"
+        rate = f"{int(row['upload_mbps'] or 0)}M/{int(row['download_mbps'] or 0)}M"
+        try:
+            grant = routeros_api.authorize_hotspot_client(
+                row["tunnel_ip"], routeros_api.open_password(row["api_secret"]),
+                row["ip"], row["mac"], first["username"], first["password"],
+                profile, rate, 1, f"{max(1, seconds)}s",
+            )
+            connected = bool(grant.get("online"))
+            if connected:
+                cursor.execute(
+                    """
+                    UPDATE hotspot_vouchers
+                    SET status = 'used', used_at = NOW(), redeemed_ip = %s, redeemed_mac = %s
+                    WHERE id = %s AND status = 'issued'
+                    """,
+                    (row["ip"], row["mac"], first["id"]),
+                )
+                first["status"] = "used"
+        except (routeros_api.RouterError, OSError):
+            connected = False
+    cursor.execute(
+        "UPDATE hotspot_purchases SET authorized = 1, ended_at = NULL WHERE id = %s",
+        (row["id"],),
+    )
+    return {"vouchers": [{"code": voucher["code"], "status": voucher["status"]} for voucher in vouchers], "connected": connected}
+
+
+def hotspot_delete(cursor, client_id, purchase_id):
+    row = hotspot_client_row(cursor, client_id, purchase_id)
+    vouchers = hotspot_voucher_rows(cursor, row["id"])
+    hotspot_revoke_access(cursor, row, vouchers)
+    cursor.execute("UPDATE hotspot_vouchers SET status = 'void' WHERE purchase_id = %s", (row["id"],))
+    cursor.execute(
+        "UPDATE hotspot_purchases SET authorized = 0, deleted = 1, ended_at = NOW() WHERE id = %s",
+        (row["id"],),
+    )
+    return {"deleted": True}
 
 
 def parse_daraja_callback(payload):
@@ -2438,6 +2755,19 @@ def dispatch(cursor, method, path, payload, token, query):
         return list_hotspot_clients(cursor, client_id_from(cursor, token), query), None
     if path == "/api/hotspot/usage" and method == "GET":
         return hotspot_usage(cursor, client_id_from(cursor, token)), None
+    hotspot_prefix = "/api/hotspot/clients/"
+    if path.startswith(hotspot_prefix):
+        client_id = client_id_from(cursor, token)
+        purchase_id, _, action = path.removeprefix(hotspot_prefix).strip("/").partition("/")
+        if method == "GET" and not action:
+            return hotspot_client_detail(cursor, client_id, purchase_id), None
+        if method == "POST" and action == "end-access":
+            return {"result": hotspot_end_access(cursor, client_id, purchase_id)}, None
+        if method == "POST" and action == "recharge":
+            return {"result": hotspot_recharge(cursor, client_id, purchase_id, payload or {})}, None
+        if method == "POST" and action == "delete":
+            return {"result": hotspot_delete(cursor, client_id, purchase_id)}, None
+        raise PppoeError(404, "That hotspot client was not found.")
     if path == "/api/billings/transactions" and method == "GET":
         return list_transactions(cursor, client_id_from(cursor, token), query), None
     if not path.startswith("/api/pppoe"):
