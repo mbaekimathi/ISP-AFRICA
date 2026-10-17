@@ -107,7 +107,7 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
         const active = body.packages.filter((item) => item.status === "active" && (item.serviceType || "pppoe") === kind);
         setOffers(active);
         if (kind === "hotspot") {
-          const single = active.filter((item) => deviceCount(item) <= 1);
+          const single = active.filter((item) => deviceCount(item) === 1);
           const fallback = single.length ? single : active.filter((item) => deviceCount(item) !== 1);
           setMode(single.length ? "one" : "multi");
           setSelected(fallback[0]?.id ?? "");
@@ -127,7 +127,7 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
   }, []);
 
   const isHotspot = kind === "hotspot";
-  const singleOffers = offers.filter((item) => deviceCount(item) <= 1);
+  const singleOffers = offers.filter((item) => deviceCount(item) === 1);
   const multiOffers = offers.filter((item) => deviceCount(item) !== 1);
   const visibleOffers = isHotspot ? (mode === "one" ? singleOffers : multiOffers) : offers;
   const chosen = visibleOffers.find((item) => item.id === selected) ?? null;
@@ -233,7 +233,7 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
               pay();
             }}
           >
-            {isHotspot && singleOffers.length > 0 && multiOffers.length > 0 ? (
+            {isHotspot && offers.length > 0 ? (
               <FormPicker
                 label="How many devices"
                 options={[
@@ -268,6 +268,13 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
               {loaded && !loadError && offers.length === 0 ? (
                 <p className="rounded-xl border border-border bg-surface-muted px-4 py-3 text-sm text-muted-foreground">
                   No active packages are available yet. Add one under Packages before a customer can pay here.
+                </p>
+              ) : null}
+              {loaded && !loadError && offers.length > 0 && visibleOffers.length === 0 ? (
+                <p className="rounded-xl border border-border bg-surface-muted px-4 py-3 text-sm text-muted-foreground">
+                  {mode === "one"
+                    ? "No single-device packages are on sale — check the multiple-device options."
+                    : "No multiple-device packages are on sale — check the single-device options."}
                 </p>
               ) : null}
               {visibleOffers.map((offer) => (

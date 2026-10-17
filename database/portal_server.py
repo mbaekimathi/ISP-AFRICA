@@ -677,7 +677,7 @@ def hotspot_quote(package, payload):
 
 
 def hotspot_page(device, offers, ctx, payment):
-    single = [offer for offer in offers if int(offer["devices"] or 0) <= 1]
+    single = [offer for offer in offers if int(offer["devices"] or 0) == 1]
     multi = [offer for offer in offers if int(offer["devices"] or 0) != 1]
     mode = "one" if single else "multi"
     pkg_js = {}
@@ -699,11 +699,8 @@ def hotspot_page(device, offers, ctx, payment):
     )
     if not offers:
         picker = """<p class=note>No hotspot packages are on sale for this router yet. The provider adds them under Packages → Hotspot.</p>"""
-        tabs = ""
     else:
-        tabs = ""
-        if single and multi:
-            tabs = f"""<div class=tabs>
+        tabs = f"""<div class=tabs>
 <button type=button id=tabone class="tab{' on' if mode == 'one' else ''}" onclick="pick_mode('one')">One device</button>
 <button type=button id=tabmulti class="tab{' on' if mode == 'multi' else ''}" onclick="pick_mode('multi')">Multiple devices</button>
 </div>"""
@@ -733,7 +730,7 @@ def hotspot_page(device, offers, ctx, payment):
         }
     )
     script = ""
-    if payment:
+    if offers:
         script = f"""<script>
 const CTX={ctx_json};
 const BRAND={json.dumps(BRAND)};
