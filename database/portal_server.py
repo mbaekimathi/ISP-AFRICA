@@ -26,6 +26,7 @@ import re
 import secrets
 import socket
 import threading
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -197,7 +198,18 @@ def daraja_host(row):
     return "https://api.safaricom.co.ke" if row["environment"] == "live" else "https://sandbox.safaricom.co.ke"
 
 
-def daraja_request(row, path, payload):
+DARAJA_TOKENS = {}
+DARAJA_TOKEN_LOCK = threading.Lock()
+
+
+def daraja_token(row):
+    """Cached OAuth token — Daraja tokens live ~1h, so reuse them instead of
+    paying an extra auth round-trip on every STK push and status query."""
+    cache_key = (row["environment"], row["consumer_key"])
+    with DARAJA_TOKEN_LOCK:
+        cached = DARAJA_TOKENS.get(cache_key)
+    if cached and cached[1] > time.time() + 60:
+        return cached[0]
     key = row["consumer_key"]
     secret = row["consumer_secret"]
     token_req = urllib.request.Request(
@@ -205,9 +217,18 @@ def daraja_request(row, path, payload):
         headers={"Authorization": "Basic " + base64.b64encode(f"{key}:{secret}".encode()).decode()},
     )
     with urllib.request.urlopen(token_req, timeout=DARAJA_TIMEOUT) as response:
-        token = json.loads(response.read().decode() or "{}").get("access_token")
+        body = json.loads(response.read().decode() or "{}")
+    token = body.get("access_token")
     if not token:
         raise RuntimeError("Daraja did not return an access token.")
+    expires = int(body.get("expires_in") or 3600)
+    with DARAJA_TOKEN_LOCK:
+        DARAJA_TOKENS[cache_key] = (token, time.time() + expires)
+    return token
+
+
+def daraja_request(row, path, payload):
+    token = daraja_token(row)
     request = urllib.request.Request(
         f"{daraja_host(row)}{path}",
         data=json.dumps(payload).encode(),
@@ -217,6 +238,9 @@ def daraja_request(row, path, payload):
         with urllib.request.urlopen(request, timeout=DARAJA_TIMEOUT) as response:
             return json.loads(response.read().decode() or "{}")
     except urllib.error.HTTPError as error:
+        if error.code in (401, 403):
+            with DARAJA_TOKEN_LOCK:
+                DARAJA_TOKENS.pop((row["environment"], row["consumer_key"]), None)
         try:
             body = json.loads(error.read().decode() or "{}")
         except ValueError:
@@ -430,7 +454,7 @@ async function poll(){{
  const b=await r.json();
  if(b.state==='paid'){{cid=null;thanks(b);return;}}
  if(b.state==='failed'){{cid=null;document.getElementById('msg').innerHTML='<div class=err>'+(b.reason||'Payment was not completed.')+'</div>';const btn=document.getElementById('paybtn');if(btn)btn.disabled=false;refresh();return;}}
- setTimeout(poll,4000);
+ setTimeout(poll,2500);
 }}
 async function pay(){{
  const pkg=sel();
@@ -861,7 +885,7 @@ async function poll(){{
  const b=await r.json();
  if(b.state==='paid'){{cid=null;paid(b);return;}}
  if(b.state==='failed'){{cid=null;err(b.reason||'Payment was not completed.');const btn=document.getElementById('paybtn');if(btn)btn.disabled=false;refresh();return;}}
- setTimeout(poll,4000);
+ setTimeout(poll,2500);
 }}
 function vlist(b){{
  if(!b.vouchers||!b.vouchers.length)return '';
@@ -935,7 +959,7 @@ def hotspot_pending_for(cursor, checkout_id):
     cursor.execute(
         """
         SELECT pu.id AS purchase_id, pu.client_id, pu.device_id, pu.mac, pu.ip, pu.devices, pu.periods,
-               pu.status, pu.username, pu.password, pu.login_url, pu.orig_url, pu.paid_at, pu.created_at,
+               pu.status, pu.username, pu.password, pu.login_url, pu.orig_url, pu.paid_at, pu.created_at, pu.mpesa_code,
                d.tunnel_ip, d.api_secret,
                COALESCE(p.download_mbps, c.download_mbps, 0) AS download_mbps,
                COALESCE(p.upload_mbps, c.upload_mbps, 0) AS upload_mbps,
@@ -1327,30 +1351,33 @@ class PortalHandler(BaseHTTPRequestHandler):
                 if request["status"] == "failed":
                     reason = request["last_error"] or "Payment was declined."
                     return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
-                settings = daraja_settings(cursor, request["client_id"])
-                result = None
-                if settings:
-                    try:
-                        result = stk_query(settings, checkout_id)
-                    except Exception:
-                        result = None
-                stale = (datetime.now() - request["created_at"]).total_seconds() > 180
-                if result is None:
-                    if stale:
-                        return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
-                    return self._send(b'{"state":"pending"}', 200, "application/json")
-                state, reason = stk_state(result)
-                if state == "pending":
-                    if stale:
-                        return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
-                    return self._send(b'{"state":"pending"}', 200, "application/json")
-                if state == "failed":
-                    cursor.execute(
-                        "UPDATE pppoe_stk_requests SET status = 'failed', last_error = %s WHERE checkout_id = %s AND status = 'pending'",
-                        (reason[:255], checkout_id),
-                    )
-                    db.commit()
-                    return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
+                # A Daraja callback that already wrote the M-Pesa receipt confirms
+                # the payment without another stkpushquery round-trip.
+                if not str(request.get("mpesa_code") or "").strip():
+                    settings = daraja_settings(cursor, request["client_id"])
+                    result = None
+                    if settings:
+                        try:
+                            result = stk_query(settings, checkout_id)
+                        except Exception:
+                            result = None
+                    stale = (datetime.now() - request["created_at"]).total_seconds() > 180
+                    if result is None:
+                        if stale:
+                            return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
+                        return self._send(b'{"state":"pending"}', 200, "application/json")
+                    state, reason = stk_state(result)
+                    if state == "pending":
+                        if stale:
+                            return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
+                        return self._send(b'{"state":"pending"}', 200, "application/json")
+                    if state == "failed":
+                        cursor.execute(
+                            "UPDATE pppoe_stk_requests SET status = 'failed', last_error = %s WHERE checkout_id = %s AND status = 'pending'",
+                            (reason[:255], checkout_id),
+                        )
+                        db.commit()
+                        return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
                 cursor.execute(
                     "UPDATE pppoe_stk_requests SET status = 'processing' WHERE checkout_id = %s AND status = 'pending'",
                     (checkout_id,),
@@ -1524,29 +1551,31 @@ class PortalHandler(BaseHTTPRequestHandler):
         return {"username": username, "password": secret, "authorized": True, "online": bool(report.get("online"))}
 
     def hotspot_status(self, checkout_id):
-        with HOTSPOT_LOCK:
-            pending = HOTSPOT_PENDING.get(checkout_id)
         db = self.server.connect()
         try:
             with db.cursor() as cursor:
+                # Read the row on every poll so a Daraja callback that already
+                # landed resolves immediately instead of waiting on stkpushquery.
+                row = hotspot_pending_for(cursor, checkout_id)
+                if not row:
+                    return self._send(b'{"state":"failed","reason":"Unknown or expired payment request."}', 200, "application/json")
+                if row["status"] == "paid":
+                    try:
+                        late = issue_hotspot_vouchers(cursor, hotspot_pending_from_row(row))
+                        if late and row["username"]:
+                            cursor.execute(
+                                "UPDATE hotspot_vouchers SET status = 'used', used_at = NOW() WHERE id = %s AND status = 'issued'",
+                                (late[0]["id"],),
+                            )
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+                    return self._send(json.dumps(hotspot_paid_result(cursor, row)).encode(), 200, "application/json")
+                if row["status"] == "failed":
+                    return self._send(b'{"state":"failed","reason":"Payment was declined."}', 200, "application/json")
+                with HOTSPOT_LOCK:
+                    pending = HOTSPOT_PENDING.get(checkout_id)
                 if not pending:
-                    row = hotspot_pending_for(cursor, checkout_id)
-                    if not row:
-                        return self._send(b'{"state":"failed","reason":"Unknown or expired payment request."}', 200, "application/json")
-                    if row["status"] == "paid":
-                        try:
-                            late = issue_hotspot_vouchers(cursor, hotspot_pending_from_row(row))
-                            if late and row["username"]:
-                                cursor.execute(
-                                    "UPDATE hotspot_vouchers SET status = 'used', used_at = NOW() WHERE id = %s AND status = 'issued'",
-                                    (late[0]["id"],),
-                                )
-                            db.commit()
-                        except Exception:
-                            db.rollback()
-                        return self._send(json.dumps(hotspot_paid_result(cursor, row)).encode(), 200, "application/json")
-                    if row["status"] == "failed":
-                        return self._send(b'{"state":"failed","reason":"Payment was declined."}', 200, "application/json")
                     pending = hotspot_pending_from_row(row)
                     with HOTSPOT_LOCK:
                         HOTSPOT_PENDING[checkout_id] = pending
@@ -1554,14 +1583,18 @@ class PortalHandler(BaseHTTPRequestHandler):
                     with HOTSPOT_LOCK:
                         HOTSPOT_PENDING.pop(checkout_id, None)
                     return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
-                settings = daraja_settings(cursor, pending["client_id"])
-                if not settings:
-                    return self._send(b'{"state":"pending"}', 200, "application/json")
-                try:
-                    result = stk_query(settings, checkout_id)
-                except Exception:
-                    return self._send(b'{"state":"pending"}', 200, "application/json")
-                state, reason = stk_state(result)
+                if str(row.get("mpesa_code") or "").strip():
+                    # The Daraja callback already confirmed this purchase.
+                    state, reason = "paid", ""
+                else:
+                    settings = daraja_settings(cursor, pending["client_id"])
+                    if not settings:
+                        return self._send(b'{"state":"pending"}', 200, "application/json")
+                    try:
+                        result = stk_query(settings, checkout_id)
+                    except Exception:
+                        return self._send(b'{"state":"pending"}', 200, "application/json")
+                    state, reason = stk_state(result)
                 if state == "pending":
                     return self._send(b'{"state":"pending"}', 200, "application/json")
                 if state == "failed":
