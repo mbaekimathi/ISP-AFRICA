@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Wifi } from "lucide-react";
+import { Check, Smartphone, Wifi } from "lucide-react";
 import { Link } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { FormField, FormPicker } from "@/components/ui/FormField";
@@ -168,9 +168,12 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
   }
 
   return (
-    <div className="page-shell py-8">
+    <div className="page-shell py-8 sm:py-10">
       <div className="mx-auto grid w-full max-w-lg gap-5">
-        <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3.5">
+          <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+            <Wifi className="h-5 w-5" aria-hidden="true" />
+          </span>
           <div>
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{view.title}</h1>
@@ -181,53 +184,50 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
         </div>
 
         {prompt && chosen ? (
-          <section className="rounded-2xl border border-border bg-surface p-5 shadow-card" aria-live="polite">
-            <div className="flex items-center gap-3">
-              {chosen.imageDataUrl ? (
-                <img src={chosen.imageDataUrl} alt="" className="h-16 w-24 rounded-xl object-cover" />
-              ) : (
-                <span className="inline-flex h-11 w-11 items-center justify-center rounded-full bg-primary/10 text-primary">
-                  <Wifi className="h-5 w-5" aria-hidden="true" />
-                </span>
-              )}
-              <div>
-                <h2 className="text-base font-semibold">Check the phone</h2>
-                <p className="text-sm text-muted-foreground">Approve the M-Pesa prompt to start the connection.</p>
-              </div>
+          <section
+            className="grid justify-items-center gap-4 rounded-2xl border border-border bg-surface p-6 text-center shadow-card"
+            aria-live="polite"
+          >
+            <span className="flex h-14 w-14 items-center justify-center rounded-full bg-primary/10 text-primary">
+              <Smartphone className="h-7 w-7" aria-hidden="true" />
+            </span>
+            <div>
+              <h2 className="text-lg font-semibold tracking-tight">Check the phone</h2>
+              <p className="mt-1 text-sm leading-6 text-muted-foreground">
+                Approve the M-Pesa prompt to start the connection.
+              </p>
             </div>
-            <dl className="mt-5 grid gap-3 text-sm">
-              <div className="flex items-baseline justify-between gap-3">
+            <dl className="w-full rounded-xl border border-border bg-surface-muted/50 px-4 text-left text-sm">
+              <div className="flex items-baseline justify-between gap-3 border-b border-border/70 py-2.5">
                 <dt className="text-muted-foreground">Package</dt>
-                <dd className="font-medium">{prompt.name}</dd>
+                <dd className="font-semibold">{prompt.name}</dd>
               </div>
               {prompt.detail ? (
-                <div className="flex items-baseline justify-between gap-3">
+                <div className="flex items-baseline justify-between gap-3 border-b border-border/70 py-2.5">
                   <dt className="text-muted-foreground">Covers</dt>
-                  <dd className="font-medium">{prompt.detail}</dd>
+                  <dd className="font-semibold">{prompt.detail}</dd>
                 </div>
               ) : null}
-              <div className="flex items-baseline justify-between gap-3">
+              <div className="flex items-baseline justify-between gap-3 border-b border-border/70 py-2.5">
                 <dt className="text-muted-foreground">Amount</dt>
-                <dd className="font-medium">{money(prompt.price)}</dd>
+                <dd className="font-semibold">{money(prompt.price)}</dd>
               </div>
-              <div className="flex items-baseline justify-between gap-3">
+              <div className="flex items-baseline justify-between gap-3 py-2.5">
                 <dt className="text-muted-foreground">M-Pesa number</dt>
-                <dd className="font-medium">{prompt.phone}</dd>
+                <dd className="font-semibold">{prompt.phone}</dd>
               </div>
             </dl>
-            <p className="mt-4 rounded-xl border border-border bg-surface-muted px-4 py-3 text-sm text-muted-foreground">
+            <p className="rounded-xl border border-border bg-surface-muted px-4 py-3 text-left text-xs leading-5 text-muted-foreground">
               This is a preview of the payment step, so nothing has been charged. Guests who connect to a hotspot port pay on the captive
               page the router shows them; once M-Pesa confirms, that device is allowed online.
             </p>
-            <div className="mt-4">
-              <SecondaryButton type="button" onClick={() => setPrompt(null)}>
-                Choose another package
-              </SecondaryButton>
-            </div>
+            <SecondaryButton type="button" className="w-full" onClick={() => setPrompt(null)}>
+              Choose another package
+            </SecondaryButton>
           </section>
         ) : (
           <form
-            className="grid gap-4 rounded-2xl border border-border bg-surface p-5 shadow-card"
+            className="grid gap-5 rounded-2xl border border-border bg-surface p-5 shadow-card sm:p-6"
             onSubmit={(event) => {
               event.preventDefault();
               pay();
@@ -244,8 +244,16 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
                 onChange={(id) => chooseMode(id as "one" | "multi")}
               />
             ) : null}
-            <fieldset className="grid gap-2">
-              <legend className="text-sm font-medium">Package</legend>
+            <fieldset className="grid gap-3">
+              <legend className="sr-only">Package</legend>
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold">Choose a package</span>
+                {chosen ? (
+                  <span className="rounded-lg bg-primary/10 px-2.5 py-1 text-sm font-bold text-primary">
+                    {money(total)}
+                  </span>
+                ) : null}
+              </div>
               {!loaded ? <p className="text-sm text-muted-foreground">Loading packages…</p> : null}
               {formError ? (
                 <p className="text-sm text-destructive" role="alert">
@@ -266,8 +274,10 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
                 <label
                   key={offer.id}
                   className={cn(
-                    "grid cursor-pointer grid-cols-[auto_5rem_minmax(0,1fr)_auto] items-center gap-3 rounded-xl border px-4 py-3",
-                    selected === offer.id ? "border-primary bg-primary/5" : "border-border",
+                    "relative grid cursor-pointer grid-cols-[auto_3.5rem_minmax(0,1fr)_auto] items-center gap-3 rounded-xl border px-3.5 py-3 transition duration-brand ease-brand",
+                    selected === offer.id
+                      ? "border-primary bg-primary/[0.06] shadow-sm ring-1 ring-primary/30"
+                      : "border-border hover:border-primary/40 hover:bg-surface-muted/60",
                   )}
                 >
                   <input
@@ -278,18 +288,18 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
                     onChange={() => setSelected(offer.id)}
                   />
                   {offer.imageDataUrl ? (
-                    <img src={offer.imageDataUrl} alt="" className="h-12 w-20 rounded-lg object-cover" />
+                    <img src={offer.imageDataUrl} alt="" className="h-12 w-14 rounded-lg object-cover" />
                   ) : (
-                    <span className="flex h-12 w-20 items-center justify-center rounded-lg border border-dashed border-border text-[10px] text-muted-foreground">
-                      No image
+                    <span className="flex h-12 w-14 items-center justify-center rounded-lg bg-primary/10 text-primary">
+                      <Wifi className="h-5 w-5" aria-hidden="true" />
                     </span>
                   )}
-                  <span>
-                    <span className="block text-sm font-medium">{offer.name}</span>
-                    <span className="block text-xs text-muted-foreground">
+                  <span className="min-w-0">
+                    <span className="block truncate text-sm font-semibold">{offer.name}</span>
+                    <span className="block text-xs leading-5 text-muted-foreground">
                       {offer.downloadMbps} Mbps down · {offer.uploadMbps} Mbps up{validityText(offer)}
                     </span>
-                    <span className="block text-xs text-muted-foreground">
+                    <span className="block text-xs leading-5 text-muted-foreground">
                       {isHotspot
                         ? offerDetail(offer)
                         : deviceCount(offer) === 0
@@ -299,7 +309,12 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
                             : `Up to ${deviceCount(offer)} devices`}
                     </span>
                   </span>
-                  <span className="text-sm font-semibold">{money(offer.price)}</span>
+                  <span className="text-sm font-bold">{money(offer.price)}</span>
+                  {selected === offer.id ? (
+                    <span className="absolute -right-1.5 -top-1.5 flex h-5 w-5 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                      <Check className="h-3 w-3" aria-hidden="true" />
+                    </span>
+                  ) : null}
                 </label>
               ))}
               {customising && chosen ? (
@@ -350,7 +365,8 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
                 placeholder="07XXXXXXXX"
               />
             </FormField>
-            <PrimaryButton type="submit" disabled={!chosen}>
+            <PrimaryButton type="submit" className="w-full" disabled={!chosen}>
+              <Smartphone className="h-4 w-4" aria-hidden="true" />
               {chosen ? `Pay ${money(total)}` : "Pay"}
             </PrimaryButton>
             <p className="text-xs leading-5 text-muted-foreground">

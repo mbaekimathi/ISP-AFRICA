@@ -1148,6 +1148,8 @@ def ensure_schema():
                   ip VARCHAR(45) NOT NULL DEFAULT '',
                   devices INT NOT NULL DEFAULT 1,
                   periods INT NOT NULL DEFAULT 1,
+                  login_url VARCHAR(255) NOT NULL DEFAULT '',
+                  orig_url VARCHAR(255) NOT NULL DEFAULT '',
                   username VARCHAR(40) NOT NULL DEFAULT '',
                   password VARCHAR(40) NOT NULL DEFAULT '',
                   status ENUM('pending', 'paid', 'failed') NOT NULL DEFAULT 'pending',
@@ -1162,6 +1164,8 @@ def ensure_schema():
             for column, definition in (
                 ("devices", "devices INT NOT NULL DEFAULT 1"),
                 ("periods", "periods INT NOT NULL DEFAULT 1"),
+                ("login_url", "login_url VARCHAR(255) NOT NULL DEFAULT ''"),
+                ("orig_url", "orig_url VARCHAR(255) NOT NULL DEFAULT ''"),
             ):
                 cursor.execute("SHOW COLUMNS FROM hotspot_purchases LIKE %s", (column,))
                 if cursor.fetchone() is None:

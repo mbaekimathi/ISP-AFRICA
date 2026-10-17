@@ -24,7 +24,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     const sync = () => {
       readSession().then((account) => {
         if (cancelled || activePortal() === "employee") return;
-        setUser(account);
+        setUser((current) =>
+          JSON.stringify(current) === JSON.stringify(account) ? current : account,
+        );
       });
     };
     readSession().then((account) => {
