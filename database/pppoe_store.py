@@ -68,6 +68,9 @@ def ensure_schema(cursor):
     cursor.execute("SHOW COLUMNS FROM pppoe_subscribers LIKE 'service'")
     if cursor.fetchone() is None:
         cursor.execute("ALTER TABLE pppoe_subscribers ADD COLUMN service ENUM('pppoe','hotspot') NOT NULL DEFAULT 'pppoe'")
+    cursor.execute("SHOW COLUMNS FROM pppoe_subscribers LIKE 'deleted'")
+    if cursor.fetchone() is None:
+        cursor.execute("ALTER TABLE pppoe_subscribers ADD COLUMN deleted TINYINT NOT NULL DEFAULT 0")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS pppoe_subscriptions (
@@ -867,7 +870,7 @@ def public_row(row):
 
 def list_subscribers(cursor, client_id, query, service="pppoe"):
     reconcile(cursor, client_id)
-    where = ["s.client_id = %s", "s.service = %s"]
+    where = ["s.client_id = %s", "s.service = %s", "s.deleted = 0"]
     args = [client_id, service]
     router = (query.get("router") or [""])[0]
     package = (query.get("package") or [""])[0]
@@ -953,7 +956,7 @@ def require_owned(cursor, client_id, subscriber_id):
         JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
         JOIN isp_packages p ON p.id = s.package_id
         LEFT JOIN isp_mikrotik_devices d ON d.id = s.router_id
-        WHERE s.id = %s AND s.client_id = %s
+        WHERE s.id = %s AND s.client_id = %s AND s.deleted = 0
         """,
         (subscriber_id, client_id),
     )
@@ -1643,7 +1646,7 @@ def reconcile(cursor, client_id):
         FROM pppoe_subscribers s
         JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
         JOIN isp_packages p ON p.id = s.package_id
-        WHERE s.client_id = %s
+        WHERE s.client_id = %s AND s.deleted = 0
         """,
         (client_id,),
     )
@@ -1882,6 +1885,42 @@ def disconnect(cursor, client_id, subscriber_id, payload):
     body["coa"] = coa
     body["sessionPolicy"] = action
     return body
+
+
+def delete_subscriber(cursor, client_id, subscriber_id):
+    """Remove a client: revoke every grant, kick live sessions, hide the record.
+
+    The row is soft-deleted so payment and usage history survives, but the
+    RADIUS rows are wiped — a redial is simply rejected. The unique fields are
+    rewritten so the same phone, username, or serial can be registered again.
+    """
+    row = require_owned(cursor, client_id, subscriber_id)
+    begin(cursor)
+    try:
+        for table in ("radcheck", "radreply", "radusergroup"):
+            cursor.execute(f"DELETE FROM {table} WHERE username = %s", (row["pppoe_username"],))
+        cursor.execute(
+            """
+            UPDATE pppoe_subscribers
+            SET deleted = 1, status = 'cancelled',
+                pppoe_username = LEFT(CONCAT(pppoe_username, '-del-', LEFT(id, 8)), 64),
+                phone = LEFT(CONCAT('del-', LEFT(id, 8), '-', phone), 20),
+                router_serial = IF(router_serial IS NULL, NULL, LEFT(CONCAT(router_serial, '-del-', LEFT(id, 8)), 64))
+            WHERE id = %s
+            """,
+            (subscriber_id,),
+        )
+        cursor.execute(
+            "UPDATE pppoe_subscriptions SET billing_status = 'cancelled' WHERE subscriber_id = %s",
+            (subscriber_id,),
+        )
+        log_event(cursor, client_id, subscriber_id, client_id, "deleted", "Client record removed by the account operator.")
+        finish(cursor)
+    except Exception as error:
+        abort(cursor)
+        raise PppoeError(400, "The client could not be removed.") from error
+    coa = coa_for(cursor, row, row["pppoe_username"])
+    return {"deleted": True, "coa": coa}
 
 
 def reset_password(cursor, client_id, subscriber_id, payload):
@@ -2946,6 +2985,7 @@ def dispatch(cursor, method, path, payload, token, query):
         "password": lambda: reset_password(cursor, client_id, subscriber_id, payload),
         "reveal": lambda: reveal_password(cursor, client_id, subscriber_id),
         "payment": lambda: record_payment(cursor, client_id, subscriber_id, payload),
+        "delete": lambda: delete_subscriber(cursor, client_id, subscriber_id),
     }
     if action not in actions:
         return None

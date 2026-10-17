@@ -93,7 +93,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
     load();
   }, [kind, router, pkg, status, billing]);
 
-  async function act(id: string, action: "suspend" | "reactivate" | "disconnect" | "activate") {
+  async function act(id: string, action: "suspend" | "reactivate" | "disconnect" | "activate" | "delete") {
     let reason = "";
     if (action === "suspend" || action === "reactivate") {
       const entered = window.prompt(action === "suspend" ? "Why is this client being suspended?" : "Reason for continuing, if this is an override.");
@@ -104,9 +104,11 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
     const question =
       action === "disconnect"
         ? `Disconnect the open ${label} session?`
-        : action === "activate"
-          ? `Approve this ${label} client and start the service?`
-          : `${action === "suspend" ? "Suspend" : "Continue"} this ${label} client?`;
+        : action === "delete"
+          ? `Delete this ${label} client? Their access is revoked, live sessions are dropped, and they leave this list. Billing history is kept.`
+          : action === "activate"
+            ? `Approve this ${label} client and start the service?`
+            : `${action === "suspend" ? "Suspend" : "Continue"} this ${label} client?`;
     if (!window.confirm(question)) return;
     setBusy(id);
     setMessage("");
@@ -114,9 +116,23 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
       await apiRequest(`/api/pppoe/subscribers/${id}/${action}`, {
         method: "POST",
         body: JSON.stringify(
-          action === "reactivate" ? { override: true, reason } : action === "activate" ? {} : { reason, mode: "session" },
+          action === "reactivate" ? { override: true, reason } : action === "activate" || action === "delete" ? {} : { reason, mode: "session" },
         ),
       });
+      load();
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "That action could not be completed.");
+    } finally {
+      setBusy("");
+    }
+  }
+
+  async function hotspotDelete(id: string) {
+    if (!window.confirm("Delete this hotspot guest? Access ends, vouchers are voided, and they leave this list.")) return;
+    setBusy(id);
+    setMessage("");
+    try {
+      await apiRequest(`/api/hotspot/clients/${id}/delete`, { method: "POST", body: JSON.stringify({}) });
       load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "That action could not be completed.");
@@ -270,21 +286,31 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
                         Recharge
                       </SecondaryButton>
                     ) : null}
+                    {kind === "hotspot" ? (
+                      <SecondaryButton type="button" disabled={busy === client.id} onClick={() => void hotspotDelete(client.id)}>
+                        Delete
+                      </SecondaryButton>
+                    ) : null}
                     {kind === "pppoe" ? <SecondaryButton to={home(`/pppoe/${client.id}`)}>View</SecondaryButton> : null}
+                    {kind === "pppoe" ? <SecondaryButton to={`${home(`/pppoe/${client.id}/transactions`)}?pay=1`}>Recharge</SecondaryButton> : null}
                     {kind === "pppoe" ? <SecondaryButton to={home(`/pppoe/${client.id}?edit=1`)}>Edit</SecondaryButton> : null}
-                    {kind === "pppoe" ? (client.status === "pending_activation" ? (
+                    {kind === "pppoe" && client.status === "pending_activation" ? (
                       <SecondaryButton type="button" disabled={busy === client.id} onClick={() => void act(client.id, "activate")}>
                         Approve
                       </SecondaryButton>
-                    ) : client.status === "expired" || client.status === "disconnected" || client.status === "cancelled" ? (
-                      <SecondaryButton to={`${home(`/pppoe/${client.id}/transactions`)}?pay=1`}>Recharge</SecondaryButton>
-                    ) : (
+                    ) : null}
+                    {kind === "pppoe" && client.status !== "pending_activation" ? (
                       <SecondaryButton type="button" disabled={busy === client.id} onClick={() => void act(client.id, client.status === "suspended" ? "reactivate" : "suspend")}>
                         {client.status === "suspended" ? "Continue" : "Suspend"}
                       </SecondaryButton>
-                    )) : null}
+                    ) : null}
                     {kind === "pppoe" && (client.routerStatus === "surfing" || client.routerStatus === "expired_online" || client.routerStatus === "suspended_online") ? (
                       <SecondaryButton type="button" disabled={busy === client.id} onClick={() => void act(client.id, "disconnect")}>Disconnect</SecondaryButton>
+                    ) : null}
+                    {kind === "pppoe" ? (
+                      <SecondaryButton type="button" disabled={busy === client.id} onClick={() => void act(client.id, "delete")}>
+                        Delete
+                      </SecondaryButton>
                     ) : null}
                   </div>
                 </td>
