@@ -55,8 +55,21 @@ else
 fi
 
 echo "==> Restarting isp-centric"
+
+# A manual/orphaned `python api.py` outside systemd can hold :8765 and make
+# every restart fail with EADDRINUSE. Kill anything bound there that is not
+# the service's MainPID before restarting.
+api_port=8765
+main_pid=$(systemctl show -p MainPID --value isp-centric 2>/dev/null || echo 0)
+for pid in $(ss -tlnp 2>/dev/null | grep ":${api_port}" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do
+    if [ "$pid" != "$main_pid" ]; then
+        echo "!! port ${api_port} held by stray pid ${pid} — killing it"
+        kill "$pid" 2>/dev/null || true
+        sleep 1
+    fi
+done
+
 systemctl restart isp-centric
-sleep 3
 
 # RADIUS/portal traffic only arrives on the tunnel interface — keep ufw from
 # dropping it (api.py also adds this rule once the tunnel is up).
@@ -64,12 +77,30 @@ if command -v ufw >/dev/null 2>&1; then
     ufw allow in on isp-centric >/dev/null 2>&1 || true
 fi
 
-if ! systemctl is-active --quiet isp-centric; then
-    echo "!! service failed to start — last 30 log lines:" >&2
+# WireGuard bring-up + RADIUS/portal binds take a few seconds — give the API
+# up to 30s to answer before declaring failure.
+echo "==> Waiting for the API on 127.0.0.1:${api_port}"
+healthy=""
+for _ in $(seq 1 30); do
+    if ! systemctl is-active --quiet isp-centric; then
+        break
+    fi
+    if curl -sf "http://127.0.0.1:${api_port}/api/health" >/dev/null 2>&1; then
+        healthy=1
+        break
+    fi
+    sleep 1
+done
+
+if [ -z "$healthy" ]; then
+    echo "!! service did not come up healthy — last 30 log lines:" >&2
     journalctl -u isp-centric -n 30 --no-pager >&2
     exit 1
 fi
 
 echo "==> Health check"
-curl -sf http://127.0.0.1:8765/api/health && echo
+curl -sf "http://127.0.0.1:${api_port}/api/health" && echo
+if command -v wg >/dev/null 2>&1; then
+    wg show isp-centric 2>/dev/null | grep -E 'peer:|latest handshake' || true
+fi
 echo "==> Done"
