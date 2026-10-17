@@ -1514,17 +1514,19 @@ class PortalHandler(BaseHTTPRequestHandler):
                             return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
                         return self._send(b'{"state":"pending"}', 200, "application/json")
                     state, reason = stk_state(result)
-                    if state == "pending":
+                    if state != "paid":
+                        # stkpushquery reports interim codes like 1037 while the
+                        # prompt is still open — only the callback (or the expiry
+                        # window) may fail the request, never the query alone.
                         if stale:
-                            return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
+                            reason = reason or "The prompt expired. Try again."
+                            cursor.execute(
+                                "UPDATE pppoe_stk_requests SET status = 'failed', last_error = %s WHERE checkout_id = %s AND status = 'pending'",
+                                (reason[:255], checkout_id),
+                            )
+                            db.commit()
+                            return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
                         return self._send(b'{"state":"pending"}', 200, "application/json")
-                    if state == "failed":
-                        cursor.execute(
-                            "UPDATE pppoe_stk_requests SET status = 'failed', last_error = %s WHERE checkout_id = %s AND status = 'pending'",
-                            (reason[:255], checkout_id),
-                        )
-                        db.commit()
-                        return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
                 cursor.execute(
                     "UPDATE pppoe_stk_requests SET status = 'processing' WHERE checkout_id = %s AND (status = 'pending' OR (status = 'failed' AND mpesa_code <> ''))",
                     (checkout_id,),
@@ -1795,14 +1797,10 @@ class PortalHandler(BaseHTTPRequestHandler):
                 if state == "pending":
                     return self._send(b'{"state":"pending"}', 200, "application/json")
                 if state == "failed":
-                    with HOTSPOT_LOCK:
-                        HOTSPOT_PENDING.pop(checkout_id, None)
-                    cursor.execute(
-                        "UPDATE hotspot_purchases SET status = 'failed' WHERE id = %s AND status = 'pending'",
-                        (pending["purchase_id"],),
-                    )
-                    db.commit()
-                    return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
+                    # Interim query results (premature 1037 etc.) are not final —
+                    # the Daraja callback decides failure. Keep waiting until the
+                    # prompt expires rather than stranding a still-open prompt.
+                    return self._send(b'{"state":"pending"}', 200, "application/json")
                 cursor.execute(
                     "UPDATE hotspot_purchases SET status = 'paid', paid_at = NOW() WHERE checkout_id = %s AND (status = 'pending' OR (status = 'failed' AND mpesa_code <> ''))",
                     (checkout_id,),
