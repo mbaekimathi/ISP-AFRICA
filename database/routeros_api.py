@@ -1719,6 +1719,25 @@ def _portal_nat(sock, reader):
         if row.get("comment") in {PORTAL_NAT, PORTAL_NAT_SKIP} and _row_id(row):
             talk(sock, reader, ["/ip/firewall/nat/remove", f"=.id={_row_id(row)}"])
     anchor = next((_row_id(row) for row in nats if row.get("comment") == NO_NAT and _row_id(row)), "0")
+    _add_placed(
+        sock,
+        reader,
+        [
+            "/ip/firewall/nat/add",
+            "=chain=srcnat",
+            "=action=masquerade",
+            "=protocol=tcp",
+            f"=dst-address={host}",
+            f"=dst-port={port}",
+            f"=comment={PORTAL_NAT}",
+            f"=place-before={anchor}",
+        ],
+    )
+    # Anchor the skips on the masquerade rule itself, not on NO_NAT: when that
+    # onboarding-script rule is absent the fallback anchor "0" would land the
+    # masquerade on top and hide blocked clients behind the tunnel address.
+    nats = talk(sock, reader, ["/ip/firewall/nat/print"])
+    anchor = next((_row_id(row) for row in nats if row.get("comment") == PORTAL_NAT and _row_id(row)), anchor)
     for address_list in (PPPOE_EXPIRED, PPPOE_SUSPENDED):
         _add_placed(
             sock,
@@ -1735,20 +1754,6 @@ def _portal_nat(sock, reader):
                 f"=place-before={anchor}",
             ],
         )
-    _add_placed(
-        sock,
-        reader,
-        [
-            "/ip/firewall/nat/add",
-            "=chain=srcnat",
-            "=action=masquerade",
-            "=protocol=tcp",
-            f"=dst-address={host}",
-            f"=dst-port={port}",
-            f"=comment={PORTAL_NAT}",
-            f"=place-before={anchor}",
-        ],
-    )
 
 
 def _portal_pages(sock, reader):

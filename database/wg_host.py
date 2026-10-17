@@ -92,7 +92,7 @@ def sync_peers(rows):
             peers.append((public_key, tunnel_ip))
     CONFIG_FILE.write_text(render_config(private_key, peers), encoding="utf-8")
     SYNC_FILE.write_text(render_sync_config(private_key, peers), encoding="utf-8")
-    apply_config()
+    apply_config(peers)
 
 
 def peer_lines(peers):
@@ -153,14 +153,38 @@ def tunnel_service_running():
     return tunnel_running()
 
 
-def apply_config():
+def apply_config(peers=None):
     try:
         if os.name == "nt":
             _apply_windows()
         else:
-            _apply_posix()
+            _apply_posix(peers or [])
     except (OSError, subprocess.TimeoutExpired) as error:
         print(f"event=wireguard error={error}", flush=True)
+
+
+def _ensure_posix_routes(peers):
+    """wg syncconf updates cryptokey AllowedIPs but never touches the routing
+    table; only wg-quick installs routes, and only for peers present at
+    start-up. Re-assert the client networks on every sync so portal replies
+    to PPPoE/hotspot clients go back down the tunnel instead of the default
+    gateway."""
+    if shutil.which("ip") is None:
+        return
+    from routeros_api import HOTSPOT_NETWORK, PPPOE_NETWORK
+
+    networks = {PPPOE_NETWORK, HOTSPOT_NETWORK}
+    networks.update(f"{tunnel_ip}/32" for _key, tunnel_ip in peers)
+    for network in sorted(networks):
+        try:
+            subprocess.run(
+                ["ip", "route", "replace", network, "dev", TUNNEL_NAME],
+                check=False,
+                capture_output=True,
+                timeout=15,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            pass
 
 
 def _apply_windows():
@@ -182,7 +206,7 @@ def _apply_windows():
     elevate_apply(wireguard, service_config, sync_target)
 
 
-def _apply_posix():
+def _apply_posix(peers):
     wg = shutil.which("wg")
     wg_quick = shutil.which("wg-quick")
     if not wg or not wg_quick:
@@ -200,6 +224,7 @@ def _apply_posix():
         return
     updated = service_config.read_text(encoding="utf-8")
     if previous == updated and tunnel_running():
+        _ensure_posix_routes(peers)
         print("event=wireguard status=listening", flush=True)
         return
     if tunnel_running():
@@ -210,6 +235,7 @@ def _apply_posix():
             timeout=15,
         )
         if result.returncode == 0:
+            _ensure_posix_routes(peers)
             _allow_posix_port()
             print("event=wireguard status=listening", flush=True)
             return
@@ -227,6 +253,7 @@ def _apply_posix():
         timeout=30,
     )
     if result.returncode == 0:
+        _ensure_posix_routes(peers)
         _allow_posix_port()
         print("event=wireguard status=listening", flush=True)
     else:
