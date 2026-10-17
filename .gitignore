@@ -1,0 +1,11 @@
+.local/
+.devin/config.local.json
+database/seed.sql
+database/wg/
+.env
+.env.*
+!.env.example
+__pycache__/
+*.pyc
+node_modules/
+frontend/dist/

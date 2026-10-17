@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>ISP CENTRIC — ISP Billing and Network Management</title>
+    <meta
+      name="description"
+      content="ISP CENTRIC is a billing and network management platform for fibre providers, wireless ISPs, hotspot operators, and regional internet businesses."
+    />
+    <meta name="theme-color" content="#F4F7FB" />
+    <meta property="og:title" content="ISP CENTRIC — ISP Billing and Network Management" />
+    <meta
+      property="og:description"
+      content="Manage subscribers, simplify billing, track payments, and bring internet operations together in one intelligent platform."
+    />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="ISP CENTRIC" />
+    <meta name="twitter:card" content="summary" />
+    <meta name="twitter:title" content="ISP CENTRIC — ISP Billing and Network Management" />
+    <meta
+      name="twitter:description"
+      content="One platform for subscriber records, billing, payments, and ISP operations."
+    />
+    <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
+    <script>
+      (function () {
+        var theme = "light";
+        try {
+          var stored = localStorage.getItem("isp-centric-theme");
+          if (stored === "light" || stored === "dark") {
+            theme = stored;
+          } else if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
+            theme = "dark";
+          }
+        } catch (error) {
+          theme = "light";
+        }
+        var root = document.documentElement;
+        if (theme === "dark") root.classList.add("dark");
+        root.style.colorScheme = theme;
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute("content", theme === "dark" ? "#080D18" : "#F4F7FB");
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

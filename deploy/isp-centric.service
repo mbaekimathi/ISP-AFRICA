@@ -1,0 +1,16 @@
+[Unit]
+Description=ISP CENTRIC
+After=network-online.target mysql.service
+Wants=network-online.target
+
+# Must run as root: api.py brings up the WireGuard interface via wg-quick
+# and writes /etc/wireguard/isp-centric.conf when peers change.
+[Service]
+WorkingDirectory=/opt/isp/database
+EnvironmentFile=-/opt/isp/.env
+ExecStart=/opt/isp/venv/bin/python api.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
