@@ -868,6 +868,42 @@ def public_row(row):
     }
 
 
+def human_bytes(value):
+    size = float(value or 0)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024 or unit == "TB":
+            return f"{int(size)} B" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TB"
+
+
+def subscriber_used_percent(row):
+    """How much of the current paid period the client has used up, as a percent.
+
+    Packages with a data allowance measure bytes against the cap; uncapped
+    packages measure days elapsed inside the current billing window.
+    """
+    amount = row.get("data_allowance_amount")
+    unit = str(row.get("data_allowance_unit") or "").upper()
+    used_bytes = int(row.get("cycle_bytes") or 0)
+    if amount is not None and unit in {"MB", "GB"}:
+        allowance = Decimal(amount) * (1024 ** 2 if unit == "MB" else 1024 ** 3)
+        if allowance > 0:
+            pct = min(999, int(Decimal(used_bytes) * 100 // allowance))
+            return pct, f"{human_bytes(used_bytes)} of {amount} {unit}"
+    expiry = as_day(row.get("expiry_date"))
+    if not expiry:
+        return None, ""
+    cycle = max(1, int(row.get("cycle_days") or 30))
+    period_start = expiry - timedelta(days=cycle)
+    start = as_day(row.get("sub_start"))
+    if start and start > period_start:
+        period_start = start
+    span = max(1, (expiry - period_start).days)
+    elapsed = max(0, (date.today() - period_start).days)
+    return min(100, elapsed * 100 // span), f"{min(elapsed, span)} of {span} days"
+
+
 def list_subscribers(cursor, client_id, query, service="pppoe"):
     reconcile(cursor, client_id)
     where = ["s.client_id = %s", "s.service = %s", "s.deleted = 0"]
@@ -903,20 +939,32 @@ def list_subscribers(cursor, client_id, query, service="pppoe"):
         raise PppoeError(400, "Enter a valid page size.") from error
     sql = f"""
         SELECT s.*, sub.billing_status, sub.expiry_date, sub.price, sub.next_due_date,
+               sub.cycle_days, sub.start_date AS sub_start,
                p.name AS package_name, p.download_mbps, p.upload_mbps,
+               p.data_allowance_amount, p.data_allowance_unit,
                d.name AS router_name, d.tunnel_status,
                (SELECT COUNT(*) FROM radacct a WHERE a.username = s.pppoe_username AND a.acctstoptime IS NULL) AS open_sessions,
                (SELECT COUNT(*) FROM radacct a WHERE a.username = s.pppoe_username) AS any_sessions,
-               (SELECT e.action FROM pppoe_events e WHERE e.subscriber_id = s.id ORDER BY e.created_at DESC LIMIT 1) AS last_action
+               (SELECT e.action FROM pppoe_events e WHERE e.subscriber_id = s.id ORDER BY e.created_at DESC LIMIT 1) AS last_action,
+               (SELECT COALESCE(SUM(a.acctinputoctets + a.acctoutputoctets), 0) FROM radacct a
+                WHERE a.username = s.pppoe_username
+                  AND a.acctstarttime >= GREATEST(COALESCE(sub.start_date, '1970-01-01'), DATE_SUB(COALESCE(sub.expiry_date, CURDATE()), INTERVAL COALESCE(sub.cycle_days, 30) DAY))
+               ) AS cycle_bytes
         FROM pppoe_subscribers s
         JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
         JOIN isp_packages p ON p.id = s.package_id
         LEFT JOIN isp_mikrotik_devices d ON d.id = s.router_id
         WHERE {' AND '.join(where)}
-        ORDER BY s.first_name, s.last_name
     """
     cursor.execute(sql, args)
-    rows = [public_row(row) for row in cursor.fetchall()]
+    rows = []
+    for row in cursor.fetchall():
+        public = public_row(row)
+        percent, detail = subscriber_used_percent(row)
+        public["usedPercent"] = percent
+        public["usedDetail"] = detail
+        rows.append(public)
+    rows.sort(key=lambda row: (-1 if row["usedPercent"] is None else -row["usedPercent"], row["firstName"], row["lastName"]))
     if status in router_states:
         wanted = {"expired", "expired_online"} if status == "expired" else {"suspended", "suspended_online"} if status == "suspended" else {status}
         rows = [row for row in rows if row["routerStatus"] in wanted]
@@ -2282,6 +2330,7 @@ def list_hotspot_clients(cursor, client_id, query):
                d.name AS router_name, d.tunnel_ip, d.api_secret, pkg.name AS package_name,
                (SELECT GROUP_CONCAT(v.code ORDER BY v.issued_at SEPARATOR ', ') FROM hotspot_vouchers v WHERE v.purchase_id = h.id) AS codes,
                (SELECT GROUP_CONCAT(DISTINCT v.redeemed_mac) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.redeemed_mac IS NOT NULL AND v.redeemed_mac <> '') AS device_macs,
+               (SELECT MAX(LEAST(100, ROUND(TIMESTAMPDIFF(SECOND, v.used_at, NOW()) * 100 / v.seconds))) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used' AND v.used_at IS NOT NULL AND v.seconds > 0) AS used_pct,
                (SELECT COUNT(*) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used') AS used_vouchers,
                (SELECT MAX(TIMESTAMPADD(SECOND, v.seconds, v.used_at)) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used' AND v.used_at IS NOT NULL) AS surf_until
         FROM hotspot_purchases h
@@ -2348,8 +2397,11 @@ def list_hotspot_clients(cursor, client_id, query):
                 "billingStatus": item["status"],
                 "expiry": stamp(surf_until) if surf_until else stamp(item["paid_at"] or item["created_at"]),
                 "price": format(Decimal(item["amount"]), ".2f"),
+                "usedPercent": int(item["used_pct"]) if item["used_pct"] is not None else None,
+                "usedDetail": "of voucher time" if item["used_pct"] is not None else "",
             }
         )
+    rows.sort(key=lambda row: (-1 if row["usedPercent"] is None else -row["usedPercent"]))
     router_states = {"surfing", "connected", "not_surfing", "expired", "suspended", "disconnecting", "disconnected", "pending_activation"}
     if status in router_states:
         rows = [row for row in rows if row["routerStatus"] == status]

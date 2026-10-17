@@ -20,6 +20,8 @@ type Subscriber = {
   routerStatus: "surfing" | "connected" | "not_surfing" | "expired" | "expired_online" | "suspended" | "suspended_online" | "disconnecting" | "disconnected" | "pending_activation";
   billingStatus: string;
   expiry: string | null;
+  usedPercent: number | null;
+  usedDetail: string;
 };
 
 type ListPage = {
@@ -175,6 +177,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
               <th className="px-3 py-3 font-medium">Router</th>
               <th className="px-3 py-3 font-medium">Package</th>
               <th className="px-3 py-3 font-medium">Router status</th>
+              <th className="px-3 py-3 font-medium">Used</th>
               <th className="px-3 py-3 font-medium">Billing</th>
               <th className="px-3 py-3 font-medium">Expiry</th>
               <th className="px-3 py-3 font-medium">Actions</th>
@@ -183,12 +186,12 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
           <tbody>
             {!page && !message ? (
               <tr>
-                <td colSpan={8} className="px-3 py-6 text-muted-foreground">Loading {label} clients…</td>
+                <td colSpan={9} className="px-3 py-6 text-muted-foreground">Loading {label} clients…</td>
               </tr>
             ) : null}
             {page?.subscribers.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-3 py-6 text-muted-foreground">No {label} clients match these filters.</td>
+                <td colSpan={9} className="px-3 py-6 text-muted-foreground">No {label} clients match these filters.</td>
               </tr>
             ) : null}
             {page?.subscribers.map((client) => (
@@ -202,6 +205,24 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
                 <td className="px-3 py-3">{client.packageName}</td>
                 <td className="px-3 py-3">
                   <StatusBadge tone={routerStatusTone[client.routerStatus]}>{routerStatusLabel[client.routerStatus]}</StatusBadge>
+                </td>
+                <td className="px-3 py-3">
+                  {client.usedPercent == null ? (
+                    <span className="text-muted-foreground">—</span>
+                  ) : (
+                    <div title={client.usedDetail || undefined} className="grid w-28 gap-1">
+                      <div className="flex items-baseline justify-between gap-2">
+                        <span className="font-medium">{client.usedPercent}%</span>
+                      </div>
+                      <div className="h-1.5 overflow-hidden rounded-full bg-muted">
+                        <div
+                          className={`h-full rounded-full ${client.usedPercent >= 90 ? "bg-destructive" : client.usedPercent >= 70 ? "bg-warning" : "bg-success"}`}
+                          style={{ width: `${Math.min(100, client.usedPercent)}%` }}
+                        />
+                      </div>
+                      {client.usedDetail ? <span className="text-[11px] text-muted-foreground">{client.usedDetail}</span> : null}
+                    </div>
+                  )}
                 </td>
                 <td className="px-3 py-3">{client.billingStatus}</td>
                 <td className="px-3 py-3">{client.expiry ?? "—"}</td>
