@@ -3964,8 +3964,12 @@ def reconcile_device(connect, device):
                 radius_address=os.environ.get("ISP_RADIUS_HOST", "10.88.0.1"),
             )
             break
-        except routeros_api.RouterError:
-            continue
+        except routeros_api.RouterError as error:
+            if str(error) != "The management tunnel did not answer.":
+                # The router answered but rejected us — a credential or RouterOS
+                # problem, not a dead tunnel. Leave tunnel_status alone.
+                print(f"event=reconcile device={device['name']} api-error={error}", flush=True)
+                return
     if state is None:
         _mark_tunnel(connect, device, "down")
         return
