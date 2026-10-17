@@ -1972,14 +1972,23 @@ def inspect_access(host, password, radius_address="", timeout=4, port=API_PORT, 
         login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
         if any(row.get("ret") for row in login):
             raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
-        servers = talk(sock, reader, ["/interface/pppoe-server/server/print"])
-        filters = talk(sock, reader, ["/ip/firewall/filter/print"])
-        spots = talk(sock, reader, ["/ip/hotspot/print"])
+        # Past this point the tunnel is proven up — a failed /print (device-mode
+        # gating, a mid-boot router, a transient API drop) means "feature absent",
+        # not "router unreachable", so callers must not mark the tunnel down.
+        def read(words):
+            try:
+                return talk(sock, reader, words)
+            except RouterError:
+                return []
+
+        servers = read(["/interface/pppoe-server/server/print"])
+        filters = read(["/ip/firewall/filter/print"])
+        spots = read(["/ip/hotspot/print"])
+        radius_rows = read(["/radius/print"])
         try:
-            radius_rows = talk(sock, reader, ["/radius/print"])
+            avoid, _lan = _wan_ports(sock, reader)
         except RouterError:
-            radius_rows = []
-        avoid, _lan = _wan_ports(sock, reader)
+            avoid = set()
     finally:
         sock.close()
     comments = {row.get("comment") for row in filters}

@@ -3955,13 +3955,18 @@ def reconcile_device(connect, device):
         password = routeros_api.open_password(device["api_secret"])
     except routeros_api.RouterError:
         return
-    try:
-        state = routeros_api.inspect_access(
-            device["tunnel_ip"],
-            password,
-            radius_address=os.environ.get("ISP_RADIUS_HOST", "10.88.0.1"),
-        )
-    except routeros_api.RouterError:
+    state = None
+    for _ in range(2):
+        try:
+            state = routeros_api.inspect_access(
+                device["tunnel_ip"],
+                password,
+                radius_address=os.environ.get("ISP_RADIUS_HOST", "10.88.0.1"),
+            )
+            break
+        except routeros_api.RouterError:
+            continue
+    if state is None:
         _mark_tunnel(connect, device, "down")
         return
     _mark_tunnel(connect, device, "up")
