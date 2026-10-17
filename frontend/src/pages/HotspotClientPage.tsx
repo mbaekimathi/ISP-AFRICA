@@ -51,6 +51,16 @@ type LiveSession = {
   bytesOut: number;
 };
 
+type HostEntry = {
+  label: string;
+  ip: string;
+  mac: string;
+  uptime: string;
+  idleTime: string;
+  bytesIn: number;
+  bytesOut: number;
+};
+
 type GuestClient = {
   id: string;
   phone: string;
@@ -69,7 +79,7 @@ type GuestClient = {
   authorized: boolean;
   endedAt: string | null;
   deleted: boolean;
-  connection: "online" | "offline";
+  connection: "online" | "connected" | "offline";
 };
 
 type GuestDetail = {
@@ -86,6 +96,7 @@ type GuestDetail = {
   sessions: GuestSession[];
   timeline: TimelineEvent[];
   live: LiveSession[];
+  hosts?: HostEntry[];
   routerReachable: boolean;
 };
 
@@ -385,21 +396,25 @@ export function HotspotClientPage() {
 
   const client = detail.client;
   const online = client.connection === "online";
+  const connected = client.connection === "connected";
   const ended = client.deleted || client.endedAt != null;
-  const connectionDot = online ? "bg-success" : client.status === "failed" || ended ? "bg-destructive" : "bg-warning";
+  const connectionDot = online ? "bg-success" : connected ? "bg-warning" : client.status === "failed" || ended ? "bg-destructive" : "bg-warning";
   const firstLive = detail.live[0] ?? null;
+  const firstHost = detail.hosts?.[0] ?? null;
   const timeLeft = firstLive?.sessionTimeLeft || "—";
   const usedVouchers = detail.vouchers.filter((voucher) => voucher.status === "used").length;
   const toggleSection = (id: string) => (next: boolean) =>
     setOpenSection((current) => (next ? id : current === id ? null : current));
-  const statusLabel = client.deleted ? "Deleted" : ended ? "Ended" : online ? "Online" : "Offline";
+  const statusLabel = client.deleted ? "Deleted" : ended ? "Ended" : online ? "Online" : connected ? "Connected" : "Offline";
   const statusHint = online
     ? `Surfing for ${firstLive?.uptime || "a moment"}`
-    : ended
-      ? `Access ended ${client.endedAt ?? ""}`.trim()
-      : detail.usage.lastSeen
-        ? `Last seen ${detail.usage.lastSeen}`
-        : "Never connected";
+    : connected
+      ? "On the router — waiting for payment or a voucher"
+      : ended
+        ? `Access ended ${client.endedAt ?? ""}`.trim()
+        : detail.usage.lastSeen
+          ? `Last seen ${detail.usage.lastSeen}`
+          : "Never connected";
   const statusColor = client.deleted || ended ? "text-destructive" : online ? "text-success" : "text-warning";
 
   const menuItems: { label: string; danger?: boolean; onClick: () => void }[] = [
@@ -521,8 +536,16 @@ export function HotspotClientPage() {
               <Stat label="Status" value={statusLabel} valueClass={statusColor} hint={statusHint} hintClass={statusColor} />
               <Stat
                 label="Live devices"
-                value={detail.routerReachable ? String(detail.live.length) : "—"}
-                hint={detail.routerReachable ? (online ? "On the router now" : "None surfing") : "Router unreachable"}
+                value={detail.routerReachable ? String(detail.live.length + (detail.hosts?.length ?? 0)) : "—"}
+                hint={
+                  detail.routerReachable
+                    ? online
+                      ? "On the router now"
+                      : connected
+                        ? "Connected — not surfing"
+                        : "None on the router"
+                    : "Router unreachable"
+                }
               />
               <Stat
                 label="Paid"
@@ -554,10 +577,10 @@ export function HotspotClientPage() {
               }
               hint={copied ? "Copied" : `${detail.vouchers.length} issued`}
             />
-            <Stat label="IP" value={firstLive?.ip || client.ip || "Not connected"} />
-            <Stat label="MAC" value={firstLive?.mac || client.mac || "—"} />
+            <Stat label="IP" value={firstLive?.ip || firstHost?.ip || client.ip || "Not connected"} />
+            <Stat label="MAC" value={firstLive?.mac || firstHost?.mac || client.mac || "—"} />
             <Stat label="Sessions" value={String(detail.usage.sessions)} hint={`${bytes(detail.usage.bytesIn)} down`} />
-            <Stat label="Uptime" value={firstLive?.uptime || "—"} />
+            <Stat label="Uptime" value={firstLive?.uptime || firstHost?.uptime || "—"} />
             <Stat label="Last seen" value={detail.usage.lastSeen ?? "Never"} />
           </div>
 
@@ -602,8 +625,16 @@ export function HotspotClientPage() {
             open={openSection === "live"}
             onToggle={toggleSection("live")}
             action={
-              <StatusBadge tone={!detail.routerReachable ? "critical" : detail.live.length ? "active" : "paused"}>
-                {!detail.routerReachable ? "Router unreachable" : detail.live.length ? `${detail.live.length} online` : "Idle"}
+              <StatusBadge
+                tone={!detail.routerReachable ? "critical" : detail.live.length ? "active" : (detail.hosts?.length ?? 0) ? "due" : "paused"}
+              >
+                {!detail.routerReachable
+                  ? "Router unreachable"
+                  : detail.live.length
+                    ? `${detail.live.length} online`
+                    : (detail.hosts?.length ?? 0)
+                      ? `${detail.hosts!.length} connected`
+                      : "Idle"}
               </StatusBadge>
             }
           >
@@ -612,36 +643,75 @@ export function HotspotClientPage() {
                 Live device data comes straight from the router. It did not answer — check that the management tunnel
                 and the saved API login still work for {client.routerName || "this router"}.
               </p>
-            ) : detail.live.length === 0 ? (
-              <p className="text-sm text-muted-foreground">This guest has no active session on the router right now.</p>
+            ) : detail.live.length === 0 && (detail.hosts?.length ?? 0) === 0 ? (
+              <p className="text-sm text-muted-foreground">This guest has no device on the router right now.</p>
             ) : (
-              <div className="overflow-x-auto">
-                <table className="min-w-[44rem] w-full text-left text-sm">
-                  <thead className="border-b border-border text-xs text-muted-foreground">
-                    <tr>
-                      <th className="px-2 py-2 font-medium">Account</th>
-                      <th className="px-2 py-2 font-medium">IP</th>
-                      <th className="px-2 py-2 font-medium">MAC</th>
-                      <th className="px-2 py-2 font-medium">Uptime</th>
-                      <th className="px-2 py-2 font-medium">Idle</th>
-                      <th className="px-2 py-2 font-medium">Time left</th>
-                      <th className="px-2 py-2 font-medium">Down / Up</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detail.live.map((session) => (
-                      <tr key={session.username || session.mac} className="border-b border-border last:border-0">
-                        <td className="px-2 py-2 font-medium">{session.label || session.username || "—"}</td>
-                        <td className="px-2 py-2">{session.ip || "—"}</td>
-                        <td className="px-2 py-2 text-xs text-muted-foreground">{session.mac || "—"}</td>
-                        <td className="px-2 py-2">{session.uptime || "—"}</td>
-                        <td className="px-2 py-2">{session.idleTime || "—"}</td>
-                        <td className="px-2 py-2">{session.sessionTimeLeft || "—"}</td>
-                        <td className="px-2 py-2">{bytes(session.bytesIn)} / {bytes(session.bytesOut)}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+              <div className="grid gap-5">
+                {detail.live.length ? (
+                  <div className="overflow-x-auto">
+                    <table className="min-w-[44rem] w-full text-left text-sm">
+                      <thead className="border-b border-border text-xs text-muted-foreground">
+                        <tr>
+                          <th className="px-2 py-2 font-medium">Account</th>
+                          <th className="px-2 py-2 font-medium">IP</th>
+                          <th className="px-2 py-2 font-medium">MAC</th>
+                          <th className="px-2 py-2 font-medium">Uptime</th>
+                          <th className="px-2 py-2 font-medium">Idle</th>
+                          <th className="px-2 py-2 font-medium">Time left</th>
+                          <th className="px-2 py-2 font-medium">Down / Up</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.live.map((session) => (
+                          <tr key={session.username || session.mac} className="border-b border-border last:border-0">
+                            <td className="px-2 py-2 font-medium">{session.label || session.username || "—"}</td>
+                            <td className="px-2 py-2">{session.ip || "—"}</td>
+                            <td className="px-2 py-2 text-xs text-muted-foreground">{session.mac || "—"}</td>
+                            <td className="px-2 py-2">{session.uptime || "—"}</td>
+                            <td className="px-2 py-2">{session.idleTime || "—"}</td>
+                            <td className="px-2 py-2">{session.sessionTimeLeft || "—"}</td>
+                            <td className="px-2 py-2">{bytes(session.bytesIn)} / {bytes(session.bytesOut)}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : null}
+                {(detail.hosts?.length ?? 0) ? (
+                  <div>
+                    <p className="mb-2 text-xs font-medium uppercase tracking-wide text-warning">
+                      Connected — not surfing
+                    </p>
+                    <div className="overflow-x-auto">
+                      <table className="min-w-[40rem] w-full text-left text-sm">
+                        <thead className="border-b border-border text-xs text-muted-foreground">
+                          <tr>
+                            <th className="px-2 py-2 font-medium">Device</th>
+                            <th className="px-2 py-2 font-medium">IP</th>
+                            <th className="px-2 py-2 font-medium">MAC</th>
+                            <th className="px-2 py-2 font-medium">On network</th>
+                            <th className="px-2 py-2 font-medium">Idle</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {(detail.hosts ?? []).map((host) => (
+                            <tr key={host.mac} className="border-b border-border last:border-0">
+                              <td className="px-2 py-2 font-medium">{host.label || host.mac}</td>
+                              <td className="px-2 py-2">{host.ip || "—"}</td>
+                              <td className="px-2 py-2 text-xs text-muted-foreground">{host.mac || "—"}</td>
+                              <td className="px-2 py-2">{host.uptime || "—"}</td>
+                              <td className="px-2 py-2">{host.idleTime || "—"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      These devices are on the router but have not paid or redeemed a voucher yet — they stay behind
+                      the portal until they do. Use Recharge above to put a device online right away.
+                    </p>
+                  </div>
+                ) : null}
               </div>
             )}
           </Section>

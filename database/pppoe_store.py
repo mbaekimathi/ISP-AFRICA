@@ -2237,9 +2237,10 @@ def list_hotspot_clients(cursor, client_id, query):
         raise PppoeError(400, "Enter a valid page size.") from error
     cursor.execute(
         f"""
-        SELECT h.id, h.phone, h.mac, h.status, h.amount, h.paid_at, h.created_at,
-               d.name AS router_name, pkg.name AS package_name,
+        SELECT h.id, h.phone, h.mac, h.status, h.amount, h.paid_at, h.created_at, h.device_id,
+               d.name AS router_name, d.tunnel_ip, d.api_secret, pkg.name AS package_name,
                (SELECT GROUP_CONCAT(v.code ORDER BY v.issued_at SEPARATOR ', ') FROM hotspot_vouchers v WHERE v.purchase_id = h.id) AS codes,
+               (SELECT GROUP_CONCAT(DISTINCT v.redeemed_mac) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.redeemed_mac IS NOT NULL AND v.redeemed_mac <> '') AS device_macs,
                (SELECT COUNT(*) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used') AS used_vouchers,
                (SELECT MAX(TIMESTAMPADD(SECOND, v.seconds, v.used_at)) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used' AND v.used_at IS NOT NULL) AS surf_until
         FROM hotspot_purchases h
@@ -2250,17 +2251,47 @@ def list_hotspot_clients(cursor, client_id, query):
         """,
         args,
     )
+    items = cursor.fetchall()
+    # One /ip/hotspot/host scan per reachable router — it lists every device
+    # associated to the hotspot, so a registered device shows "connected" even
+    # before its voucher is redeemed.
+    router_macs = {}
+    for item in items:
+        macs = {str(item["mac"] or "").upper()} | {m.strip().upper() for m in (item.get("device_macs") or "").split(",") if m.strip()}
+        macs.discard("")
+        if macs and item.get("tunnel_ip") and item.get("api_secret"):
+            router_macs.setdefault(str(item["device_id"]), set()).update(macs)
+    live_hosts = {}
+    for device_id, macs in router_macs.items():
+        source = next((item for item in items if str(item["device_id"]) == device_id), None)
+        if not source:
+            continue
+        try:
+            for host_row in routeros_api.hotspot_hosts(
+                source["tunnel_ip"], routeros_api.open_password(source["api_secret"]), macs=list(macs), timeout=3
+            ):
+                live_hosts[host_row["mac"]] = host_row
+        except (routeros_api.RouterError, OSError):
+            continue
     rows = []
     now = datetime.now()
-    for item in cursor.fetchall():
+    for item in items:
         used = int(item["used_vouchers"] or 0)
         surf_until = item["surf_until"] if isinstance(item["surf_until"], datetime) else None
+        macs = {str(item["mac"] or "").upper()} | {m.strip().upper() for m in (item.get("device_macs") or "").split(",") if m.strip()}
+        hosts = [live_hosts[mac] for mac in macs if mac in live_hosts]
+        authorized = any(host["authorized"] for host in hosts)
         if item["status"] == "paid":
-            router_status = "surfing" if used and (not surf_until or surf_until > now) else "expired" if used else "not_surfing"
+            if authorized:
+                router_status = "surfing"
+            elif hosts:
+                router_status = "connected"
+            else:
+                router_status = "surfing" if used and (not surf_until or surf_until > now) else "expired" if used else "not_surfing"
         elif item["status"] == "pending":
-            router_status = "pending_activation"
+            router_status = "connected" if hosts else "pending_activation"
         else:
-            router_status = "disconnected"
+            router_status = "connected" if hosts else "disconnected"
         rows.append(
             {
                 "id": item["id"],
@@ -2271,14 +2302,14 @@ def list_hotspot_clients(cursor, client_id, query):
                 "routerName": item.get("router_name") or "",
                 "packageName": item.get("package_name") or "",
                 "status": "active" if item["status"] == "paid" else item["status"],
-                "connection": "online" if router_status == "surfing" else "offline",
+                "connection": "online" if (router_status in {"surfing", "connected"}) else "offline",
                 "routerStatus": router_status,
                 "billingStatus": item["status"],
                 "expiry": stamp(surf_until) if surf_until else stamp(item["paid_at"] or item["created_at"]),
                 "price": format(Decimal(item["amount"]), ".2f"),
             }
         )
-    router_states = {"surfing", "not_surfing", "expired", "suspended", "disconnecting", "disconnected", "pending_activation"}
+    router_states = {"surfing", "connected", "not_surfing", "expired", "suspended", "disconnecting", "disconnected", "pending_activation"}
     if status in router_states:
         rows = [row for row in rows if row["routerStatus"] == status]
     elif status in {"online", "offline"}:
@@ -2506,21 +2537,33 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
     )
     # Live view straight from the router — radacct only fills in when RADIUS
     # accounting is on, so /ip/hotspot/active is the source of truth for who
-    # is actually surfing right now.
+    # is actually surfing right now. /ip/hotspot/host adds the devices that
+    # are on the network but have not logged in yet (connected, not surfing).
     live = []
+    hosts = []
     router_reachable = False
     macs = [row.get("mac")] + [voucher["redeemed_mac"] for voucher in vouchers]
+    mac_labels = {}
+    if row.get("mac"):
+        mac_labels[str(row["mac"]).upper()] = "This device"
+    for voucher in vouchers:
+        if voucher.get("redeemed_mac"):
+            mac_labels[str(voucher["redeemed_mac"]).upper()] = voucher["code"]
     if row.get("tunnel_ip") and row.get("api_secret"):
         try:
+            secret = routeros_api.open_password(row["api_secret"])
             live = routeros_api.hotspot_active_sessions(
-                row["tunnel_ip"],
-                routeros_api.open_password(row["api_secret"]),
-                usernames=usernames,
-                macs=macs,
+                row["tunnel_ip"], secret, usernames=usernames, macs=macs
             )
+            hosts = routeros_api.hotspot_hosts(row["tunnel_ip"], secret, macs=list(mac_labels))
             router_reachable = True
         except (routeros_api.RouterError, OSError):
             live = []
+            hosts = []
+    live_macs = {entry["mac"] for entry in live}
+    hosts = [host for host in hosts if host["mac"] not in live_macs and not host["authorized"]]
+    for host in hosts:
+        host["label"] = mac_labels.get(host["mac"]) or host["mac"]
     for entry in live:
         entry["label"] = labels.get(entry["username"]) or entry["username"] or entry["mac"]
     sessions = radacct_for_usernames(
@@ -2610,9 +2653,10 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
             "authorized": bool(row["authorized"]),
             "endedAt": stamp(row.get("ended_at")),
             "deleted": bool(row.get("deleted")),
-            "connection": "online" if (open_sessions or live) else "offline",
+            "connection": "online" if (open_sessions or live) else "connected" if hosts else "offline",
         },
         "live": live,
+        "hosts": hosts,
         "routerReachable": router_reachable,
         "vouchers": [
             {
@@ -2687,9 +2731,17 @@ def hotspot_recharge(cursor, client_id, purchase_id, payload):
         profile = f"hs-{str(row['package_id'])[:8]}"
         rate = f"{int(row['upload_mbps'] or 0)}M/{int(row['download_mbps'] or 0)}M"
         try:
+            secret = routeros_api.open_password(row["api_secret"])
+            # The stored IP goes stale after a new DHCP lease — the host table
+            # has the address the connected device is actually using now.
+            live_ip = row.get("ip") or ""
+            live_mac = str(row["mac"])
+            for host_row in routeros_api.hotspot_hosts(row["tunnel_ip"], secret, macs=[live_mac], timeout=5):
+                live_ip = host_row["ip"] or live_ip
+                live_mac = host_row["mac"] or live_mac
             grant = routeros_api.authorize_hotspot_client(
-                row["tunnel_ip"], routeros_api.open_password(row["api_secret"]),
-                row["ip"], row["mac"], first["username"], first["password"],
+                row["tunnel_ip"], secret,
+                live_ip, live_mac, first["username"], first["password"],
                 profile, rate, 1, f"{max(1, seconds)}s",
             )
             connected = bool(grant.get("online"))
@@ -2700,9 +2752,11 @@ def hotspot_recharge(cursor, client_id, purchase_id, payload):
                     SET status = 'used', used_at = NOW(), redeemed_ip = %s, redeemed_mac = %s
                     WHERE id = %s AND status = 'issued'
                     """,
-                    (row["ip"], row["mac"], first["id"]),
+                    (live_ip, live_mac, first["id"]),
                 )
                 first["status"] = "used"
+                if live_ip != (row.get("ip") or ""):
+                    cursor.execute("UPDATE hotspot_purchases SET ip = %s WHERE id = %s", (live_ip, row["id"]))
         except (routeros_api.RouterError, OSError):
             connected = False
     cursor.execute(

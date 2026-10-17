@@ -17,7 +17,7 @@ type Subscriber = {
   packageName: string;
   status: string;
   connection: "online" | "offline" | "unknown";
-  routerStatus: "surfing" | "not_surfing" | "expired" | "expired_online" | "suspended" | "suspended_online" | "disconnecting" | "disconnected" | "pending_activation";
+  routerStatus: "surfing" | "connected" | "not_surfing" | "expired" | "expired_online" | "suspended" | "suspended_online" | "disconnecting" | "disconnected" | "pending_activation";
   billingStatus: string;
   expiry: string | null;
 };
@@ -31,6 +31,7 @@ type ListPage = {
 
 const routerStatusLabel = {
   surfing: "Surfing",
+  connected: "Connected",
   not_surfing: "Not surfing",
   expired: "Expired",
   expired_online: "Expired",
@@ -43,6 +44,7 @@ const routerStatusLabel = {
 
 const routerStatusTone = {
   surfing: "active",
+  connected: "due",
   not_surfing: "paused",
   expired: "critical",
   expired_online: "due",
@@ -173,6 +175,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
           <select className="field" value={status} onChange={(event) => setStatus(event.target.value)}>
             <option value="">Any router status</option>
             <option value="surfing">Surfing</option>
+            <option value="connected">Connected</option>
             <option value="not_surfing">Not surfing</option>
             <option value="expired">Expired</option>
             <option value="suspended">Suspended</option>

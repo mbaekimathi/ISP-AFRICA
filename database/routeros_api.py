@@ -2356,6 +2356,48 @@ def hotspot_active_sessions(host, password, usernames=None, macs=None, timeout=8
     return live
 
 
+def hotspot_hosts(host, password, macs=None, timeout=8, port=API_PORT, opener=None):
+    """Live /ip/hotspot/host rows — every device associated to the hotspot.
+
+    Unlike /ip/hotspot/active this table also lists devices that are on the
+    network but have not logged in, which is how a registered-but-unpaid
+    device shows as connected-but-not-surfing.
+    """
+    wanted_macs = {str(mac).strip().upper() for mac in (macs or []) if str(mac or "").strip()}
+    connect = opener or socket.create_connection
+    try:
+        sock = connect((host, port), timeout)
+    except OSError as error:
+        raise RouterError("The management tunnel did not answer.") from error
+    try:
+        sock.settimeout(timeout)
+        reader = ByteReader(sock)
+        login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
+        if any(row.get("ret") for row in login):
+            raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
+        rows = talk(sock, reader, ["/ip/hotspot/host/print"])
+    finally:
+        sock.close()
+    hosts = []
+    for row in rows:
+        mac = str(row.get("mac-address") or "").upper()
+        if wanted_macs and mac not in wanted_macs:
+            continue
+        hosts.append(
+            {
+                "mac": mac,
+                "ip": row.get("address") or "",
+                "authorized": str(row.get("authorized") or "").lower() in {"true", "yes"},
+                "bypassed": str(row.get("bypassed") or "").lower() in {"true", "yes"},
+                "uptime": row.get("uptime") or "",
+                "idleTime": row.get("idle-time") or "",
+                "bytesIn": _count(row.get("bytes-in")),
+                "bytesOut": _count(row.get("bytes-out")),
+            }
+        )
+    return hosts
+
+
 def apply_uplink_plan(host, password, commands, timeout=4, port=API_PORT, opener=None):
     """Move ordinary default-route and source NAT preference. Nothing else."""
     connect = opener or socket.create_connection

@@ -448,6 +448,38 @@ class RouterOsApiTests(unittest.TestCase):
         self.assertEqual(sessions[0]["bytesIn"], 0)
         self.assertEqual(routeros_api.norm_mac("8c-44-bb-2f-aa-e8"), routeros_api.norm_mac("8C:44:BB:2F:AA:E8"))
 
+    def test_hotspot_hosts_lists_connected_unpaid_devices(self):
+        sock = ScriptedSocket(
+            [
+                sentence("!done"),
+                sentence(
+                    "!re",
+                    "=mac-address=AA:BB:CC:DD:EE:FF",
+                    "=address=10.5.50.10",
+                    "=authorized=false",
+                    "=bypassed=false",
+                    "=uptime=4m12s",
+                    "=idle-time=9s",
+                    "=bytes-in=1204",
+                    "=bytes-out=340",
+                )
+                + sentence("!re", "=mac-address=11:22:33:44:55:66", "=address=10.5.50.11", "=authorized=true")
+                + sentence("!re", "=mac-address=99:88:77:66:55:44", "=address=10.5.50.12", "=authorized=false")
+                + sentence("!done"),
+            ]
+        )
+        hosts = routeros_api.hotspot_hosts(
+            "10.88.0.5", "secret-password", macs=["aa:bb:cc:dd:ee:ff", "11:22:33:44:55:66"],
+            opener=lambda _address, _timeout: sock,
+        )
+        self.assertEqual(len(hosts), 2)
+        self.assertEqual(hosts[0]["mac"], "AA:BB:CC:DD:EE:FF")
+        self.assertEqual(hosts[0]["ip"], "10.5.50.10")
+        self.assertFalse(hosts[0]["authorized"])
+        self.assertTrue(hosts[1]["authorized"])
+        sent = b"".join(sock.sent)
+        self.assertIn(b"/ip/hotspot/host/print", sent)
+
     def test_a_selection_script_runs_and_is_removed(self):
         self.assertFalse(routeros_api.script_is_allowed("{ /system reboot; }"))
         source = "{\n# ISP CENTRIC port setup.\n/interface set [find where name=\"ether2\"] comment=\"LAN\";\n}"
