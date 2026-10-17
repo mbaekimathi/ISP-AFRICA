@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
@@ -301,9 +302,11 @@ export function PppoeCustomerPage() {
   const [dialog, setDialog] = useState<DialogKind | null>(search.get("edit") === "1" ? "edit" : null);
   const [reason, setReason] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
+  const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
   const [healthTrend, setHealthTrend] = useState<TrendPoint[] | null>(null);
   const [usageTrend, setUsageTrend] = useState<TrendPoint[] | null>(null);
-  const menuRef = useRef<HTMLDivElement>(null);
+  const menuButtonRef = useRef<HTMLButtonElement>(null);
+  const menuListRef = useRef<HTMLDivElement>(null);
   const surfSinceRef = useRef<number | null>(null);
   const navigate = useNavigate();
 
@@ -392,17 +395,38 @@ export function PppoeCustomerPage() {
 
   useEffect(() => {
     if (!menuOpen) return;
+    const place = () => {
+      const rect = menuButtonRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      const width = 224;
+      const estimatedHeight = Math.min(360, menuListRef.current?.offsetHeight ?? 360);
+      const belowFits = rect.bottom + 6 + estimatedHeight <= window.innerHeight;
+      setMenuPos({
+        top: belowFits ? rect.bottom + 6 : Math.max(8, rect.top - 6 - estimatedHeight),
+        left: Math.max(8, rect.right - width),
+      });
+    };
+    place();
+    // Re-measure after the menu mounts so the flip check uses its real height.
+    const frame = requestAnimationFrame(place);
     const onDown = (event: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(event.target as Node)) setMenuOpen(false);
+      const target = event.target as Node;
+      if (menuButtonRef.current?.contains(target) || menuListRef.current?.contains(target)) return;
+      setMenuOpen(false);
     };
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") setMenuOpen(false);
     };
     document.addEventListener("mousedown", onDown);
     document.addEventListener("keydown", onKey);
+    window.addEventListener("resize", place);
+    window.addEventListener("scroll", place, true);
     return () => {
+      cancelAnimationFrame(frame);
       document.removeEventListener("mousedown", onDown);
       document.removeEventListener("keydown", onKey);
+      window.removeEventListener("resize", place);
+      window.removeEventListener("scroll", place, true);
     };
   }, [menuOpen]);
 
@@ -562,39 +586,48 @@ export function PppoeCustomerPage() {
                   {suspended ? "Continue" : "Suspend"}
                 </button>
               )}
-              <div className="relative" ref={menuRef}>
+              <div>
                 <button
                   type="button"
+                  ref={menuButtonRef}
                   aria-haspopup="menu"
                   aria-expanded={menuOpen}
                   onClick={() => setMenuOpen((open) => !open)}
                   className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-white/15 px-4 text-sm font-semibold transition hover:bg-white/25"
                 >
                   More
-                  <ChevronDown className="h-4 w-4" />
+                  <ChevronDown className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
                 </button>
-                {menuOpen ? (
-                  <div role="menu" className="absolute right-0 z-40 mt-1 w-56 overflow-hidden rounded-xl border border-border bg-surface py-1 text-foreground shadow-lg">
-                    {menuItems.map((item, index) =>
-                      item.label === "divider" ? (
-                        <div key={`divider-${index}`} className="my-1 border-t border-border" />
-                      ) : (
-                        <button
-                          key={item.label}
-                          type="button"
-                          role="menuitem"
-                          className={`block w-full px-4 py-2 text-left text-sm hover:bg-surface-muted ${item.danger ? "text-destructive" : "text-foreground"}`}
-                          onClick={() => {
-                            setMenuOpen(false);
-                            item.onClick();
-                          }}
-                        >
-                          {item.label}
-                        </button>
-                      ),
-                    )}
-                  </div>
-                ) : null}
+                {menuOpen && menuPos
+                  ? createPortal(
+                      <div
+                        role="menu"
+                        ref={menuListRef}
+                        style={{ top: menuPos.top, left: menuPos.left }}
+                        className="fixed z-50 w-56 overflow-hidden rounded-xl border border-border bg-surface py-1 text-foreground shadow-lg"
+                      >
+                        {menuItems.map((item, index) =>
+                          item.label === "divider" ? (
+                            <div key={`divider-${index}`} className="my-1 border-t border-border" />
+                          ) : (
+                            <button
+                              key={item.label}
+                              type="button"
+                              role="menuitem"
+                              className={`block w-full px-4 py-2 text-left text-sm hover:bg-surface-muted ${item.danger ? "text-destructive" : "text-foreground"}`}
+                              onClick={() => {
+                                setMenuOpen(false);
+                                item.onClick();
+                              }}
+                            >
+                              {item.label}
+                            </button>
+                          ),
+                        )}
+                      </div>,
+                      document.body,
+                    )
+                  : null}
               </div>
             </div>
           </div>
