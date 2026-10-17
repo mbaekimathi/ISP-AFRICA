@@ -150,7 +150,7 @@ function payload(draft: Draft) {
     billingModel: draft.billingModel,
     downloadMbps: Number(draft.downloadMbps),
     uploadMbps: Number(draft.uploadMbps),
-    validityAmount: Number(draft.validityAmount),
+    validityAmount: draft.serviceType === "hotspot" && draft.deviceMode === "multiple" ? 1 : Number(draft.validityAmount),
     validityUnit: draft.validityUnit,
     dataAllowanceAmount: draft.dataEnabled ? draft.dataAllowanceAmount.trim() : "",
     dataAllowanceUnit: draft.dataEnabled ? draft.dataAllowanceUnit : "",
@@ -594,10 +594,29 @@ function PackageFields({
             {draft.deviceMode === "multiple" ? (
               <div className="grid gap-3 rounded-xl border border-border p-3">
                 <p className="text-sm text-muted-foreground">
-                  The price above covers 1 device for the validity period. The customer pays the extra-device charge for
-                  every additional device and the extra-period charge for every additional period they choose.
+                  The price above covers 1 device for one period. The customer pays the extra-device charge for every
+                  additional device and the extra-period charge for every additional period they choose.
                 </p>
                 <div className="grid gap-4 sm:grid-cols-2">
+                  <FormField
+                    id={`${idPrefix}-period-unit`}
+                    label="Period unit"
+                    hint="How long each period lasts. The customer chooses how many periods to buy on the pay page."
+                  >
+                    <select
+                      id={`${idPrefix}-period-unit`}
+                      className="field"
+                      required
+                      value={draft.validityUnit}
+                      onChange={(event) => set("validityUnit", event.target.value as Draft["validityUnit"])}
+                    >
+                      <option value="">Choose a unit</option>
+                      <option value="hours">Hour</option>
+                      <option value="days">Day</option>
+                      <option value="weeks">Week</option>
+                      <option value="months">Month</option>
+                    </select>
+                  </FormField>
                   <FormField
                     id={`${idPrefix}-extra-device`}
                     label="Charge per extra device (KSh)"
@@ -676,19 +695,21 @@ function PackageFields({
             onChange={(event) => set("uploadMbps", event.target.value)}
           />
           </FormField>
-        <AmountAndUnit
-          amountId={`${idPrefix}-validity-amount`}
-          unitId={`${idPrefix}-validity-unit`}
-          label="Validity"
-          hint="How long the package stays valid."
-          amount={draft.validityAmount}
-          unit={draft.validityUnit}
-          unitOptions={timeUnits}
-          emptyUnit="Choose a unit"
-          required
-          onAmount={(value) => set("validityAmount", value)}
-          onUnit={(value) => set("validityUnit", value as Draft["validityUnit"])}
-        />
+        {draft.serviceType === "hotspot" && draft.deviceMode === "multiple" ? null : (
+          <AmountAndUnit
+            amountId={`${idPrefix}-validity-amount`}
+            unitId={`${idPrefix}-validity-unit`}
+            label="Validity"
+            hint="How long the package stays valid."
+            amount={draft.validityAmount}
+            unit={draft.validityUnit}
+            unitOptions={timeUnits}
+            emptyUnit="Choose a unit"
+            required
+            onAmount={(value) => set("validityAmount", value)}
+            onUnit={(value) => set("validityUnit", value as Draft["validityUnit"])}
+          />
+        )}
         <AmountAndUnit
           amountId={`${idPrefix}-grace-amount`}
           unitId={`${idPrefix}-grace-unit`}
@@ -853,7 +874,7 @@ function packageDetails(item: PackageRecord, routers: PackageRouter[]) {
     { label: "Service", value: serviceLabels[item.serviceType] },
     { label: "Billing", value: billingLabels[item.billingModel] },
     { label: "Speed", value: `${item.downloadMbps} / ${item.uploadMbps} Mbps` },
-    { label: "Validity", value: `${item.validityAmount} ${item.validityUnit}` },
+    { label: "Validity", value: item.serviceType === "hotspot" && item.simultaneousDevices === 0 ? `Each period = ${periodLabel(item.validityAmount, item.validityUnit)}` : `${item.validityAmount} ${item.validityUnit}` },
     { label: "Grace", value: item.graceAmount ? periodLabel(item.graceAmount, item.graceUnit) : "None" },
     { label: "Devices", value: deviceLabel(item) },
     { label: "Data", value: item.dataResetAmount ? `${dataAction}. Resets after ${periodLabel(item.dataResetAmount, item.dataResetUnit)}` : dataAction },

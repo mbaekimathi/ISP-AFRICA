@@ -88,6 +88,8 @@ def clean_package_fields(payload):
     )
     if validity_amount is None:
         raise ApiError(400, "Enter how long the package stays valid, and choose hours, days, weeks, or months.")
+    if devices == 0:
+        validity_amount = 1
     download = package_speed(payload.get("downloadMbps"), "download")
     upload = package_speed(payload.get("uploadMbps"), "upload")
     data_amount, data_unit = optional_data_amount(
