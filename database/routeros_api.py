@@ -882,6 +882,14 @@ def _drop_open_sessions(sock, reader):
             talk(sock, reader, ["/ppp/active/remove", f"=.id={_row_id(row)}"])
 
 
+def _move_filter(sock, reader, rule_id, destination):
+    """Best-effort ordering. Rules are added at the top already, and RouterOS refuses to move builtin entries."""
+    try:
+        talk(sock, reader, ["/ip/firewall/filter/move", f"=numbers={rule_id}", f"=destination={destination}"])
+    except RouterError:
+        pass
+
+
 def _enable_pppoe(sock, reader, iface, servers, radius=None):
     pools = talk(sock, reader, ["/ip/pool/print"])
     if not _named(pools, PPPOE_POOL):
@@ -983,7 +991,11 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
         (
             _row_id(row)
             for row in rows
-            if row.get("chain") == "forward" and row.get("comment") not in PPPOE_FILTERS and row.get("dynamic") != "true" and _row_id(row)
+            if row.get("chain") == "forward"
+            and row.get("comment") not in PPPOE_FILTERS
+            and row.get("dynamic") != "true"
+            and row.get("builtin") != "true"
+            and _row_id(row)
         ),
         "",
     )
@@ -1005,15 +1017,11 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
     if anchor:
         for comment in order:
             if ours.get(comment):
-                talk(sock, reader, ["/ip/firewall/filter/move", f"=numbers={ours[comment]}", f"=destination={anchor}"])
+                _move_filter(sock, reader, ours[comment], anchor)
     else:
         for index in range(len(order) - 2, -1, -1):
             if ours.get(order[index]) and ours.get(order[index + 1]):
-                talk(
-                    sock,
-                    reader,
-                    ["/ip/firewall/filter/move", f"=numbers={ours[order[index]]}", f"=destination={ours[order[index + 1]]}"],
-                )
+                _move_filter(sock, reader, ours[order[index]], ours[order[index + 1]])
     nats = talk(sock, reader, ["/ip/firewall/nat/print"])
     for comment, address_list in ((PPPOE_PORTAL_NAT_SUS, PPPOE_SUSPENDED), (PPPOE_PORTAL_NAT_EXP, PPPOE_EXPIRED)):
         matched = [row for row in nats if row.get("comment") == comment and _row_id(row)]

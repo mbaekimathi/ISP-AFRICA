@@ -53,42 +53,124 @@ ROLES = {
 LOCKS = {}
 
 
-def clean_package(payload):
+def clean_package_fields(payload):
     name = str(payload.get("name", "")).strip()
     if not name or len(name) > 80 or any(ord(character) < 32 for character in name):
         raise ApiError(400, "Enter a package name.")
     try:
         price = Decimal(str(payload.get("price", "")).strip())
     except InvalidOperation as error:
-        raise ApiError(400, "Enter a monthly price.") from error
+        raise ApiError(400, "Enter the price in KSh.") from error
     if price < 0 or price > Decimal("99999999.99") or price.as_tuple().exponent < -2:
-        raise ApiError(400, "Enter a monthly price with up to two decimal places.")
-    service_type = package_choice(payload.get("serviceType") or "pppoe", SERVICE_TYPES, "Choose PPPoE or Hotspot.")
+        raise ApiError(400, "Enter the price in KSh with up to two decimal places.")
+    service_type = package_choice(payload.get("serviceType"), SERVICE_TYPES, "Choose PPPoE or Hotspot.")
+    devices = 1
+    if service_type == "hotspot":
+        device_mode = str(payload.get("deviceMode") or "").strip()
+        if device_mode == "one":
+            devices = 1
+        elif device_mode == "multiple":
+            devices = package_count(payload.get("simultaneousDevices"), "Enter how many devices can use one account.", 100)
+            if devices < 2:
+                raise ApiError(400, "Enter at least 2 devices for a multiple-device hotspot package.")
+        else:
+            raise ApiError(400, "Choose whether the hotspot package is for one device or multiple devices.")
     validity_amount, validity_unit = optional_duration(
         payload.get("validityAmount"),
         payload.get("validityUnit"),
         "Enter how long the package stays valid, and choose hours, days, weeks, or months.",
     )
-    devices = 1
-    if service_type == "hotspot":
-        if validity_amount is None:
-            raise ApiError(400, "Enter how long the package stays valid, and choose hours, days, weeks, or months.")
-        device_mode = str(payload.get("deviceMode") or "").strip()
-        if device_mode == "multiple":
-            devices = package_count(payload.get("simultaneousDevices"), "Enter how many devices can use one account.", 100)
-            if devices < 2:
-                raise ApiError(400, "Enter at least 2 devices for a multiple-device hotspot package.")
-    elif validity_amount is None:
-        validity_amount, validity_unit = 1, "months"
+    if validity_amount is None:
+        raise ApiError(400, "Enter how long the package stays valid, and choose hours, days, weeks, or months.")
+    download = package_speed(payload.get("downloadMbps"), "download")
+    upload = package_speed(payload.get("uploadMbps"), "upload")
+    data_amount, data_unit = optional_data_amount(
+        payload.get("dataAllowanceAmount"),
+        payload.get("dataAllowanceUnit"),
+        "Enter the data allowance and choose MB or GB, or leave both empty.",
+    )
+    data_action, data_down, data_up = limit_reaction(
+        data_amount,
+        payload.get("dataAllowanceAction"),
+        payload.get("dataThrottleDownloadMbps"),
+        payload.get("dataThrottleUploadMbps"),
+        download,
+        upload,
+        "data allowance",
+    )
+    data_reset_amount, data_reset_unit = limit_reset(
+        data_amount,
+        payload.get("dataResetAmount"),
+        payload.get("dataResetUnit"),
+        "data allowance",
+    )
+    fair_amount, fair_unit = optional_data_amount(
+        payload.get("fairUseAmount"),
+        payload.get("fairUseUnit"),
+        "Enter the fair-use threshold and choose MB or GB.",
+    )
+    fair_action, fair_down, fair_up = limit_reaction(
+        fair_amount,
+        payload.get("fairUseAction"),
+        payload.get("fairThrottleDownloadMbps"),
+        payload.get("fairThrottleUploadMbps"),
+        download,
+        upload,
+        "fair-use threshold",
+    )
+    fair_reset_amount, fair_reset_unit = limit_reset(
+        fair_amount,
+        payload.get("fairResetAmount"),
+        payload.get("fairResetUnit"),
+        "fair-use threshold",
+    )
+    if fair_action == "throttle":
+        policy = f"Throttle to {fair_down}/{fair_up} Mbps"
+    elif fair_action == "disconnect":
+        policy = "Disconnect"
+    else:
+        policy = ""
+    grace_amount, grace_unit = optional_duration(
+        payload.get("graceAmount"),
+        payload.get("graceUnit"),
+        "Enter the grace period and choose hours, days, weeks, or months, or leave both empty.",
+    )
     return {
         "name": name,
-        "price": format(price, ".2f"),
-        "download": package_speed(payload.get("downloadMbps"), "download"),
-        "upload": package_speed(payload.get("uploadMbps"), "upload"),
         "service_type": service_type,
+        "price": format(price, ".2f"),
+        "billing_model": package_choice(
+            payload.get("billingModel"),
+            BILLING_MODELS,
+            "Choose recurring, prepaid, voucher, or usage-based billing.",
+        ),
+        "download": download,
+        "upload": upload,
         "validity_amount": validity_amount,
         "validity_unit": validity_unit,
+        "data_amount": data_amount,
+        "data_unit": data_unit,
+        "data_action": data_action,
+        "data_down": data_down,
+        "data_up": data_up,
+        "data_reset_amount": data_reset_amount,
+        "data_reset_unit": data_reset_unit,
+        "fair_amount": fair_amount,
+        "fair_unit": fair_unit,
+        "fair_policy": policy,
+        "fair_action": fair_action or None,
+        "fair_down": fair_down,
+        "fair_up": fair_up,
+        "fair_reset_amount": fair_reset_amount,
+        "fair_reset_unit": fair_reset_unit,
         "devices": devices,
+        "grace_amount": grace_amount,
+        "grace_unit": grace_unit,
+        "status": package_choice(
+            payload.get("status"),
+            PACKAGE_STATUSES,
+            "Choose draft, active, or archived.",
+        ),
     }
 
 
@@ -338,17 +420,37 @@ def public_payment(row):
 
 
 def public_package(row):
+    data_amount = row.get("data_allowance_amount")
+    fair_amount = row.get("fair_use_amount")
     return {
         "id": row["id"],
         "name": row["name"],
+        "serviceType": row.get("service_type") or "pppoe",
         "price": format(Decimal(row["price"]), ".2f"),
+        "billingModel": row.get("billing_model") or "recurring",
         "downloadMbps": int(row["download_mbps"]),
         "uploadMbps": int(row["upload_mbps"]),
-        "status": row["status"],
-        "serviceType": row.get("service_type") or "pppoe",
         "validityAmount": int(row.get("validity_amount") or 1),
         "validityUnit": row.get("validity_unit") or "months",
+        "dataAllowanceAmount": None if data_amount is None else format(Decimal(data_amount), ".2f"),
+        "dataAllowanceUnit": row.get("data_allowance_unit"),
+        "dataAllowanceAction": row.get("data_allowance_action"),
+        "dataThrottleDownloadMbps": None if row.get("data_throttle_download") is None else int(row["data_throttle_download"]),
+        "dataThrottleUploadMbps": None if row.get("data_throttle_upload") is None else int(row["data_throttle_upload"]),
+        "dataResetAmount": None if row.get("data_reset_amount") is None else int(row["data_reset_amount"]),
+        "dataResetUnit": row.get("data_reset_unit"),
+        "fairUseAmount": None if fair_amount is None else format(Decimal(fair_amount), ".2f"),
+        "fairUseUnit": row.get("fair_use_unit"),
+        "fairUsePolicy": row.get("fair_use_policy") or "",
+        "fairUseAction": row.get("fair_use_action"),
+        "fairThrottleDownloadMbps": None if row.get("fair_throttle_download") is None else int(row["fair_throttle_download"]),
+        "fairThrottleUploadMbps": None if row.get("fair_throttle_upload") is None else int(row["fair_throttle_upload"]),
+        "fairResetAmount": None if row.get("fair_reset_amount") is None else int(row["fair_reset_amount"]),
+        "fairResetUnit": row.get("fair_reset_unit"),
         "simultaneousDevices": int(row.get("simultaneous_devices") or 1),
+        "graceAmount": None if row.get("grace_amount") is None else int(row["grace_amount"]),
+        "graceUnit": row.get("grace_unit"),
+        "status": row["status"],
         "routers": load_offer_names(row.get("availability_routers")),
         "defaultPackage": bool(row.get("company_package_id")) and not int(row.get("customized") or 0),
         "imageDataUrl": row.get("image_data_url") or "",
@@ -370,6 +472,16 @@ COMPANY_PACKAGE_COLUMNS = """
   simultaneous_devices,
   grace_amount, grace_unit, status, availability_routers, availability_locations,
   availability_service_areas, availability_clients, applies_to_all, image_data_url
+"""
+ISP_PACKAGE_COLUMNS = """
+  id, client_id, name, service_type, price, billing_model, download_mbps, upload_mbps,
+  validity_amount, validity_unit, data_allowance_amount, data_allowance_unit,
+  data_allowance_action, data_throttle_download, data_throttle_upload,
+  data_reset_amount, data_reset_unit,
+  fair_use_amount, fair_use_unit, fair_use_policy, fair_use_action,
+  fair_throttle_download, fair_throttle_upload, fair_reset_amount, fair_reset_unit,
+  simultaneous_devices, grace_amount, grace_unit, status, availability_routers,
+  company_package_id, customized, image_data_url
 """
 
 
@@ -472,75 +584,7 @@ def load_offer_names(value):
 
 
 def clean_company_package(payload, allowed_client_ids):
-    name = str(payload.get("name", "")).strip()
-    if not name or len(name) > 80 or any(ord(character) < 32 for character in name):
-        raise ApiError(400, "Enter a package name.")
-    try:
-        price = Decimal(str(payload.get("price", "")).strip())
-    except InvalidOperation as error:
-        raise ApiError(400, "Enter the price in KSh.") from error
-    if price < 0 or price > Decimal("99999999.99") or price.as_tuple().exponent < -2:
-        raise ApiError(400, "Enter the price in KSh with up to two decimal places.")
-    validity_amount, validity_unit = optional_duration(
-        payload.get("validityAmount"),
-        payload.get("validityUnit"),
-        "Enter how long the package stays valid, and choose hours, days, weeks, or months.",
-    )
-    if validity_amount is None:
-        raise ApiError(400, "Enter how long the package stays valid, and choose hours, days, weeks, or months.")
-    download = package_speed(payload.get("downloadMbps"), "download")
-    upload = package_speed(payload.get("uploadMbps"), "upload")
-    data_amount, data_unit = optional_data_amount(
-        payload.get("dataAllowanceAmount"),
-        payload.get("dataAllowanceUnit"),
-        "Enter the data allowance and choose MB or GB, or leave both empty.",
-    )
-    data_action, data_down, data_up = limit_reaction(
-        data_amount,
-        payload.get("dataAllowanceAction"),
-        payload.get("dataThrottleDownloadMbps"),
-        payload.get("dataThrottleUploadMbps"),
-        download,
-        upload,
-        "data allowance",
-    )
-    data_reset_amount, data_reset_unit = limit_reset(
-        data_amount,
-        payload.get("dataResetAmount"),
-        payload.get("dataResetUnit"),
-        "data allowance",
-    )
-    fair_amount, fair_unit = optional_data_amount(
-        payload.get("fairUseAmount"),
-        payload.get("fairUseUnit"),
-        "Enter the fair-use threshold and choose MB or GB.",
-    )
-    fair_action, fair_down, fair_up = limit_reaction(
-        fair_amount,
-        payload.get("fairUseAction"),
-        payload.get("fairThrottleDownloadMbps"),
-        payload.get("fairThrottleUploadMbps"),
-        download,
-        upload,
-        "fair-use threshold",
-    )
-    fair_reset_amount, fair_reset_unit = limit_reset(
-        fair_amount,
-        payload.get("fairResetAmount"),
-        payload.get("fairResetUnit"),
-        "fair-use threshold",
-    )
-    if fair_action == "throttle":
-        policy = f"Throttle to {fair_down}/{fair_up} Mbps"
-    elif fair_action == "disconnect":
-        policy = "Disconnect"
-    else:
-        policy = ""
-    grace_amount, grace_unit = optional_duration(
-        payload.get("graceAmount"),
-        payload.get("graceUnit"),
-        "Enter the grace period and choose hours, days, weeks, or months, or leave both empty.",
-    )
+    fields = clean_package_fields(payload)
     clients = clean_router_ids(
         payload.get("clients"),
         allowed_client_ids,
@@ -548,62 +592,16 @@ def clean_company_package(payload, allowed_client_ids):
     )
     if allowed_client_ids and not clients:
         raise ApiError(400, "Select at least one ISP client.")
-    applies_to_all = 1 if set(clients) == set(allowed_client_ids) else 0
-    service_type = package_choice(payload.get("serviceType"), SERVICE_TYPES, "Choose PPPoE or Hotspot.")
-    if service_type == "hotspot":
-        device_mode = str(payload.get("deviceMode") or "").strip()
-        if device_mode == "one":
-            devices = 1
-        elif device_mode == "multiple":
-            devices = package_count(payload.get("simultaneousDevices"), "Enter how many devices can use one account.", 100)
-            if devices < 2:
-                raise ApiError(400, "Enter at least 2 devices for a multiple-device hotspot package.")
-        else:
-            raise ApiError(400, "Choose whether the hotspot package is for one device or multiple devices.")
-    else:
-        devices = 1
-    return {
-        "name": name,
-        "service_type": service_type,
-        "price": format(price, ".2f"),
-        "billing_model": package_choice(
-            payload.get("billingModel"),
-            BILLING_MODELS,
-            "Choose recurring, prepaid, voucher, or usage-based billing.",
-        ),
-        "download": download,
-        "upload": upload,
-        "validity_amount": validity_amount,
-        "validity_unit": validity_unit,
-        "data_amount": data_amount,
-        "data_unit": data_unit,
-        "data_action": data_action,
-        "data_down": data_down,
-        "data_up": data_up,
-        "data_reset_amount": data_reset_amount,
-        "data_reset_unit": data_reset_unit,
-        "fair_amount": fair_amount,
-        "fair_unit": fair_unit,
-        "fair_policy": policy,
-        "fair_action": fair_action or None,
-        "fair_down": fair_down,
-        "fair_up": fair_up,
-        "fair_reset_amount": fair_reset_amount,
-        "fair_reset_unit": fair_reset_unit,
-        "devices": devices,
-        "grace_amount": grace_amount,
-        "grace_unit": grace_unit,
-        "status": package_choice(
-            payload.get("status"),
-            PACKAGE_STATUSES,
-            "Choose draft, active, or archived.",
-        ),
-        "clients": clients,
-        "applies_to_all": applies_to_all,
-        "image": clean_package_image(payload.get("imageDataUrl")),
-        "locations": "[]",
-        "service_areas": "[]",
-    }
+    fields.update(
+        {
+            "clients": clients,
+            "applies_to_all": 1 if set(clients) == set(allowed_client_ids) else 0,
+            "image": clean_package_image(payload.get("imageDataUrl")),
+            "locations": "[]",
+            "service_areas": "[]",
+        }
+    )
+    return fields
 
 
 def public_company_package(row):
@@ -860,11 +858,35 @@ def ensure_schema():
             cursor.execute("SHOW COLUMNS FROM isp_packages LIKE 'image_data_url'")
             if cursor.fetchone() is None:
                 cursor.execute("ALTER TABLE isp_packages ADD COLUMN image_data_url MEDIUMTEXT NULL")
+            cursor.execute(
+                """
+                ALTER TABLE isp_packages
+                MODIFY status ENUM('draft', 'active', 'archived', 'suspended') NOT NULL DEFAULT 'active'
+                """
+            )
             for column, definition in (
                 ("service_type", "service_type ENUM('pppoe', 'hotspot') NOT NULL DEFAULT 'pppoe'"),
+                ("billing_model", "billing_model ENUM('recurring', 'prepaid', 'voucher', 'usage') NOT NULL DEFAULT 'recurring'"),
                 ("validity_amount", "validity_amount INT NOT NULL DEFAULT 1"),
                 ("validity_unit", "validity_unit ENUM('hours', 'days', 'weeks', 'months') NOT NULL DEFAULT 'months'"),
+                ("data_allowance_amount", "data_allowance_amount DECIMAL(12,2) NULL"),
+                ("data_allowance_unit", "data_allowance_unit ENUM('MB', 'GB') NULL"),
+                ("data_allowance_action", "data_allowance_action ENUM('throttle', 'disconnect') NULL"),
+                ("data_throttle_download", "data_throttle_download INT NULL"),
+                ("data_throttle_upload", "data_throttle_upload INT NULL"),
+                ("data_reset_amount", "data_reset_amount INT NULL"),
+                ("data_reset_unit", "data_reset_unit ENUM('hours', 'days', 'weeks', 'months') NULL"),
+                ("fair_use_amount", "fair_use_amount DECIMAL(12,2) NULL"),
+                ("fair_use_unit", "fair_use_unit ENUM('MB', 'GB') NULL"),
+                ("fair_use_policy", "fair_use_policy VARCHAR(240) NULL"),
+                ("fair_use_action", "fair_use_action ENUM('throttle', 'disconnect') NULL"),
+                ("fair_throttle_download", "fair_throttle_download INT NULL"),
+                ("fair_throttle_upload", "fair_throttle_upload INT NULL"),
+                ("fair_reset_amount", "fair_reset_amount INT NULL"),
+                ("fair_reset_unit", "fair_reset_unit ENUM('hours', 'days', 'weeks', 'months') NULL"),
                 ("simultaneous_devices", "simultaneous_devices INT NOT NULL DEFAULT 1"),
+                ("grace_amount", "grace_amount INT NULL"),
+                ("grace_unit", "grace_unit ENUM('hours', 'days', 'weeks', 'months') NULL"),
             ):
                 cursor.execute("SHOW COLUMNS FROM isp_packages LIKE %s", (column,))
                 if cursor.fetchone() is None:
@@ -3084,10 +3106,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def package_row(self, cursor, package_id, client_id):
         cursor.execute(
-            """
-            SELECT id, name, price, download_mbps, upload_mbps, status, availability_routers,
-                   company_package_id, customized, image_data_url,
-                   service_type, validity_amount, validity_unit, simultaneous_devices
+            f"""
+            SELECT {ISP_PACKAGE_COLUMNS}
             FROM isp_packages
             WHERE id = %s AND client_id = %s
             """,
@@ -3101,10 +3121,8 @@ class Handler(BaseHTTPRequestHandler):
     def list_packages(self, cursor, token):
         client_id = self.require_package_client(cursor, token)
         cursor.execute(
-            """
-            SELECT id, name, price, download_mbps, upload_mbps, status, availability_routers,
-                   company_package_id, customized, image_data_url,
-                   service_type, validity_amount, validity_unit, simultaneous_devices
+            f"""
+            SELECT {ISP_PACKAGE_COLUMNS}
             FROM isp_packages
             WHERE client_id = %s
             ORDER BY name
@@ -3115,7 +3133,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def create_package(self, cursor, payload, token):
         client_id = self.require_package_client(cursor, token)
-        fields = clean_package(payload)
+        fields = clean_package_fields(payload)
+        if fields["status"] == "suspended":
+            raise ApiError(400, "Choose draft, active, or archived.")
         image = optional_package_image(payload.get("imageDataUrl"))
         routers = self.package_router_ids(cursor, client_id, payload, "Select routers linked to your account.")
         cursor.execute(
@@ -3128,12 +3148,58 @@ class Handler(BaseHTTPRequestHandler):
         cursor.execute(
             """
             INSERT INTO isp_packages (
-              id, client_id, name, price, download_mbps, upload_mbps, status, availability_routers, image_data_url,
-              service_type, validity_amount, validity_unit, simultaneous_devices
-            ) VALUES (%s, %s, %s, %s, %s, %s, 'active', %s, %s, %s, %s, %s, %s)
+              id, client_id, name, service_type, price, billing_model, download_mbps, upload_mbps,
+              validity_amount, validity_unit,
+              data_allowance_amount, data_allowance_unit, data_allowance_action,
+              data_throttle_download, data_throttle_upload, data_reset_amount, data_reset_unit,
+              fair_use_amount, fair_use_unit, fair_use_policy, fair_use_action,
+              fair_throttle_download, fair_throttle_upload, fair_reset_amount, fair_reset_unit,
+              simultaneous_devices, grace_amount, grace_unit,
+              status, availability_routers, image_data_url
+            ) VALUES (
+              %s, %s, %s, %s, %s, %s, %s, %s,
+              %s, %s,
+              %s, %s, %s,
+              %s, %s, %s, %s,
+              %s, %s, %s, %s,
+              %s, %s, %s, %s,
+              %s, %s, %s,
+              %s, %s, %s
+            )
             """,
-            (package_id, client_id, fields["name"], fields["price"], fields["download"], fields["upload"], routers, image or None,
-             fields["service_type"], fields["validity_amount"], fields["validity_unit"], fields["devices"]),
+            (
+                package_id,
+                client_id,
+                fields["name"],
+                fields["service_type"],
+                fields["price"],
+                fields["billing_model"],
+                fields["download"],
+                fields["upload"],
+                fields["validity_amount"],
+                fields["validity_unit"],
+                fields["data_amount"],
+                fields["data_unit"],
+                fields["data_action"],
+                fields["data_down"],
+                fields["data_up"],
+                fields["data_reset_amount"],
+                fields["data_reset_unit"],
+                fields["fair_amount"],
+                fields["fair_unit"],
+                fields["fair_policy"] or None,
+                fields["fair_action"],
+                fields["fair_down"],
+                fields["fair_up"],
+                fields["fair_reset_amount"],
+                fields["fair_reset_unit"],
+                fields["devices"],
+                fields["grace_amount"],
+                fields["grace_unit"],
+                fields["status"],
+                routers,
+                image or None,
+            ),
         )
         return public_package(self.package_row(cursor, package_id, client_id))
 
@@ -3142,7 +3208,9 @@ class Handler(BaseHTTPRequestHandler):
         package_id, _, action = package_path.partition("/")
         row = self.package_row(cursor, package_id, client_id)
         if action == "edit":
-            fields = clean_package(payload)
+            fields = clean_package_fields(payload)
+            if fields["status"] == "suspended" and row["status"] != "suspended":
+                raise ApiError(400, "Choose draft, active, or archived.")
             image = optional_package_image(payload.get("imageDataUrl"))
             routers = self.package_router_ids(cursor, client_id, payload, "Select routers linked to your account.")
             cursor.execute(
@@ -3154,13 +3222,51 @@ class Handler(BaseHTTPRequestHandler):
             cursor.execute(
                 """
                 UPDATE isp_packages
-                SET name = %s, price = %s, download_mbps = %s, upload_mbps = %s, availability_routers = %s,
-                    image_data_url = %s, customized = 1,
-                    service_type = %s, validity_amount = %s, validity_unit = %s, simultaneous_devices = %s
+                SET name = %s, service_type = %s, price = %s, billing_model = %s,
+                    download_mbps = %s, upload_mbps = %s, validity_amount = %s, validity_unit = %s,
+                    data_allowance_amount = %s, data_allowance_unit = %s, data_allowance_action = %s,
+                    data_throttle_download = %s, data_throttle_upload = %s,
+                    data_reset_amount = %s, data_reset_unit = %s,
+                    fair_use_amount = %s, fair_use_unit = %s, fair_use_policy = %s, fair_use_action = %s,
+                    fair_throttle_download = %s, fair_throttle_upload = %s,
+                    fair_reset_amount = %s, fair_reset_unit = %s,
+                    simultaneous_devices = %s, grace_amount = %s, grace_unit = %s,
+                    status = %s, availability_routers = %s, image_data_url = %s, customized = 1
                 WHERE id = %s AND client_id = %s
                 """,
-                (fields["name"], fields["price"], fields["download"], fields["upload"], routers, image or None,
-                 fields["service_type"], fields["validity_amount"], fields["validity_unit"], fields["devices"], package_id, client_id),
+                (
+                    fields["name"],
+                    fields["service_type"],
+                    fields["price"],
+                    fields["billing_model"],
+                    fields["download"],
+                    fields["upload"],
+                    fields["validity_amount"],
+                    fields["validity_unit"],
+                    fields["data_amount"],
+                    fields["data_unit"],
+                    fields["data_action"],
+                    fields["data_down"],
+                    fields["data_up"],
+                    fields["data_reset_amount"],
+                    fields["data_reset_unit"],
+                    fields["fair_amount"],
+                    fields["fair_unit"],
+                    fields["fair_policy"] or None,
+                    fields["fair_action"],
+                    fields["fair_down"],
+                    fields["fair_up"],
+                    fields["fair_reset_amount"],
+                    fields["fair_reset_unit"],
+                    fields["devices"],
+                    fields["grace_amount"],
+                    fields["grace_unit"],
+                    fields["status"],
+                    routers,
+                    image or None,
+                    package_id,
+                    client_id,
+                ),
             )
             return {"package": public_package(self.package_row(cursor, package_id, client_id))}, None
         if action == "suspend":
@@ -3369,23 +3475,48 @@ class Handler(BaseHTTPRequestHandler):
                 cursor.execute(
                     """
                     UPDATE isp_packages
-                    SET name = %s, price = %s, download_mbps = %s, upload_mbps = %s,
-                        status = %s, availability_routers = %s, image_data_url = %s,
-                        service_type = %s, validity_amount = %s, validity_unit = %s, simultaneous_devices = %s
+                    SET name = %s, service_type = %s, price = %s, billing_model = %s,
+                        download_mbps = %s, upload_mbps = %s, validity_amount = %s, validity_unit = %s,
+                        data_allowance_amount = %s, data_allowance_unit = %s, data_allowance_action = %s,
+                        data_throttle_download = %s, data_throttle_upload = %s,
+                        data_reset_amount = %s, data_reset_unit = %s,
+                        fair_use_amount = %s, fair_use_unit = %s, fair_use_policy = %s, fair_use_action = %s,
+                        fair_throttle_download = %s, fair_throttle_upload = %s,
+                        fair_reset_amount = %s, fair_reset_unit = %s,
+                        simultaneous_devices = %s, grace_amount = %s, grace_unit = %s,
+                        status = %s, availability_routers = %s, image_data_url = %s
                     WHERE id = %s
                     """,
                     (
                         row["name"],
+                        row.get("service_type") or "pppoe",
                         row["price"],
+                        row.get("billing_model") or "recurring",
                         row["download_mbps"],
                         row["upload_mbps"],
+                        int(row.get("validity_amount") or 1),
+                        row.get("validity_unit") or "months",
+                        row.get("data_allowance_amount"),
+                        row.get("data_allowance_unit"),
+                        row.get("data_allowance_action"),
+                        row.get("data_throttle_download"),
+                        row.get("data_throttle_upload"),
+                        row.get("data_reset_amount"),
+                        row.get("data_reset_unit"),
+                        row.get("fair_use_amount"),
+                        row.get("fair_use_unit"),
+                        row.get("fair_use_policy") or None,
+                        row.get("fair_use_action"),
+                        row.get("fair_throttle_download"),
+                        row.get("fair_throttle_upload"),
+                        row.get("fair_reset_amount"),
+                        row.get("fair_reset_unit"),
+                        int(row.get("simultaneous_devices") or 1),
+                        row.get("grace_amount"),
+                        row.get("grace_unit"),
                         isp_status,
                         routers,
                         row.get("image_data_url") or None,
-                        row.get("service_type") or "pppoe",
-                        int(row.get("validity_amount") or 1),
-                        row.get("validity_unit") or "months",
-                        int(row.get("simultaneous_devices") or 1),
                         current["id"],
                     ),
                 )
@@ -3399,26 +3530,58 @@ class Handler(BaseHTTPRequestHandler):
             cursor.execute(
                 """
                 INSERT INTO isp_packages (
-                  id, client_id, name, price, download_mbps, upload_mbps, status,
-                  availability_routers, company_package_id, customized, image_data_url,
-                  service_type, validity_amount, validity_unit, simultaneous_devices
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 0, %s, %s, %s, %s, %s)
+                  id, client_id, name, service_type, price, billing_model, download_mbps, upload_mbps,
+                  validity_amount, validity_unit,
+                  data_allowance_amount, data_allowance_unit, data_allowance_action,
+                  data_throttle_download, data_throttle_upload, data_reset_amount, data_reset_unit,
+                  fair_use_amount, fair_use_unit, fair_use_policy, fair_use_action,
+                  fair_throttle_download, fair_throttle_upload, fair_reset_amount, fair_reset_unit,
+                  simultaneous_devices, grace_amount, grace_unit,
+                  status, availability_routers, company_package_id, customized, image_data_url
+                ) VALUES (
+                  %s, %s, %s, %s, %s, %s, %s, %s,
+                  %s, %s,
+                  %s, %s, %s,
+                  %s, %s, %s, %s,
+                  %s, %s, %s, %s,
+                  %s, %s, %s, %s,
+                  %s, %s, %s,
+                  %s, %s, %s, 0, %s
+                )
                 """,
                 (
                     str(uuid.uuid4()),
                     client_id,
                     row["name"],
+                    row.get("service_type") or "pppoe",
                     row["price"],
+                    row.get("billing_model") or "recurring",
                     row["download_mbps"],
                     row["upload_mbps"],
+                    int(row.get("validity_amount") or 1),
+                    row.get("validity_unit") or "months",
+                    row.get("data_allowance_amount"),
+                    row.get("data_allowance_unit"),
+                    row.get("data_allowance_action"),
+                    row.get("data_throttle_download"),
+                    row.get("data_throttle_upload"),
+                    row.get("data_reset_amount"),
+                    row.get("data_reset_unit"),
+                    row.get("fair_use_amount"),
+                    row.get("fair_use_unit"),
+                    row.get("fair_use_policy") or None,
+                    row.get("fair_use_action"),
+                    row.get("fair_throttle_download"),
+                    row.get("fair_throttle_upload"),
+                    row.get("fair_reset_amount"),
+                    row.get("fair_reset_unit"),
+                    int(row.get("simultaneous_devices") or 1),
+                    row.get("grace_amount"),
+                    row.get("grace_unit"),
                     isp_status,
                     routers,
                     row["id"],
                     row.get("image_data_url") or None,
-                    row.get("service_type") or "pppoe",
-                    int(row.get("validity_amount") or 1),
-                    row.get("validity_unit") or "months",
-                    int(row.get("simultaneous_devices") or 1),
                 ),
             )
         for client_id, current in linked.items():
