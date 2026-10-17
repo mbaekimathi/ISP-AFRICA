@@ -1,8 +1,21 @@
 import { useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import * as Dialog from "@radix-ui/react-dialog";
-import { ArrowLeft, ChevronDown } from "lucide-react";
-import { DetailGrid, PageHeader } from "@/components/ui/DetailGrid";
+import {
+  Activity,
+  ArrowDownUp,
+  ArrowLeft,
+  CalendarClock,
+  ChevronDown,
+  Copy,
+  Eye,
+  EyeOff,
+  Gauge,
+  KeyRound,
+  Wallet,
+  Wifi,
+} from "lucide-react";
+import { DetailGrid } from "@/components/ui/DetailGrid";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormField } from "@/components/ui/FormField";
@@ -171,7 +184,7 @@ function Section({
 }) {
   return (
     <details
-      className="group border-t border-border"
+      className="group border-t border-border first:border-t-0"
       open={open}
       onToggle={(event) => onToggle(event.currentTarget.open)}
     >
@@ -231,6 +244,33 @@ function TrendChart({
   );
 }
 
+function StatCard({
+  icon,
+  label,
+  value,
+  hint,
+  valueClass,
+}: {
+  icon: ReactNode;
+  label: string;
+  value: string;
+  hint: string;
+  valueClass?: string;
+}) {
+  return (
+    <div className="rounded-xl border border-border bg-surface p-4 shadow-card">
+      <div className="flex items-center gap-2">
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
+          {icon}
+        </span>
+        <p className="truncate text-xs text-muted-foreground">{label}</p>
+      </div>
+      <p className={`mt-3 text-sm font-semibold ${valueClass ?? ""}`}>{value}</p>
+      <p className="mt-0.5 truncate text-xs text-muted-foreground">{hint}</p>
+    </div>
+  );
+}
+
 export function PppoeCustomerPage() {
   const { subscriberId = "" } = useParams();
   const [search] = useSearchParams();
@@ -245,7 +285,8 @@ export function PppoeCustomerPage() {
   const [amount, setAmount] = useState("");
   const [reference, setReference] = useState("");
   const [editing, setEditing] = useState(search.get("edit") === "1");
-  const [openSection, setOpenSection] = useState<string | null>(search.get("edit") === "1" ? "details" : search.get("recharge") === "1" ? "billing" : null);
+  const [profileOpen, setProfileOpen] = useState(search.get("edit") === "1");
+  const [openSection, setOpenSection] = useState<string | null>(search.get("recharge") === "1" ? "billing" : null);
   const [dialog, setDialog] = useState<DialogKind | null>(null);
   const [reason, setReason] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
@@ -448,7 +489,7 @@ export function PppoeCustomerPage() {
     {
       label: "Edit customer details",
       onClick: () => {
-        setOpenSection("details");
+        setProfileOpen(true);
         setEditing(true);
       },
     },
@@ -462,31 +503,36 @@ export function PppoeCustomerPage() {
         Back to PPPoE clients
       </SecondaryButton>
 
-      <section className="mt-4 overflow-hidden rounded-xl border border-border bg-surface">
-        <div className="p-5 pb-4">
+      <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
+        <div className="bg-gradient-to-r from-primary/10 via-primary/5 to-transparent px-5 py-5 sm:px-6">
           <div className="flex flex-wrap items-start justify-between gap-4">
-            <div>
-              <div className="flex items-center gap-4">
-                <div
-                  className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-primary/10 text-sm font-semibold text-primary"
-                  aria-hidden="true"
-                >
-                  {initials}
+            <button
+              type="button"
+              aria-expanded={profileOpen || editing}
+              onClick={() => setProfileOpen((open) => !open)}
+              className="group flex min-w-0 items-center gap-4 rounded-xl text-left focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
+            >
+              <div
+                className="flex h-14 w-14 shrink-0 items-center justify-center rounded-full bg-primary/15 text-base font-semibold text-primary ring-2 ring-primary/25"
+                aria-hidden="true"
+              >
+                {initials}
+              </div>
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <h1 className="truncate text-xl font-semibold tracking-tight text-foreground">
+                    {subscriber.firstName} {subscriber.lastName}
+                  </h1>
+                  <ChevronDown
+                    className={`h-4 w-4 shrink-0 text-muted-foreground transition-transform ${profileOpen || editing ? "rotate-180" : ""}`}
+                    aria-hidden="true"
+                  />
                 </div>
-                <PageHeader title={`${subscriber.firstName} ${subscriber.lastName}`} description={`${subscriber.phone} · ${subscriber.username}`} />
+                <p className="mt-0.5 truncate text-sm text-muted-foreground">
+                  {subscriber.phone} · {subscriber.username}
+                </p>
               </div>
-              <div className="mt-3 flex flex-wrap items-center gap-3">
-                <span className="flex items-center gap-2 text-sm font-semibold text-foreground">
-                  <span className={`h-3 w-3 rounded-full ${connectionDot}`} aria-hidden="true" />
-                  {connectionLabel}
-                </span>
-                <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
-                <StatusBadge tone={billing.tone}>{billing.label}</StatusBadge>
-              </div>
-              <p className="mt-2 text-sm text-muted-foreground">
-                {subscriber.routerName} · {subscriber.packageName}
-              </p>
-            </div>
+            </button>
             <div className="flex flex-wrap gap-2">
               <PrimaryButton
                 type="button"
@@ -536,79 +582,99 @@ export function PppoeCustomerPage() {
               </div>
             </div>
           </div>
-        </div>
-
-        <div className="grid grid-cols-2 gap-4 border-t border-border px-5 py-4 sm:grid-cols-3 lg:grid-cols-5">
-          <div>
-            <p className="text-xs text-muted-foreground">Status</p>
-            <p className="mt-1 text-sm font-semibold">{connectionLabel}</p>
-            <p className="text-xs text-muted-foreground">
-              {subscriber.connection === "online"
-                ? `IP ${subscriber.live.ip || "—"}`
-                : `Last seen ${subscriber.live.lastSeen ?? "never"}`}
-            </p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Plan</p>
-            <p className="mt-1 text-sm font-semibold">
-              {subscriber.downloadMbps ?? "—"}↓ {subscriber.uploadMbps ?? "—"}↑ Mbps
-            </p>
-            <p className="text-xs text-muted-foreground">{subscriber.packageName}</p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Usage · 30d</p>
-            <p className="mt-1 text-sm font-semibold">{bytes(subscriber.usage.monthBytesIn + subscriber.usage.monthBytesOut)}</p>
-            <p className="text-xs text-muted-foreground">
-              {bytes(subscriber.usage.monthBytesIn)}↓ {bytes(subscriber.usage.monthBytesOut)}↑
-            </p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Outstanding</p>
-            <p className={`mt-1 text-sm font-semibold ${outstandingDue ? "text-destructive" : "text-success"}`}>
-              {outstandingDue ? `KSh ${subscriber.billing.outstanding}` : "KSh 0"}
-            </p>
-            <p className="text-xs text-muted-foreground">Due {subscriber.billing.nextDueDate ?? "—"}</p>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">Access expires</p>
-            <p className="mt-1 text-sm font-semibold">{subscriber.billing.expiry ?? "—"}</p>
-            <p className="text-xs text-muted-foreground">{billing.label}</p>
+          <div className="mt-4 flex flex-wrap items-center gap-x-3 gap-y-2">
+            <span className="flex items-center gap-2 text-sm font-semibold text-foreground">
+              <span className={`h-3 w-3 rounded-full ${connectionDot}`} aria-hidden="true" />
+              {connectionLabel}
+            </span>
+            <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+            <StatusBadge tone={billing.tone}>{billing.label}</StatusBadge>
+            <span className="text-sm text-muted-foreground">
+              {subscriber.routerName} · {subscriber.packageName}
+            </span>
           </div>
         </div>
 
-        <div className="grid gap-4 border-t border-border px-5 py-4 sm:grid-cols-2">
-          <div>
-            <p className="text-xs text-muted-foreground">PPPoE username</p>
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <code className="text-sm font-semibold">{subscriber.username}</code>
-              <SecondaryButton type="button" className="min-h-7 px-2 text-xs" onClick={() => void navigator.clipboard.writeText(subscriber.username)}>
-                Copy
-              </SecondaryButton>
-            </div>
-          </div>
-          <div>
-            <p className="text-xs text-muted-foreground">PPPoE password</p>
-            <div className="mt-1 flex flex-wrap items-center gap-2">
-              <code className="text-sm font-semibold">{password || "••••••••••"}</code>
-              {password ? (
-                <>
-                  <SecondaryButton type="button" className="min-h-7 px-2 text-xs" onClick={() => void navigator.clipboard.writeText(password)}>
-                    Copy
+        {profileOpen || editing ? (
+          <div className="border-t border-border px-5 py-5 sm:px-6">
+            {editing ? (
+              <form className="grid gap-4" onSubmit={(event) => void saveEdit(event)}>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <FormField id="edit-firstName" label="First name"><input id="edit-firstName" className="field" name="firstName" defaultValue={subscriber.firstName} /></FormField>
+                  <FormField id="edit-lastName" label="Last name"><input id="edit-lastName" className="field" name="lastName" defaultValue={subscriber.lastName} /></FormField>
+                  <FormField id="edit-phone" label="Phone"><input id="edit-phone" className="field" name="phone" defaultValue={subscriber.phone} /></FormField>
+                  <FormField id="edit-email" label="Email"><input id="edit-email" className="field" name="email" defaultValue={subscriber.email} /></FormField>
+                  <FormField id="edit-buildingName" label="Building"><input id="edit-buildingName" className="field" name="buildingName" defaultValue={subscriber.buildingName} /></FormField>
+                  <FormField id="edit-houseNumber" label="House number"><input id="edit-houseNumber" className="field" name="houseNumber" defaultValue={subscriber.houseNumber} /></FormField>
+                  <FormField id="edit-serial" label="Device serial"><input id="edit-serial" className="field" name="serial" defaultValue={subscriber.serial} /></FormField>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  <PrimaryButton type="submit">Save</PrimaryButton>
+                  <SecondaryButton type="button" onClick={() => setEditing(false)}>Cancel</SecondaryButton>
+                </div>
+              </form>
+            ) : (
+              <>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="text-sm font-semibold">Client details</h2>
+                  <SecondaryButton type="button" className="min-h-8 px-3" onClick={() => setEditing(true)}>
+                    Edit
                   </SecondaryButton>
-                  <SecondaryButton type="button" className="min-h-7 px-2 text-xs" onClick={() => setPassword("")}>
-                    Hide
-                  </SecondaryButton>
-                </>
-              ) : (
-                <SecondaryButton type="button" className="min-h-7 px-2 text-xs" onClick={() => void post("reveal", {})}>
-                  Show
-                </SecondaryButton>
-              )}
-            </div>
-            <p className="mt-1 text-xs text-muted-foreground">Enter these on the customer's router or CPE.</p>
+                </div>
+                <div className="mt-3">
+                  <DetailGrid items={[
+                    { label: "Phone", value: subscriber.phone || "—" },
+                    { label: "Email", value: subscriber.email || "—" },
+                    { label: "Building", value: subscriber.buildingName || "—" },
+                    { label: "House", value: subscriber.houseNumber || "—" },
+                    { label: "Device serial", value: subscriber.serial || "—" },
+                    { label: "IP assignment", value: subscriber.staticIp || "From pool" },
+                    { label: "Router", value: subscriber.routerName || "—" },
+                    { label: "Package", value: subscriber.packageName || "—" },
+                  ]} />
+                </div>
+              </>
+            )}
           </div>
-        </div>
+        ) : null}
+      </section>
 
+      <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3 xl:grid-cols-5">
+        <StatCard
+          icon={<Activity className="h-4 w-4" />}
+          label="Status"
+          value={connectionLabel}
+          hint={subscriber.connection === "online" ? `IP ${subscriber.live.ip || "—"}` : `Last seen ${subscriber.live.lastSeen ?? "never"}`}
+        />
+        <StatCard
+          icon={<Gauge className="h-4 w-4" />}
+          label="Plan"
+          value={`${subscriber.downloadMbps ?? "—"}↓ ${subscriber.uploadMbps ?? "—"}↑ Mbps`}
+          hint={subscriber.packageName}
+        />
+        <StatCard
+          icon={<ArrowDownUp className="h-4 w-4" />}
+          label="Usage · 30d"
+          value={bytes(subscriber.usage.monthBytesIn + subscriber.usage.monthBytesOut)}
+          hint={`${bytes(subscriber.usage.monthBytesIn)}↓ ${bytes(subscriber.usage.monthBytesOut)}↑`}
+        />
+        <StatCard
+          icon={<Wallet className="h-4 w-4" />}
+          label="Outstanding"
+          value={outstandingDue ? `KSh ${subscriber.billing.outstanding}` : "KSh 0"}
+          valueClass={outstandingDue ? "text-destructive" : "text-success"}
+          hint={`Due ${subscriber.billing.nextDueDate ?? "—"}`}
+        />
+        <StatCard
+          icon={<CalendarClock className="h-4 w-4" />}
+          label="Access expires"
+          value={subscriber.billing.expiry ?? "—"}
+          hint={billing.label}
+        />
+      </div>
+
+      <div className="mt-4 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_19rem]">
+        <section className="overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
         <Section title="Payments &amp; billing" open={openSection === "billing"} onToggle={toggleSection("billing")}>
           <div className="grid gap-6 lg:grid-cols-2">
             <form
@@ -662,69 +728,6 @@ export function PppoeCustomerPage() {
             Plan {subscriber.downloadMbps ?? "—"}↓ / {subscriber.uploadMbps ?? "—"}↑ Mbps · Last 30 days{" "}
             {bytes(subscriber.usage.monthBytesIn + subscriber.usage.monthBytesOut)} ({bytes(subscriber.usage.monthBytesIn)}↓ {bytes(subscriber.usage.monthBytesOut)}↑)
           </p>
-        </Section>
-
-        <Section
-          title="Customer details"
-          open={openSection === "details" || editing}
-          onToggle={toggleSection("details")}
-          action={
-            editing ? null : (
-              <SecondaryButton
-                type="button"
-                className="min-h-8 px-3"
-                onClick={(event) => {
-                  event.preventDefault();
-                  event.stopPropagation();
-                  setOpenSection("details");
-                  setEditing(true);
-                }}
-              >
-                Edit
-              </SecondaryButton>
-            )
-          }
-        >
-          <div className="grid gap-6 lg:grid-cols-2">
-            <div>
-              <h3 className="text-sm font-semibold">Connection</h3>
-              <DetailGrid items={[
-                { label: "State", value: connectionLabel },
-                { label: "IP", value: subscriber.live.ip || "Not connected" },
-                { label: "MAC", value: subscriber.live.mac || "—" },
-                { label: "Uptime", value: subscriber.live.uptime || "—" },
-                { label: "Router", value: subscriber.live.router },
-                { label: "Last seen", value: subscriber.live.lastSeen ?? "Never" },
-              ]} />
-            </div>
-            <div>
-              <h3 className="text-sm font-semibold">Customer details</h3>
-              {editing ? (
-                <form className="mt-3 grid gap-3" onSubmit={(event) => void saveEdit(event)}>
-                  <FormField id="edit-firstName" label="First name"><input id="edit-firstName" className="field" name="firstName" defaultValue={subscriber.firstName} /></FormField>
-                  <FormField id="edit-lastName" label="Last name"><input id="edit-lastName" className="field" name="lastName" defaultValue={subscriber.lastName} /></FormField>
-                  <FormField id="edit-phone" label="Phone"><input id="edit-phone" className="field" name="phone" defaultValue={subscriber.phone} /></FormField>
-                  <FormField id="edit-email" label="Email"><input id="edit-email" className="field" name="email" defaultValue={subscriber.email} /></FormField>
-                  <FormField id="edit-buildingName" label="Building"><input id="edit-buildingName" className="field" name="buildingName" defaultValue={subscriber.buildingName} /></FormField>
-                  <FormField id="edit-houseNumber" label="House number"><input id="edit-houseNumber" className="field" name="houseNumber" defaultValue={subscriber.houseNumber} /></FormField>
-                  <FormField id="edit-serial" label="Device serial"><input id="edit-serial" className="field" name="serial" defaultValue={subscriber.serial} /></FormField>
-                  <div className="flex flex-wrap gap-2">
-                    <PrimaryButton type="submit">Save</PrimaryButton>
-                    <SecondaryButton type="button" onClick={() => setEditing(false)}>Cancel</SecondaryButton>
-                  </div>
-                </form>
-              ) : (
-                <DetailGrid items={[
-                  { label: "Phone", value: subscriber.phone || "—" },
-                  { label: "Email", value: subscriber.email || "—" },
-                  { label: "Building", value: subscriber.buildingName || "—" },
-                  { label: "House", value: subscriber.houseNumber || "—" },
-                  { label: "Device serial", value: subscriber.serial || "—" },
-                  { label: "IP assignment", value: subscriber.staticIp || "From pool" },
-                ]} />
-              )}
-            </div>
-          </div>
         </Section>
 
         <Section
@@ -831,7 +834,111 @@ export function PppoeCustomerPage() {
             )}
           </div>
         </div>
-      </section>
+        </section>
+
+        <aside className="grid content-start gap-4">
+          <section className="rounded-2xl border border-border bg-surface p-5 shadow-card">
+            <div className="flex items-center gap-2.5">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
+                <KeyRound className="h-4 w-4" />
+              </span>
+              <h2 className="text-sm font-semibold">PPPoE credentials</h2>
+            </div>
+            <div className="mt-4 grid gap-3">
+              <div className="rounded-xl border border-border bg-surface-muted/40 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs text-muted-foreground">Username</p>
+                  <button
+                    type="button"
+                    aria-label="Copy username"
+                    title="Copy username"
+                    className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground transition hover:bg-surface-muted hover:text-foreground"
+                    onClick={() => void navigator.clipboard.writeText(subscriber.username)}
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+                <code className="mt-1 block truncate text-sm font-semibold">{subscriber.username}</code>
+              </div>
+              <div className="rounded-xl border border-border bg-surface-muted/40 p-3">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs text-muted-foreground">Password</p>
+                  <span className="flex items-center gap-1">
+                    {password ? (
+                      <>
+                        <button
+                          type="button"
+                          aria-label="Copy password"
+                          title="Copy password"
+                          className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground transition hover:bg-surface-muted hover:text-foreground"
+                          onClick={() => void navigator.clipboard.writeText(password)}
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Hide password"
+                          title="Hide password"
+                          className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground transition hover:bg-surface-muted hover:text-foreground"
+                          onClick={() => setPassword("")}
+                        >
+                          <EyeOff className="h-3.5 w-3.5" />
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        aria-label="Show password"
+                        title="Show password"
+                        className="flex h-7 w-7 items-center justify-center rounded-md border border-border bg-surface text-muted-foreground transition hover:bg-surface-muted hover:text-foreground"
+                        onClick={() => void post("reveal", {})}
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </span>
+                </div>
+                <code className="mt-1 block truncate text-sm font-semibold">{password || "••••••••••"}</code>
+              </div>
+            </div>
+            <div className="mt-4 flex items-center justify-between gap-3 border-t border-border pt-3">
+              <p className="text-xs text-muted-foreground">Enter these on the customer's router or CPE.</p>
+              <button
+                type="button"
+                className="shrink-0 text-xs font-semibold text-primary hover:underline"
+                onClick={() => void post("password", {})}
+              >
+                Reset
+              </button>
+            </div>
+          </section>
+
+          <section className="rounded-2xl border border-border bg-surface p-5 shadow-card">
+            <div className="flex items-center gap-2.5">
+              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
+                <Wifi className="h-4 w-4" />
+              </span>
+              <h2 className="text-sm font-semibold">Live connection</h2>
+              <span className={`ml-auto h-2.5 w-2.5 rounded-full ${connectionDot}`} aria-hidden="true" />
+            </div>
+            <dl className="mt-3 divide-y divide-border">
+              {[
+                { label: "State", value: connectionLabel },
+                { label: "IP", value: subscriber.live.ip || "Not connected" },
+                { label: "MAC", value: subscriber.live.mac || "—" },
+                { label: "Uptime", value: subscriber.live.uptime || "—" },
+                { label: "Router", value: subscriber.live.router },
+                { label: "Last seen", value: subscriber.live.lastSeen ?? "Never" },
+              ].map((item) => (
+                <div key={item.label} className="flex items-baseline justify-between gap-3 py-2.5">
+                  <dt className="text-xs text-muted-foreground">{item.label}</dt>
+                  <dd className="min-w-0 break-words text-right text-sm font-medium text-foreground">{item.value}</dd>
+                </div>
+              ))}
+            </dl>
+          </section>
+        </aside>
+      </div>
 
       {message ? <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{message}</p> : null}
 

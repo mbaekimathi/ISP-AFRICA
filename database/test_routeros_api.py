@@ -332,6 +332,14 @@ class RouterOsApiTests(unittest.TestCase):
                 done,
                 done,
                 done,
+                done,
+                done,
+                done,
+                done,
+                done,
+                done,
+                done,
+                done,
             ]
         )
         report = routeros_api.apply_pppoe_enforcement("10.88.0.5", "secret-password", True, opener=lambda _address, _timeout: sock)
@@ -346,6 +354,8 @@ class RouterOsApiTests(unittest.TestCase):
         self.assertIn(b"dst-address-list=pppoe-expired", sent)
         self.assertIn(b"/ip/firewall/nat/add", sent)
         self.assertIn(b"to-ports=8790", sent)
+        self.assertIn(b"/ip/firewall/connection/print", sent)
+        self.assertIn(b"/ipv6/firewall/filter/add", sent)
         self.assertIn(b"/interface/pppoe-server/server/add", sent)
         self.assertNotIn(b"/system/script", sent)
         self.assertNotIn(b"secret-password", b"".join(sock.sent[1:]))

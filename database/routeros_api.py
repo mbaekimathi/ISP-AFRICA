@@ -763,6 +763,8 @@ PPPOE_EXPIRED_DROP_BACK = "isp-centric-pppoe-expired-back"
 PPPOE_DROP_PPP = "isp-centric-pppoe-drop-ppp"
 PPPOE_DROP_PPP_BACK = "isp-centric-pppoe-drop-ppp-back"
 PPPOE_DROP = "isp-centric-pppoe-drop"
+PPPOE_DROP_PPP_V6 = "isp-centric-pppoe-drop-ppp-v6"
+PPPOE_DROP_V6 = "isp-centric-pppoe-drop-v6"
 PPPOE_SUBSCRIBED = "pppoe-subscribed"
 PPPOE_SUSPENDED = "pppoe-suspended"
 PPPOE_EXPIRED = "pppoe-expired"
@@ -788,6 +790,7 @@ PPPOE_FILTERS = (
     PPPOE_DROP_PPP_BACK,
     PPPOE_DROP,
 )
+PPPOE_V6_FILTERS = (PPPOE_DROP_PPP_V6, PPPOE_DROP_V6)
 PPPOE_NATS = (PPPOE_PORTAL_NAT_SUS, PPPOE_PORTAL_NAT_EXP)
 
 
@@ -984,12 +987,12 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
         ["/ip/firewall/filter/add", "=chain=forward", "=action=drop", f"=src-address-list={PPPOE_EXPIRED}", f"=comment={PPPOE_EXPIRED_DROP}", "=place-before=0"],
         ["/ip/firewall/filter/add", "=chain=forward", "=action=drop", f"=dst-address-list={PPPOE_SUSPENDED}", f"=comment={PPPOE_SUSPEND_BACK}", "=place-before=0"],
         ["/ip/firewall/filter/add", "=chain=forward", "=action=drop", f"=src-address-list={PPPOE_SUSPENDED}", f"=comment={PPPOE_SUSPEND}", "=place-before=0"],
-        ["/ip/firewall/filter/add", "=chain=forward", "=action=accept", f"=dst-address-list={PPPOE_EXPIRED}", f"=src-address={portal_ip}", f"=comment={PPPOE_PORTAL_EXP_DOWN}", "=place-before=0"],
-        ["/ip/firewall/filter/add", "=chain=forward", "=action=accept", f"=src-address-list={PPPOE_EXPIRED}", f"=dst-address={portal_ip}", f"=comment={PPPOE_PORTAL_EXP_UP}", "=place-before=0"],
-        ["/ip/firewall/filter/add", "=chain=forward", "=action=accept", f"=dst-address-list={PPPOE_SUSPENDED}", f"=src-address={portal_ip}", f"=comment={PPPOE_PORTAL_SUS_DOWN}", "=place-before=0"],
-        ["/ip/firewall/filter/add", "=chain=forward", "=action=accept", f"=src-address-list={PPPOE_SUSPENDED}", f"=dst-address={portal_ip}", f"=comment={PPPOE_PORTAL_SUS_UP}", "=place-before=0"],
-        ["/ip/firewall/filter/add", "=chain=forward", "=action=accept", f"=dst-address-list={PPPOE_SUBSCRIBED}", f"=comment={PPPOE_ALLOW_BACK}", "=place-before=0"],
-        ["/ip/firewall/filter/add", "=chain=forward", "=action=accept", f"=src-address-list={PPPOE_SUBSCRIBED}", f"=comment={PPPOE_ALLOW}", "=place-before=0"],
+        ["/ip/firewall/filter/add", "=chain=forward", "=action=accept", f"=dst-address-list={PPPOE_EXPIRED}", f"=src-address={portal_ip}", "=out-interface=all-ppp", f"=comment={PPPOE_PORTAL_EXP_DOWN}", "=place-before=0"],
+        ["/ip/firewall/filter/add", "=chain=forward", "=action=accept", f"=src-address-list={PPPOE_EXPIRED}", f"=dst-address={portal_ip}", "=in-interface=all-ppp", f"=comment={PPPOE_PORTAL_EXP_UP}", "=place-before=0"],
+        ["/ip/firewall/filter/add", "=chain=forward", "=action=accept", f"=dst-address-list={PPPOE_SUSPENDED}", f"=src-address={portal_ip}", "=out-interface=all-ppp", f"=comment={PPPOE_PORTAL_SUS_DOWN}", "=place-before=0"],
+        ["/ip/firewall/filter/add", "=chain=forward", "=action=accept", f"=src-address-list={PPPOE_SUSPENDED}", f"=dst-address={portal_ip}", "=in-interface=all-ppp", f"=comment={PPPOE_PORTAL_SUS_UP}", "=place-before=0"],
+        ["/ip/firewall/filter/add", "=chain=forward", "=action=accept", f"=dst-address-list={PPPOE_SUBSCRIBED}", "=out-interface=all-ppp", f"=comment={PPPOE_ALLOW_BACK}", "=place-before=0"],
+        ["/ip/firewall/filter/add", "=chain=forward", "=action=accept", f"=src-address-list={PPPOE_SUBSCRIBED}", "=in-interface=all-ppp", f"=comment={PPPOE_ALLOW}", "=place-before=0"],
     ]
     for rule in rules:
         _add_placed(sock, reader, rule)
@@ -1030,6 +1033,39 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None):
         for index in range(len(order) - 2, -1, -1):
             if ours.get(order[index]) and ours.get(order[index + 1]):
                 _move_filter(sock, reader, ours[order[index]], ours[order[index + 1]])
+    prefix = PPPOE_LOCAL.rsplit(".", 1)[0] + "."
+    try:
+        connections = talk(sock, reader, ["/ip/firewall/connection/print"])
+    except RouterError:
+        connections = []
+    for row in connections:
+        touched = any(
+            (row.get(key) or "").startswith(prefix)
+            for key in ("src-address", "dst-address", "reply-src-address", "reply-dst-address")
+        )
+        if touched and _row_id(row):
+            try:
+                talk(sock, reader, ["/ip/firewall/connection/remove", f"=.id={_row_id(row)}"])
+            except RouterError:
+                pass
+    try:
+        for row in talk(sock, reader, ["/ipv6/firewall/filter/print"]):
+            if row.get("comment") in PPPOE_V6_FILTERS and _row_id(row):
+                talk(sock, reader, ["/ipv6/firewall/filter/remove", f"=.id={_row_id(row)}"])
+        for target, comment in (("all-ppp", PPPOE_DROP_PPP_V6), (iface, PPPOE_DROP_V6)):
+            talk(
+                sock,
+                reader,
+                [
+                    "/ipv6/firewall/filter/add",
+                    "=chain=forward",
+                    "=action=drop",
+                    f"=in-interface={target}",
+                    f"=comment={comment}",
+                ],
+            )
+    except RouterError:
+        pass
     nats = talk(sock, reader, ["/ip/firewall/nat/print"])
     for comment, address_list in ((PPPOE_PORTAL_NAT_SUS, PPPOE_SUSPENDED), (PPPOE_PORTAL_NAT_EXP, PPPOE_EXPIRED)):
         matched = [row for row in nats if row.get("comment") == comment and _row_id(row)]
@@ -1079,6 +1115,12 @@ def _disable_pppoe(sock, reader, iface):
     for row in talk(sock, reader, ["/ip/firewall/filter/print"]):
         if row.get("comment") in PPPOE_FILTERS and _row_id(row):
             talk(sock, reader, ["/ip/firewall/filter/remove", f"=.id={_row_id(row)}"])
+    try:
+        for row in talk(sock, reader, ["/ipv6/firewall/filter/print"]):
+            if row.get("comment") in PPPOE_V6_FILTERS and _row_id(row):
+                talk(sock, reader, ["/ipv6/firewall/filter/remove", f"=.id={_row_id(row)}"])
+    except RouterError:
+        pass
     for row in talk(sock, reader, ["/ip/firewall/nat/print"]):
         if row.get("comment") in PPPOE_NATS and _row_id(row):
             talk(sock, reader, ["/ip/firewall/nat/remove", f"=.id={_row_id(row)}"])

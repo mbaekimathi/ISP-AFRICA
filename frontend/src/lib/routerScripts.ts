@@ -376,27 +376,39 @@ export function buildPppoeScript(input: { iface: string; service: string; pool: 
     `:if ([:len [/ip pool find where name="${pool}"]] = 0) do={ /ip pool add name=${pool} ranges=${range} };`,
   ];
   if (input.enforced) {
+    const prefix = localAddress.split(".").slice(0, 3).join(".");
     lines.push(
       `:if ([:len [/ppp profile find where name="${pool}-profile"]] = 0) do={ /ppp profile add name=${pool}-profile local-address=${localAddress} remote-address=${pool} only-one=yes };`,
       `:if ([:len [/interface pppoe-server server find where service-name="${service}"]] = 0) do={ /interface pppoe-server server add service-name=${service} interface=${iface} default-profile=${pool}-profile disabled=no } else={ /interface pppoe-server server set [find where service-name="${service}"] disabled=no };`,
       `/ip firewall filter remove [find where comment="isp-centric-pppoe-allow"];`,
+      `/ip firewall filter remove [find where comment="isp-centric-pppoe-allow-back"];`,
       `/ip firewall filter remove [find where comment="isp-centric-pppoe-suspended"];`,
       `/ip firewall filter remove [find where comment="isp-centric-pppoe-drop-ppp"];`,
       `/ip firewall filter remove [find where comment="isp-centric-pppoe-drop"];`,
       ':local fwdAnchor ""; :do { :set fwdAnchor [:pick [/ip firewall filter find where chain=forward] 0] } on-error={};',
-      `:do { /ip firewall filter add chain=forward action=drop in-interface=${iface} comment=isp-centric-pppoe-drop place-before=$fwdAnchor } on-error={ /ip firewall filter add chain=forward action=drop in-interface=${iface} comment=isp-centric-pppoe-drop };`,
-      `:do { /ip firewall filter add chain=forward action=drop in-interface=all-ppp comment=isp-centric-pppoe-drop-ppp place-before=$fwdAnchor } on-error={ /ip firewall filter add chain=forward action=drop in-interface=all-ppp comment=isp-centric-pppoe-drop-ppp };`,
+      `:do { /ip firewall filter add chain=forward action=accept src-address-list=pppoe-subscribed in-interface=all-ppp comment=isp-centric-pppoe-allow place-before=$fwdAnchor } on-error={ /ip firewall filter add chain=forward action=accept src-address-list=pppoe-subscribed in-interface=all-ppp comment=isp-centric-pppoe-allow };`,
+      `:do { /ip firewall filter add chain=forward action=accept dst-address-list=pppoe-subscribed out-interface=all-ppp comment=isp-centric-pppoe-allow-back place-before=$fwdAnchor } on-error={ /ip firewall filter add chain=forward action=accept dst-address-list=pppoe-subscribed out-interface=all-ppp comment=isp-centric-pppoe-allow-back };`,
       `:do { /ip firewall filter add chain=forward action=drop src-address-list=pppoe-suspended comment=isp-centric-pppoe-suspended place-before=$fwdAnchor } on-error={ /ip firewall filter add chain=forward action=drop src-address-list=pppoe-suspended comment=isp-centric-pppoe-suspended };`,
-      `:do { /ip firewall filter add chain=forward action=accept src-address-list=pppoe-subscribed comment=isp-centric-pppoe-allow place-before=$fwdAnchor } on-error={ /ip firewall filter add chain=forward action=accept src-address-list=pppoe-subscribed comment=isp-centric-pppoe-allow };`,
+      `:do { /ip firewall filter add chain=forward action=drop in-interface=all-ppp comment=isp-centric-pppoe-drop-ppp place-before=$fwdAnchor } on-error={ /ip firewall filter add chain=forward action=drop in-interface=all-ppp comment=isp-centric-pppoe-drop-ppp };`,
+      `:do { /ip firewall filter add chain=forward action=drop in-interface=${iface} comment=isp-centric-pppoe-drop place-before=$fwdAnchor } on-error={ /ip firewall filter add chain=forward action=drop in-interface=${iface} comment=isp-centric-pppoe-drop };`,
+      `:do { :foreach conn in=[/ip firewall connection find where src-address~"${prefix}."] do={ /ip firewall connection remove $conn } } on-error={};`,
+      `:do { :foreach conn in=[/ip firewall connection find where dst-address~"${prefix}."] do={ /ip firewall connection remove $conn } } on-error={};`,
+      `:do { /ipv6 firewall filter remove [find where comment="isp-centric-pppoe-drop-v6"] } on-error={};`,
+      `:do { /ipv6 firewall filter remove [find where comment="isp-centric-pppoe-drop-ppp-v6"] } on-error={};`,
+      `:do { /ipv6 firewall filter add chain=forward action=drop in-interface=all-ppp comment=isp-centric-pppoe-drop-ppp-v6 } on-error={};`,
+      `:do { /ipv6 firewall filter add chain=forward action=drop in-interface=${iface} comment=isp-centric-pppoe-drop-v6 } on-error={};`,
       `:if ([:len [/ip dhcp-server find where interface="${iface}"]] > 0) do={ /ip dhcp-server set [find where interface="${iface}"] disabled=yes };`,
     );
   } else {
     lines.push(
       `:if ([:len [/interface pppoe-server server find where service-name="${service}"]] > 0) do={ /interface pppoe-server server set [find where service-name="${service}"] disabled=yes };`,
       `:if ([:len [/ip firewall filter find where comment="isp-centric-pppoe-allow"]] > 0) do={ /ip firewall filter remove [find where comment="isp-centric-pppoe-allow"] };`,
+      `:if ([:len [/ip firewall filter find where comment="isp-centric-pppoe-allow-back"]] > 0) do={ /ip firewall filter remove [find where comment="isp-centric-pppoe-allow-back"] };`,
       `:if ([:len [/ip firewall filter find where comment="isp-centric-pppoe-suspended"]] > 0) do={ /ip firewall filter remove [find where comment="isp-centric-pppoe-suspended"] };`,
       `:if ([:len [/ip firewall filter find where comment="isp-centric-pppoe-drop-ppp"]] > 0) do={ /ip firewall filter remove [find where comment="isp-centric-pppoe-drop-ppp"] };`,
       `:if ([:len [/ip firewall filter find where comment="isp-centric-pppoe-drop"]] > 0) do={ /ip firewall filter remove [find where comment="isp-centric-pppoe-drop"] };`,
+      `:do { /ipv6 firewall filter remove [find where comment="isp-centric-pppoe-drop-v6"] } on-error={};`,
+      `:do { /ipv6 firewall filter remove [find where comment="isp-centric-pppoe-drop-ppp-v6"] } on-error={};`,
       `:if ([:len [/ip address find where interface="${iface}" and address="${address}"]] = 0) do={ /ip address add address=${address} interface=${iface} comment=isp-centric-dhcp };`,
       `:if ([:len [/ip dhcp-server find where name="${pool}"]] = 0) do={ /ip dhcp-server add name=${pool} interface=${iface} address-pool=${pool} disabled=no } else={ /ip dhcp-server set [find where name="${pool}"] disabled=no };`,
       `:if ([:len [/ip dhcp-server network find where address="${network}"]] = 0) do={ /ip dhcp-server network add address=${network} gateway=${localAddress} dns-server=${localAddress} };`,
@@ -531,7 +543,7 @@ export function buildRecoveryScripts(input: { backup: string; password: string }
     ? script(
         [
           "# Recreates the API user that can change PPPoE enforcement, and allows WinBox only from the management tunnel.",
-          ':if ([:len [/user group find where name="isp-centric-api"]] = 0) do={ /user group add name=isp-centric-api policy=read,write,api,winbox,test } else={ /user group set [find where name="isp-centric-api"] policy=read,write,api,winbox,test };',
+          ':if ([:len [/user group find where name="isp-centric-api"]] = 0) do={ /user group add name=isp-centric-api policy=read,write,api,winbox,test,ftp } else={ /user group set [find where name="isp-centric-api"] policy=read,write,api,winbox,test,ftp };',
           `:if ([:len [/user find where name="isp-centric"]] = 0) do={ /user add name=isp-centric group=isp-centric-api password="${password}" } else={ /user set [find where name="isp-centric"] group=isp-centric-api password="${password}" };`,
           "/ip service set winbox disabled=no;",
           ':local inAnchor ""; :do { :set inAnchor [:pick [/ip firewall filter find where chain=input action=drop] 0] } on-error={};',

@@ -89,6 +89,14 @@ assert.equal(pppoe.applicable, true);
 assert.ok(pppoe.script.includes("/interface pppoe-server server add"));
 assert.ok(pppoe.script.includes("in-interface=all-ppp"));
 assert.ok(pppoe.script.includes("action=drop"));
+assert.ok(pppoe.script.includes("accept src-address-list=pppoe-subscribed in-interface=all-ppp"));
+assert.ok(pppoe.script.includes("accept dst-address-list=pppoe-subscribed out-interface=all-ppp"));
+assert.ok(
+  pppoe.script.indexOf("comment=isp-centric-pppoe-allow place-before") <
+    pppoe.script.indexOf("comment=isp-centric-pppoe-drop-ppp place-before"),
+);
+assert.ok(pppoe.script.includes("/ip firewall connection remove"));
+assert.ok(pppoe.script.includes("/ipv6 firewall filter add"));
 
 const openPppoe = buildPppoeScript({
   iface: "ether2",
@@ -102,6 +110,8 @@ assert.equal(openPppoe.applicable, true);
 assert.ok(openPppoe.script.includes("/ip dhcp-server add"));
 assert.ok(openPppoe.script.includes("disabled=yes"));
 assert.ok(openPppoe.script.includes("filter remove"));
+assert.ok(openPppoe.script.includes("isp-centric-pppoe-allow-back"));
+assert.ok(openPppoe.script.includes("/ipv6 firewall filter remove"));
 assert.equal(openPppoe.script.includes("action=drop"), false);
 
 const hotspot = buildHotspotScript({
