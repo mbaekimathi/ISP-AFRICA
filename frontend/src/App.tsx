@@ -20,8 +20,10 @@ import { ClientsPage } from "@/pages/ClientsPage";
 import { ClientUsagePage } from "@/pages/ClientUsagePage";
 import { WifiPaymentPage } from "@/pages/WifiPaymentPage";
 import { HotspotClientPage } from "@/pages/HotspotClientPage";
+import { ImportClientsPage } from "@/pages/ImportClientsPage";
 import { PppoeCustomerPage } from "@/pages/PppoeCustomerPage";
 import { PppoeCustomerTransactionsPage } from "@/pages/PppoeCustomerTransactionsPage";
+import { PppoeRemoteAccessPage } from "@/pages/PppoeRemoteAccessPage";
 import { PppoeRegisterPage } from "@/pages/PppoeRegisterPage";
 import { IspCompanyPage } from "@/pages/IspCompanyPage";
 import { IspThemePage } from "@/pages/IspThemePage";
@@ -75,8 +77,8 @@ export function App() {
             <Route path="/:code/mikrotiks" element={<MikrotiksPage />} />
             <Route path="/mikrotiks/onboard" element={<OnboardMikrotikPage />} />
             <Route path="/:code/mikrotiks/onboard" element={<OnboardMikrotikPage />} />
-            <Route path="/mikrotiks/import-clients" element={<SectionPage title="Import Clients" />} />
-            <Route path="/:code/mikrotiks/import-clients" element={<SectionPage title="Import Clients" />} />
+            <Route path="/mikrotiks/import-clients" element={<ImportClientsPage />} />
+            <Route path="/:code/mikrotiks/import-clients" element={<ImportClientsPage />} />
             <Route path="/mikrotiks/:deviceId/ports" element={<MikrotikPortPage />} />
             <Route path="/:code/mikrotiks/:deviceId/ports" element={<MikrotikPortPage />} />
             <Route path="/mikrotiks/:deviceId/pppoe" element={<MikrotikPppoePage />} />
@@ -93,8 +95,10 @@ export function App() {
             <Route path="/:code/pppoe/register" element={<PppoeRegisterPage />} />
             <Route path="/pppoe/:subscriberId" element={<PppoeCustomerPage />} />
             <Route path="/pppoe/:subscriberId/transactions" element={<PppoeCustomerTransactionsPage />} />
+            <Route path="/pppoe/:subscriberId/remote-access" element={<PppoeRemoteAccessPage />} />
             <Route path="/:code/pppoe/:subscriberId" element={<PppoeCustomerPage />} />
             <Route path="/:code/pppoe/:subscriberId/transactions" element={<PppoeCustomerTransactionsPage />} />
+            <Route path="/:code/pppoe/:subscriberId/remote-access" element={<PppoeRemoteAccessPage />} />
             <Route path="/clients" element={<ClientsPage kind="pppoe" />} />
             <Route path="/clients/payments" element={<WifiPaymentPage kind="pppoe" />} />
             <Route path="/clients/usage" element={<ClientUsagePage kind="pppoe" />} />

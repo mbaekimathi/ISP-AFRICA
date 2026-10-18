@@ -81,11 +81,12 @@ export function PppoeCustomerTransactionsPage() {
   const billing = billingLabelFor(subscriber.billingStatus);
   const outstandingDue = Number(subscriber.billing.outstanding) > 0;
   const today = new Date().toISOString().slice(0, 10);
+  const subscriptionLive = Boolean(subscriber.billing.expiry && subscriber.billing.expiry > today);
   const paidAmount = Number(amount);
   const packagePrice = Number(subscriber.billing.price);
   const purchasedDays =
     packagePrice > 0 && paidAmount > 0 ? Math.max(1, Math.ceil((paidAmount * subscriber.billing.cycleDays) / packagePrice)) : 0;
-  const anchorDay = startDate || (subscriber.billing.expiry && subscriber.billing.expiry > today ? subscriber.billing.expiry : today);
+  const anchorDay = subscriptionLive ? (subscriber.billing.expiry as string) : startDate || today;
   const dueDate = purchasedDays > 0 ? shiftDay(anchorDay, purchasedDays) : null;
   const newExpiry = dueDate ? shiftDay(dueDate, subscriber.billing.graceDays) : null;
 
@@ -194,12 +195,14 @@ export function PppoeCustomerTransactionsPage() {
               className="grid gap-3"
               onSubmit={(event) => {
                 event.preventDefault();
-                void post("renew", { amount, mpesaReference: reference, startDate }).then(() => setPayOpen(false));
+                void post("renew", { amount, mpesaReference: reference, ...(!subscriptionLive && startDate ? { startDate } : {}) }).then(() => setPayOpen(false));
               }}
             >
-              <FormField id="payment-start" label="Start date">
-                <input id="payment-start" type="date" className="field" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
-              </FormField>
+              {subscriptionLive ? null : (
+                <FormField id="payment-start" label="Start date">
+                  <input id="payment-start" type="date" className="field" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+                </FormField>
+              )}
               <FormField id="payment-amount" label="Amount (KSh)">
                 <input id="payment-amount" ref={amountRef} className="field" value={amount} onChange={(event) => setAmount(event.target.value)} />
               </FormField>

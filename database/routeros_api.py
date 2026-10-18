@@ -511,9 +511,12 @@ def read_router(host, password, timeout=4, port=API_PORT, opener=None):
     names = identity[0] if identity else {}
     running = []
     for row in interfaces:
+        name = row.get("name") or ""
+        if row.get("dynamic") == "true" or (name.startswith("<") and name.endswith(">")):
+            continue
         running.append(
             {
-                "name": row.get("name") or "",
+                "name": name,
                 "type": row.get("type") or "",
                 "running": row.get("running") == "true",
                 "disabled": row.get("disabled") == "true",

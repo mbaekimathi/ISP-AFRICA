@@ -68,13 +68,20 @@ function linksForPage(pathname: string) {
       { label: "WinBox recovery", to: `/mikrotiks/${id}/recovery` },
     ];
   }
-  if (pathname === "/mikrotiks" || pathname.endsWith("/mikrotiks")) return mikrotikLinks;
+  if (
+    pathname === "/mikrotiks" ||
+    pathname === "/mikrotiks/onboard" ||
+    pathname === "/mikrotiks/import-clients" ||
+    pathname.endsWith("/mikrotiks")
+  )
+    return mikrotikLinks;
   const subscriber = pathname.match(/^\/pppoe\/([^/]+)/);
   if (subscriber && subscriber[1] !== "register") {
     const id = subscriber[1];
     return [
       { label: "Client payments", to: `/pppoe/${id}/transactions` },
       { label: "Client usage", to: `/pppoe/${id}` },
+      { label: "Remote access", to: `/pppoe/${id}/remote-access` },
     ];
   }
   if (pathname === "/clients" || pathname === "/clients/payments" || pathname === "/clients/usage" || pathname.startsWith("/pppoe")) {
@@ -83,6 +90,7 @@ function linksForPage(pathname: string) {
       { label: "PPPoE-payment", to: "/clients/payments" },
       { label: "PPPoE-usage", to: "/clients/usage" },
       { label: "Hotspot-clients", to: "/clients/hotspot" },
+      { label: "Import Clients", to: "/mikrotiks/import-clients" },
     ];
   }
   if (pathname === "/clients/hotspot" || pathname === "/clients/hotspot/payments" || pathname === "/clients/hotspot/usage") {

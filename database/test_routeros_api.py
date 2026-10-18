@@ -93,6 +93,16 @@ class RouterOsApiTests(unittest.TestCase):
                     "=rx-byte=10",
                     "=tx-byte=20",
                 )
+                + sentence(
+                    "!re",
+                    "=name=<pppoe-0703198299>",
+                    "=type=pppoe-in",
+                    "=dynamic=true",
+                    "=running=true",
+                    "=disabled=false",
+                    "=rx-byte=1",
+                    "=tx-byte=1",
+                )
                 + sentence("!done"),
                 sentence("!trap", "=message=no such command") + sentence("!done"),
                 sentence("!re") + sentence("!done"),
@@ -111,6 +121,8 @@ class RouterOsApiTests(unittest.TestCase):
         self.assertEqual(live["freeMemory"], "1 MB")
         self.assertEqual(live["interfaces"][0]["name"], "isp-centric")
         self.assertTrue(live["interfaces"][0]["running"])
+        self.assertEqual(len(live["interfaces"]), 1)
+        self.assertEqual(live["interfaceCount"], 1)
         self.assertIsNone(live["hotspotActive"])
         self.assertEqual(live["pppoeActive"], 1)
         self.assertNotIn(b"secret-password", b"".join(sock.sent[1:]))

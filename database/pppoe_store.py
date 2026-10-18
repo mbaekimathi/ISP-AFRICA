@@ -2075,6 +2075,147 @@ def migrate(cursor, client_id, subscriber_id, payload):
     return subscriber_detail(cursor, client_id, subscriber_id)
 
 
+def transfer_subscribers(cursor, client_id, payload):
+    """Move several clients to one router, keeping each client's current package.
+
+    When a client's package is not yet sold on the target router it is linked
+    there automatically, so the move never changes what the client pays for.
+    Each client is migrated on its own transaction — one failure does not stop
+    the rest.
+    """
+    router = load_router(cursor, client_id, str(payload.get("routerId") or ""))
+    if not router or router["status"] != "active":
+        raise PppoeError(400, "Choose an active router.")
+    raw_ids = payload.get("subscriberIds")
+    ids = [str(item) for item in raw_ids if str(item).strip()][:200] if isinstance(raw_ids, list) else []
+    if not ids:
+        raise PppoeError(400, "Choose at least one client.")
+    linked_packages = set()
+    moved = []
+    failed = []
+    for subscriber_id in ids:
+        try:
+            row = require_owned(cursor, client_id, subscriber_id)
+        except PppoeError:
+            failed.append({"id": subscriber_id, "name": "", "error": "That PPPoE client was not found."})
+            continue
+        name = f"{row['first_name']} {row['last_name']}".strip() or row["pppoe_username"]
+        if str(row["router_id"]) == router["id"]:
+            failed.append({"id": subscriber_id, "name": name, "error": f"Already on {router['name']}."})
+            continue
+        package_id = str(row["package_id"])
+        try:
+            if package_id not in linked_packages:
+                package = load_package(cursor, client_id, package_id)
+                if package and router["id"] not in {str(item) for item in package["routers"]}:
+                    cursor.execute(
+                        "UPDATE isp_packages SET availability_routers = %s WHERE id = %s AND client_id = %s",
+                        (json.dumps([str(item) for item in package["routers"]] + [router["id"]]), package_id, client_id),
+                    )
+            migrate(cursor, client_id, subscriber_id, {"routerId": router["id"]})
+            linked_packages.add(package_id)
+            moved.append({"id": subscriber_id, "name": name})
+        except PppoeError as error:
+            failed.append({"id": subscriber_id, "name": name, "error": str(error)})
+        except Exception:
+            failed.append({"id": subscriber_id, "name": name, "error": "The move could not be saved."})
+    return {"router": router["name"], "moved": moved, "failed": failed}
+
+
+IMPORT_FIELDS = {
+    "firstName", "lastName", "phone", "email", "buildingName", "houseNumber",
+    "username", "password", "serial", "startDate", "billingCycle", "cycleDays",
+    "price", "initialPayment", "discount", "discountReason", "graceDays",
+    "sessionLimit", "staticIp", "accessInterface", "mtu", "autoRenew",
+    "authMethod", "mpesaReference", "routerId", "packageId",
+}
+
+
+def resolve_named_router(cursor, client_id, text):
+    router = load_router(cursor, client_id, text)
+    if router:
+        return router
+    cursor.execute(
+        "SELECT id FROM isp_mikrotik_devices WHERE client_id = %s AND status = 'active' AND LOWER(name) = LOWER(%s) LIMIT 1",
+        (client_id, text),
+    )
+    row = cursor.fetchone()
+    return load_router(cursor, client_id, row["id"]) if row else None
+
+
+def resolve_named_package(cursor, client_id, text, router_id=None):
+    package = load_package(cursor, client_id, text)
+    if package:
+        return package
+    cursor.execute(
+        "SELECT id FROM isp_packages WHERE client_id = %s AND status = 'active' AND LOWER(name) = LOWER(%s) ORDER BY name",
+        (client_id, text),
+    )
+    fallback = None
+    for row in cursor.fetchall():
+        package = load_package(cursor, client_id, row["id"])
+        if not package:
+            continue
+        fallback = fallback or package
+        if router_id and router_id in {str(item) for item in package["routers"]}:
+            return package
+    return fallback
+
+
+def import_subscribers(cursor, client_id, payload):
+    """Register many PPPoE clients from a filled-in form — one dict per row.
+
+    Router and package are matched by name (case-insensitive) when no id is
+    given, and an empty password gets a generated one. Each row registers in
+    its own transaction so a bad row never blocks the rest.
+    """
+    rows = payload.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise PppoeError(400, "Upload a form with at least one client row.")
+    created = []
+    failed = []
+    for index, entry in enumerate(rows[:500], start=1):
+        if not isinstance(entry, dict):
+            failed.append({"row": index, "name": "", "error": "That row could not be read."})
+            continue
+        record = {key: value for key, value in entry.items() if key in IMPORT_FIELDS and str(value).strip() != ""}
+        record.update({key: entry[key] for key in ("router", "package") if str(entry.get(key) or "").strip()})
+        name = f"{record.get('firstName', '')} {record.get('lastName', '')}".strip() or str(record.get("username") or "")
+        try:
+            router_text = str(record.pop("router", "") or "").strip()
+            router = resolve_named_router(cursor, client_id, router_text) if router_text else None
+            if router_text and not router:
+                raise PppoeError(400, f"Router '{router_text}' was not found.")
+            package_text = str(record.pop("package", "") or "").strip()
+            package = resolve_named_package(cursor, client_id, package_text, router["id"] if router else None) if package_text else None
+            if package_text and not package:
+                raise PppoeError(400, f"Package '{package_text}' was not found.")
+            if router:
+                record["routerId"] = router["id"]
+            if package:
+                record["packageId"] = package["id"]
+            if not str(record.get("password") or "").strip():
+                record["password"] = pppoe_service.generate_password()
+            if "autoRenew" in record:
+                record["autoRenew"] = str(record["autoRenew"]).strip().lower() in {"1", "true", "yes", "y", "on"}
+            body = register_subscriber(cursor, client_id, record)
+            created.append(
+                {
+                    "row": index,
+                    "name": name,
+                    "username": body.get("username"),
+                    "password": body.get("password"),
+                    "warnings": [item["message"] for item in body.get("warnings") or []],
+                }
+            )
+        except PppoeError as error:
+            detail = "; ".join(item["message"] for item in (error.details.get("errors") or [])[:3])
+            failed.append({"row": index, "name": name, "error": detail or str(error)})
+        except Exception:
+            failed.append({"row": index, "name": name, "error": "The row could not be saved."})
+    return {"created": created, "failed": failed, "truncated": max(0, len(rows) - 500)}
+
+
 def disconnect(cursor, client_id, subscriber_id, payload):
     row = require_owned(cursor, client_id, subscriber_id)
     if str(payload.get("mode") or "session") == "terminate":
@@ -3159,6 +3300,10 @@ def dispatch(cursor, method, path, payload, token, query):
     if path == "/api/pppoe/jobs" and method == "POST":
         reconcile(cursor, client_id)
         return {"ok": True}, None
+    if path == "/api/pppoe/transfer" and method == "POST":
+        return {"result": transfer_subscribers(cursor, client_id, payload)}, None
+    if path == "/api/pppoe/import" and method == "POST":
+        return {"result": import_subscribers(cursor, client_id, payload)}, None
     prefix = "/api/pppoe/subscribers/"
     if not path.startswith(prefix):
         return None

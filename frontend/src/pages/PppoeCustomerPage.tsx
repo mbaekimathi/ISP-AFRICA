@@ -45,6 +45,7 @@ export type Subscriber = {
   usage: { days: { day: string; bytesIn: number; bytesOut: number }[]; monthBytesIn: number; monthBytesOut: number };
   sessions: { login: string | null; logout: string | null; duration: number; ip: string; bytesIn: number; bytesOut: number; cause: string }[];
   devices: { mac: string; ip: string; name?: string; kind?: "router" | "gadget"; via?: string; sessions: number; seconds: number; bytesIn: number; bytesOut: number; online: boolean; onlineFor: string; lastSeen: string | null }[];
+  accessInterface?: string;
   billing: {
     invoices: { id: string; amount: string; purpose: string; status: string; reference: string; createdAt: string }[];
     payments: { id: string; amount: string; method: string; reference: string; createdAt: string }[];
@@ -102,6 +103,11 @@ function duration(seconds: number) {
   const hours = Math.floor(seconds / 3600);
   const minutes = Math.round((seconds % 3600) / 60);
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function viaLabel(via: string | undefined) {
+  const map: Record<string, string> = { pppoe: "PPPoE", dhcp: "DHCP", hotspot: "Hotspot", voucher: "Voucher", lan: "LAN" };
+  return map[via ?? ""] ?? "";
 }
 
 export function labelFor(status: string): { label: string; tone: Tone } {
@@ -510,7 +516,8 @@ export function PppoeCustomerPage() {
 
   const totalOnline = (usageTrend ?? []).reduce((sum, point) => sum + point.minutes, 0);
   const totalDown = (healthTrend ?? []).reduce((sum, point) => sum + point.minutes, 0);
-  const devices = (subscriber.devices ?? []).filter((device) => device.kind !== "router");
+  const devices = [...(subscriber.devices ?? [])].sort((a, b) => Number(b.online) - Number(a.online));
+  const gadgets = devices.filter((device) => device.kind !== "router");
   const devicesOnline = devices.filter((device) => device.online).length;
   const home = (path: string) => (user ? clientPage(user, path) : path);
   const status = labelFor(subscriber.status);
@@ -681,12 +688,7 @@ export function PppoeCustomerPage() {
           </div>
 
           <div className="mt-5 flex flex-wrap items-center gap-x-10 gap-y-5">
-            <button
-              type="button"
-              aria-expanded={profileOpen}
-              onClick={() => setProfileOpen((open) => !open)}
-              className="flex min-w-0 items-center gap-4 rounded-xl text-left"
-            >
+            <div className="flex min-w-0 items-center gap-4">
               <div
                 className="relative flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-primary-foreground text-lg font-semibold text-primary shadow-sm"
                 aria-hidden="true"
@@ -700,16 +702,24 @@ export function PppoeCustomerPage() {
                     {subscriber.firstName} {subscriber.lastName}
                   </h1>
                   <span className="shrink-0 rounded-full bg-primary-foreground/15 px-2.5 py-0.5 text-[11px] font-semibold">{status.label}</span>
-                  <ChevronDown
-                    className={`h-4 w-4 shrink-0 text-primary-foreground/70 transition-transform ${profileOpen ? "rotate-180" : ""}`}
-                    aria-hidden="true"
-                  />
                 </div>
                 <p className="mt-0.5 truncate text-sm text-primary-foreground/75">
                   {subscriber.phone} · {subscriber.routerName} · {subscriber.packageName}
                 </p>
+                <button
+                  type="button"
+                  aria-expanded={profileOpen}
+                  onClick={() => setProfileOpen((open) => !open)}
+                  className="mt-1.5 inline-flex items-center gap-1 text-xs font-semibold text-primary-foreground/70 transition hover:text-primary-foreground"
+                >
+                  {profileOpen ? "Hide details" : "Details"}
+                  <ChevronDown
+                    className={`h-3.5 w-3.5 transition-transform ${profileOpen ? "rotate-180" : ""}`}
+                    aria-hidden="true"
+                  />
+                </button>
               </div>
-            </button>
+            </div>
 
             <div className="grid min-w-[18rem] flex-1 grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
               <Stat label="Status" value={statusLabel} valueClass={statusTone} hint={statusHint} hintClass={statusTone} />
@@ -728,111 +738,115 @@ export function PppoeCustomerPage() {
             </div>
           </div>
 
-          <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4 border-t border-primary-foreground/15 pt-4 sm:grid-cols-3 xl:grid-cols-6">
-            <Stat
-              label="Username"
-              value={
-                <>
-                  <code className="truncate">{subscriber.username}</code>
+          {profileOpen ? (
+            <div className="mt-5 space-y-5 rounded-2xl bg-primary-foreground/10 p-4 backdrop-blur-sm">
+              <div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="text-xs font-semibold uppercase tracking-wide text-primary-foreground/70">Access &amp; connection</h2>
                   <button
                     type="button"
-                    aria-label="Copy username"
-                    title="Copy username"
-                    className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
-                    onClick={() => void navigator.clipboard.writeText(subscriber.username)}
+                    className="rounded-lg bg-primary-foreground/15 px-3 py-1.5 text-xs font-semibold transition hover:bg-primary-foreground/25"
+                    onClick={() => setDialog("password")}
                   >
-                    <Copy className="h-3.5 w-3.5" />
+                    Manage password
                   </button>
-                </>
-              }
-            />
-            <Stat
-              label="Password"
-              value={
-                <>
-                  <code className="truncate">{password || "••••••••••"}</code>
-                  {password ? (
-                    <>
+                </div>
+                <dl className="mt-2 grid gap-x-8 sm:grid-cols-2">
+                  <div className="flex items-baseline justify-between gap-3 border-b border-primary-foreground/10 py-2">
+                    <dt className="text-xs text-primary-foreground/60">Username</dt>
+                    <dd className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
+                      <code className="truncate">{subscriber.username}</code>
                       <button
                         type="button"
-                        aria-label="Copy password"
-                        title="Copy password"
+                        aria-label="Copy username"
+                        title="Copy username"
                         className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
-                        onClick={() => void navigator.clipboard.writeText(password)}
+                        onClick={() => void navigator.clipboard.writeText(subscriber.username)}
                       >
                         <Copy className="h-3.5 w-3.5" />
                       </button>
-                      <button
-                        type="button"
-                        aria-label="Hide password"
-                        title="Hide password"
-                        className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
-                        onClick={() => setPassword("")}
-                      >
-                        <EyeOff className="h-3.5 w-3.5" />
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      aria-label="Show password"
-                      title="Show password"
-                      className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
-                      onClick={() => {
-                        setDialog("password");
-                        void post("reveal", {});
-                      }}
-                    >
-                      <Eye className="h-3.5 w-3.5" />
-                    </button>
-                  )}
-                </>
-              }
-              hint={
-                <button
-                  type="button"
-                  className="font-medium text-primary-foreground/70 underline-offset-2 transition hover:text-primary-foreground hover:underline"
-                  onClick={() => setDialog("password")}
-                >
-                  Reset
-                </button>
-              }
-            />
-            <Stat label="IP" value={subscriber.live.ip || "Not connected"} />
-            <Stat label="MAC" value={subscriber.live.mac || "—"} />
-            <Stat label="Uptime" value={subscriber.live.uptime || "—"} />
-            <Stat label="Last seen" value={subscriber.live.lastSeen ?? "Never"} />
-          </div>
-
-          {profileOpen ? (
-            <div className="mt-5 rounded-2xl bg-primary-foreground/10 p-4 backdrop-blur-sm">
-              <div className="flex flex-wrap items-center justify-between gap-2">
-                <h2 className="text-xs font-semibold uppercase tracking-wide text-primary-foreground/70">Client details</h2>
-                <button
-                  type="button"
-                  className="rounded-lg bg-primary-foreground/15 px-3 py-1.5 text-xs font-semibold transition hover:bg-primary-foreground/25"
-                  onClick={() => setDialog("edit")}
-                >
-                  Edit
-                </button>
-              </div>
-              <dl className="mt-3 grid gap-x-8 sm:grid-cols-2">
-                {[
-                  { label: "Phone", value: subscriber.phone || "—" },
-                  { label: "Email", value: subscriber.email || "—" },
-                  { label: "Building", value: subscriber.buildingName || "—" },
-                  { label: "House", value: subscriber.houseNumber || "—" },
-                  { label: "Device serial", value: subscriber.serial || "—" },
-                  { label: "IP assignment", value: subscriber.staticIp || "From pool" },
-                  { label: "Router", value: subscriber.routerName || "—" },
-                  { label: "Package", value: subscriber.packageName || "—" },
-                ].map((item) => (
-                  <div key={item.label} className="flex items-baseline justify-between gap-3 border-b border-primary-foreground/10 py-2">
-                    <dt className="text-xs text-primary-foreground/60">{item.label}</dt>
-                    <dd className="min-w-0 break-words text-right text-sm font-medium">{item.value}</dd>
+                    </dd>
                   </div>
-                ))}
-              </dl>
+                  <div className="flex items-baseline justify-between gap-3 border-b border-primary-foreground/10 py-2">
+                    <dt className="text-xs text-primary-foreground/60">Password</dt>
+                    <dd className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
+                      <code className="truncate">{password || "••••••••••"}</code>
+                      {password ? (
+                        <>
+                          <button
+                            type="button"
+                            aria-label="Copy password"
+                            title="Copy password"
+                            className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
+                            onClick={() => void navigator.clipboard.writeText(password)}
+                          >
+                            <Copy className="h-3.5 w-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            aria-label="Hide password"
+                            title="Hide password"
+                            className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
+                            onClick={() => setPassword("")}
+                          >
+                            <EyeOff className="h-3.5 w-3.5" />
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          aria-label="Show password"
+                          title="Show password"
+                          className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
+                          onClick={() => void post("reveal", {})}
+                        >
+                          <Eye className="h-3.5 w-3.5" />
+                        </button>
+                      )}
+                    </dd>
+                  </div>
+                  {[
+                    { label: "IP", value: subscriber.live.ip || "Not connected" },
+                    { label: "MAC", value: subscriber.live.mac || "—" },
+                    { label: "Uptime", value: subscriber.live.uptime || "—" },
+                    { label: "Last seen", value: subscriber.live.lastSeen ?? "Never" },
+                  ].map((item) => (
+                    <div key={item.label} className="flex items-baseline justify-between gap-3 border-b border-primary-foreground/10 py-2">
+                      <dt className="text-xs text-primary-foreground/60">{item.label}</dt>
+                      <dd className="min-w-0 break-words text-right text-sm font-medium">{item.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="text-xs font-semibold uppercase tracking-wide text-primary-foreground/70">Client details</h2>
+                  <button
+                    type="button"
+                    className="rounded-lg bg-primary-foreground/15 px-3 py-1.5 text-xs font-semibold transition hover:bg-primary-foreground/25"
+                    onClick={() => setDialog("edit")}
+                  >
+                    Edit
+                  </button>
+                </div>
+                <dl className="mt-2 grid gap-x-8 sm:grid-cols-2">
+                  {[
+                    { label: "Phone", value: subscriber.phone || "—" },
+                    { label: "Email", value: subscriber.email || "—" },
+                    { label: "Building", value: subscriber.buildingName || "—" },
+                    { label: "House", value: subscriber.houseNumber || "—" },
+                    { label: "Device serial", value: subscriber.serial || "—" },
+                    { label: "IP assignment", value: subscriber.staticIp || "From pool" },
+                    { label: "Router", value: subscriber.routerName || "—" },
+                    { label: "Package", value: subscriber.packageName || "—" },
+                  ].map((item) => (
+                    <div key={item.label} className="flex items-baseline justify-between gap-3 border-b border-primary-foreground/10 py-2">
+                      <dt className="text-xs text-primary-foreground/60">{item.label}</dt>
+                      <dd className="min-w-0 break-words text-right text-sm font-medium">{item.value}</dd>
+                    </div>
+                  ))}
+                </dl>
+              </div>
             </div>
           ) : null}
         </div>
@@ -888,21 +902,22 @@ export function PppoeCustomerPage() {
               <div className="flex items-baseline justify-between gap-3">
                 <p className="text-xs font-medium text-muted-foreground">Devices</p>
                 <p className="text-xs tabular-nums text-muted-foreground">
-                  {devicesOnline > 0 ? `${devicesOnline} connected` : "None connected"} · {devices.length} seen
+                  {devicesOnline > 0 ? `${devicesOnline} online` : "None online"} · {gadgets.length} gadget{gadgets.length === 1 ? "" : "s"} · {devices.length} seen
                 </p>
               </div>
               {devices.length === 0 ? (
-                <p className="mt-3 text-sm text-muted-foreground">No gadgets have connected yet.</p>
+                <p className="mt-3 text-sm text-muted-foreground">No devices have connected yet.</p>
               ) : (
                 <div className="mt-3 overflow-x-auto">
-                  <table className="data-table min-w-[34rem]">
+                  <table className="data-table min-w-[44rem]">
                     <thead className="text-xs text-muted-foreground">
                       <tr>
                         <th className="py-2">Device</th>
                         <th className="py-2">Status</th>
                         <th className="py-2">Connected for</th>
+                        <th className="py-2">Downloaded</th>
+                        <th className="py-2">Uploaded</th>
                         <th className="py-2">Last seen</th>
-                        <th className="py-2">Data</th>
                         <th className="py-2">Sessions</th>
                       </tr>
                     </thead>
@@ -910,8 +925,16 @@ export function PppoeCustomerPage() {
                       {devices.map((device) => (
                         <tr key={device.mac} className="border-t border-border">
                           <td className="py-2">
-                            {device.name ? <span className="block font-medium">{device.name}</span> : null}
-                            <code className="text-xs text-muted-foreground">{device.mac}</code>
+                            <span className="flex items-center gap-2 font-medium">
+                              {device.name || (device.kind === "router" ? "Customer router" : "Unknown device")}
+                              {device.kind === "router" ? (
+                                <span className="rounded-full bg-primary/10 px-1.5 py-px text-[10px] font-semibold text-primary">Router</span>
+                              ) : null}
+                            </span>
+                            <code className="text-xs text-muted-foreground">
+                              {device.mac}
+                              {viaLabel(device.via) ? ` · ${viaLabel(device.via)}` : ""}
+                            </code>
                           </td>
                           <td className="py-2">
                             {device.online ? (
@@ -920,9 +943,10 @@ export function PppoeCustomerPage() {
                               <span className="text-muted-foreground">Offline</span>
                             )}
                           </td>
-                          <td className="py-2 tabular-nums">{device.online ? device.onlineFor : duration(device.seconds)}</td>
+                          <td className="py-2 tabular-nums">{device.online ? device.onlineFor || "—" : duration(device.seconds)}</td>
+                          <td className="py-2 tabular-nums">{bytes(device.bytesIn)}</td>
+                          <td className="py-2 tabular-nums">{bytes(device.bytesOut)}</td>
                           <td className="py-2">{device.lastSeen ?? "Never"}</td>
-                          <td className="py-2">{bytes(device.bytesIn + device.bytesOut)}</td>
                           <td className="py-2">{device.sessions}</td>
                         </tr>
                       ))}
@@ -930,6 +954,12 @@ export function PppoeCustomerPage() {
                   </table>
                 </div>
               )}
+              {!subscriber.accessInterface ? (
+                <p className="mt-3 text-xs text-muted-foreground">
+                  Only devices that sign in on this account are listed. Save a VLAN / access interface when registering the
+                  customer to also see the gadgets behind their router.
+                </p>
+              ) : null}
             </div>
 
             <Section
