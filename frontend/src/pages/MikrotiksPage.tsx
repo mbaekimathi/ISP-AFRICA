@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { PageHeader } from "@/components/ui/DetailGrid";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { useSavedQuery } from "@/hooks/useSavedQuery";
 import { apiRequest } from "@/lib/api";
@@ -68,21 +69,34 @@ export function MikrotiksPage() {
     <div className="page-shell py-8">
       <PageHeader title="Mikrotiks" description={page ? `${page.total} routers.` : "Loading routers."} />
       {saved.error || actionError ? (
-        <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+        <p className="notice mt-4" role="alert">
           {saved.error || actionError}
         </p>
       ) : null}
-      <ul className="mt-6 divide-y divide-border overflow-hidden rounded-xl border border-border bg-surface">
-        {page?.devices.length === 0 ? <li className="px-4 py-3 text-sm text-muted-foreground">No routers are saved yet.</li> : null}
+      <ul className="panel mt-6 divide-y divide-border overflow-hidden">
+        {page?.devices.length === 0 ? (
+          <li className="px-4 py-10 text-center text-sm text-muted-foreground">No routers are saved yet.</li>
+        ) : null}
+        {!page && !saved.error ? (
+          <li className="px-4 py-6" aria-hidden="true">
+            <div className="grid gap-3">
+              <div className="skeleton h-4 w-1/3" />
+              <div className="skeleton h-4 w-2/5" />
+              <div className="skeleton h-4 w-1/4" />
+            </div>
+          </li>
+        ) : null}
         {page?.devices.map((device) => {
           const suspended = device.status === "suspended";
           const busy = busyId === device.id;
           return (
-            <li key={device.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3">
+            <li key={device.id} className="flex flex-wrap items-center justify-between gap-3 px-4 py-3.5 transition-colors duration-fast ease-out hover:bg-surface-muted/50">
               <div className="min-w-0">
-                <p className="font-semibold">{device.name}</p>
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-semibold">{device.name}</p>
+                  {suspended ? <StatusBadge tone="suspended">Suspended</StatusBadge> : null}
+                </div>
                 {device.site ? <p className="mt-0.5 text-sm text-muted-foreground">{device.site}</p> : null}
-                {suspended ? <p className="mt-0.5 text-sm text-muted-foreground">Suspended</p> : null}
               </div>
               <div className="flex flex-wrap gap-2">
                 <PrimaryButton to={href(`/mikrotiks/${device.id}`)}>View live</PrimaryButton>

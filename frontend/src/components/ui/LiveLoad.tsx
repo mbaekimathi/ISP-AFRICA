@@ -5,6 +5,7 @@ export function LiveLoad({ label = "Loading" }: { label?: string }) {
       <div className="live-load-glow live-load-glow-b" aria-hidden="true" />
       <div className="live-load-grid" aria-hidden="true" />
       <div className="live-load-panel">
+        <p className="live-load-brand">ISP Centric</p>
         <div className="live-load-stage" aria-hidden="true">
           <div className="live-load-disc">
             <span className="live-load-ring live-load-ring-outer" />

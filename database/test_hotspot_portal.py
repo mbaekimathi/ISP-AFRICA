@@ -226,6 +226,18 @@ class PortalHelperTests(unittest.TestCase):
         self.assertIn("$(link-orig)", portal_server.router_page("status.html").decode())
         self.assertIsNone(portal_server.router_page("evil.txt"))
 
+    def test_preview_html_fills_tokens_and_stops_redirects(self):
+        import api
+
+        login = api.hotspot_preview_html(portal_server.router_page("login.html"))
+        self.assertNotIn("$(", login)
+        self.assertNotIn('http-equiv="refresh"', login)
+        status = api.hotspot_preview_html(portal_server.router_page("status.html"))
+        self.assertNotIn('http-equiv="refresh"', status)
+        error = api.hotspot_preview_html(portal_server.router_page("error.html"))
+        self.assertNotIn("$(error)", error)
+        self.assertIn("session ended", error)
+
     def test_hotspot_packages_filters_service_type_and_routers(self):
         rows = [
             {"id": "p1", "name": "Day pass", "price": "50.00", "download_mbps": 5, "upload_mbps": 5,

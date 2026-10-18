@@ -65,7 +65,7 @@ export function LoginPage() {
           Sign in with the 6-digit login code and the 6-digit password from your account.
         </p>
         {registered ? (
-          <p className="mt-4 rounded-xl border border-success/30 bg-success/10 px-4 py-3 text-sm text-foreground" role="status">
+          <p className="notice mt-4 border-success-border bg-success-soft/60" role="status">
             Account submitted and pending approval. Sign in to check the status. The ISP client account opens after approval.
           </p>
         ) : null}

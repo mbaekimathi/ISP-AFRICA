@@ -12,6 +12,7 @@ import {
 } from "lucide-react";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { FormField } from "@/components/ui/FormField";
+import { LiveLoad } from "@/components/ui/LiveLoad";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
 import { clientPage } from "@/lib/accounts";
@@ -489,7 +490,10 @@ export function PppoeCustomerPage() {
   }
 
   if (!subscriber) {
-    return <div className="page-shell py-8 text-sm text-muted-foreground">{message || "Loading PPPoE client…"}</div>;
+    if (message) {
+      return <div className="page-shell py-8 text-sm text-muted-foreground">{message}</div>;
+    }
+    return <LiveLoad label="Loading PPPoE client" />;
   }
 
   const totalOnline = (usageTrend ?? []).reduce((sum, point) => sum + point.minutes, 0);
@@ -589,7 +593,7 @@ export function PppoeCustomerPage() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <Link
               to={home("/clients")}
-              className="inline-flex items-center gap-1.5 text-sm font-medium text-primary-foreground/75 transition hover:text-white"
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-primary-foreground/75 transition hover:text-primary-foreground"
             >
               <ArrowLeft className="h-4 w-4" />
               PPPoE clients
@@ -597,14 +601,14 @@ export function PppoeCustomerPage() {
             <div className="flex flex-wrap gap-2">
               <Link
                 to={`${home(`/pppoe/${subscriberId}/transactions`)}?pay=1`}
-                className="inline-flex min-h-10 items-center justify-center rounded-xl bg-white px-4 text-sm font-semibold text-primary shadow-sm transition hover:bg-white/90"
+                className="inline-flex min-h-10 items-center justify-center rounded-xl bg-primary-foreground px-4 text-sm font-semibold text-primary shadow-sm transition hover:bg-primary-foreground/90"
               >
                 Record payment
               </Link>
               {pendingApproval ? (
                 <button
                   type="button"
-                  className="inline-flex min-h-10 items-center justify-center rounded-xl bg-white/15 px-4 text-sm font-semibold transition hover:bg-white/25"
+                  className="inline-flex min-h-10 items-center justify-center rounded-xl bg-primary-foreground/15 px-4 text-sm font-semibold transition hover:bg-primary-foreground/25"
                   onClick={() => void post("activate", {})}
                 >
                   Approve
@@ -612,7 +616,7 @@ export function PppoeCustomerPage() {
               ) : ended || subscriber.status === "expired" ? null : (
                 <button
                   type="button"
-                  className="inline-flex min-h-10 items-center justify-center rounded-xl bg-white/15 px-4 text-sm font-semibold transition hover:bg-white/25"
+                  className="inline-flex min-h-10 items-center justify-center rounded-xl bg-primary-foreground/15 px-4 text-sm font-semibold transition hover:bg-primary-foreground/25"
                   onClick={() => setDialog("suspend")}
                 >
                   {suspended ? "Continue" : "Suspend"}
@@ -625,7 +629,7 @@ export function PppoeCustomerPage() {
                   aria-haspopup="menu"
                   aria-expanded={menuOpen}
                   onClick={() => setMenuOpen((open) => !open)}
-                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-white/15 px-4 text-sm font-semibold transition hover:bg-white/25"
+                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-primary-foreground/15 px-4 text-sm font-semibold transition hover:bg-primary-foreground/25"
                 >
                   More
                   <ChevronDown className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
@@ -672,18 +676,18 @@ export function PppoeCustomerPage() {
               className="flex min-w-0 items-center gap-4 rounded-xl text-left"
             >
               <div
-                className="relative flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-white text-lg font-semibold text-primary shadow-sm"
+                className="relative flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-primary-foreground text-lg font-semibold text-primary shadow-sm"
                 aria-hidden="true"
               >
                 {initials}
-                <span className={`absolute bottom-0 right-0 h-4 w-4 rounded-full border-2 border-white ${connectionDot}`} />
+                <span className={`absolute bottom-0 right-0 h-4 w-4 rounded-full border-2 border-primary-foreground ${connectionDot}`} />
               </div>
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <h1 className="truncate text-xl font-semibold tracking-tight sm:text-2xl">
                     {subscriber.firstName} {subscriber.lastName}
                   </h1>
-                  <span className="shrink-0 rounded-full bg-white/15 px-2.5 py-0.5 text-[11px] font-semibold">{status.label}</span>
+                  <span className="shrink-0 rounded-full bg-primary-foreground/15 px-2.5 py-0.5 text-[11px] font-semibold">{status.label}</span>
                   <ChevronDown
                     className={`h-4 w-4 shrink-0 text-primary-foreground/70 transition-transform ${profileOpen ? "rotate-180" : ""}`}
                     aria-hidden="true"
@@ -712,7 +716,7 @@ export function PppoeCustomerPage() {
             </div>
           </div>
 
-          <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4 border-t border-white/15 pt-4 sm:grid-cols-3 xl:grid-cols-6">
+          <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4 border-t border-primary-foreground/15 pt-4 sm:grid-cols-3 xl:grid-cols-6">
             <Stat
               label="Username"
               value={
@@ -722,7 +726,7 @@ export function PppoeCustomerPage() {
                     type="button"
                     aria-label="Copy username"
                     title="Copy username"
-                    className="shrink-0 text-primary-foreground/60 transition hover:text-white"
+                    className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
                     onClick={() => void navigator.clipboard.writeText(subscriber.username)}
                   >
                     <Copy className="h-3.5 w-3.5" />
@@ -741,7 +745,7 @@ export function PppoeCustomerPage() {
                         type="button"
                         aria-label="Copy password"
                         title="Copy password"
-                        className="shrink-0 text-primary-foreground/60 transition hover:text-white"
+                        className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
                         onClick={() => void navigator.clipboard.writeText(password)}
                       >
                         <Copy className="h-3.5 w-3.5" />
@@ -750,7 +754,7 @@ export function PppoeCustomerPage() {
                         type="button"
                         aria-label="Hide password"
                         title="Hide password"
-                        className="shrink-0 text-primary-foreground/60 transition hover:text-white"
+                        className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
                         onClick={() => setPassword("")}
                       >
                         <EyeOff className="h-3.5 w-3.5" />
@@ -761,7 +765,7 @@ export function PppoeCustomerPage() {
                       type="button"
                       aria-label="Show password"
                       title="Show password"
-                      className="shrink-0 text-primary-foreground/60 transition hover:text-white"
+                      className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
                       onClick={() => {
                         setDialog("password");
                         void post("reveal", {});
@@ -775,7 +779,7 @@ export function PppoeCustomerPage() {
               hint={
                 <button
                   type="button"
-                  className="font-medium text-primary-foreground/70 underline-offset-2 transition hover:text-white hover:underline"
+                  className="font-medium text-primary-foreground/70 underline-offset-2 transition hover:text-primary-foreground hover:underline"
                   onClick={() => setDialog("password")}
                 >
                   Reset
@@ -789,12 +793,12 @@ export function PppoeCustomerPage() {
           </div>
 
           {profileOpen ? (
-            <div className="mt-5 rounded-2xl bg-white/10 p-4 backdrop-blur-sm">
+            <div className="mt-5 rounded-2xl bg-primary-foreground/10 p-4 backdrop-blur-sm">
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <h2 className="text-xs font-semibold uppercase tracking-wide text-primary-foreground/70">Client details</h2>
                 <button
                   type="button"
-                  className="rounded-lg bg-white/15 px-3 py-1.5 text-xs font-semibold transition hover:bg-white/25"
+                  className="rounded-lg bg-primary-foreground/15 px-3 py-1.5 text-xs font-semibold transition hover:bg-primary-foreground/25"
                   onClick={() => setDialog("edit")}
                 >
                   Edit
@@ -811,7 +815,7 @@ export function PppoeCustomerPage() {
                   { label: "Router", value: subscriber.routerName || "—" },
                   { label: "Package", value: subscriber.packageName || "—" },
                 ].map((item) => (
-                  <div key={item.label} className="flex items-baseline justify-between gap-3 border-b border-white/10 py-2">
+                  <div key={item.label} className="flex items-baseline justify-between gap-3 border-b border-primary-foreground/10 py-2">
                     <dt className="text-xs text-primary-foreground/60">{item.label}</dt>
                     <dd className="min-w-0 break-words text-right text-sm font-medium">{item.value}</dd>
                   </div>
@@ -879,7 +883,7 @@ export function PppoeCustomerPage() {
                 <p className="mt-3 text-sm text-muted-foreground">No gadgets have connected yet.</p>
               ) : (
                 <div className="mt-3 overflow-x-auto">
-                  <table className="w-full min-w-[34rem] text-left text-sm">
+                  <table className="data-table min-w-[34rem]">
                     <thead className="text-xs text-muted-foreground">
                       <tr>
                         <th className="py-2">Device</th>
@@ -938,7 +942,7 @@ export function PppoeCustomerPage() {
                 <div>
                   <h3 className="text-sm font-semibold">Sessions</h3>
                   <div className="mt-3 overflow-x-auto">
-                    <table className="w-full min-w-[32rem] text-left text-sm">
+                    <table className="data-table min-w-[32rem]">
                       <thead className="text-xs text-muted-foreground">
                         <tr>
                           <th className="py-2">Started</th>
@@ -986,7 +990,7 @@ export function PppoeCustomerPage() {
           </div>
       </section>
 
-      {message ? <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{message}</p> : null}
+      {message ? <p className="mt-4 notice" role="alert">{message}</p> : null}
 
       <ActionDialog
         open={dialog === "suspend"}

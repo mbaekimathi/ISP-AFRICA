@@ -4,6 +4,7 @@ import hmac
 import json
 import mimetypes
 import os
+import re
 import secrets
 import socket
 import time
@@ -429,6 +430,93 @@ def public_communication(row):
         "endpoint": row["endpoint"],
         "sender": row["sender"],
         "apiKey": masked_secret(row["api_key"]),
+    }
+
+
+def probe_endpoint(endpoint):
+    import urllib.error
+    import urllib.request
+
+    text = str(endpoint or "").strip()
+    if not text:
+        return {"connected": False, "reason": "Save the API endpoint first."}
+    request = urllib.request.Request(text, headers={"User-Agent": "isp-centric-connectivity-check/1.0"})
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            code = response.status
+    except urllib.error.HTTPError as error:
+        return {"connected": True, "reason": f"The API endpoint answered with HTTP {error.code}."}
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        return {"connected": False, "reason": f"The API endpoint could not be reached: {getattr(error, 'reason', error)}."}
+    return {"connected": True, "reason": f"The API endpoint answered with HTTP {code}."}
+
+
+NOTIFICATION_TOGGLES = {
+    "serverUnreachable": "server_unreachable",
+    "mikrotikUnreachable": "mikrotik_unreachable",
+    "mikrotikAdded": "mikrotik_added",
+    "ispRegistered": "isp_registered",
+    "communicationsFailed": "communications_failed",
+    "paymentsFailed": "payments_failed",
+}
+
+
+ISP_NOTIFICATION_TOGGLES = {
+    "mikrotikOnboarded": "mikrotik_onboarded",
+    "mikrotikUnreachable": "mikrotik_unreachable",
+    "mikrotikNoInternet": "mikrotik_no_internet",
+    "clientCannotSurf": "client_cannot_surf",
+    "subscriptionEnding": "subscription_ending",
+    "communicationsFailed": "communications_failed",
+    "paymentsFailed": "payments_failed",
+    "serverUnreachable": "server_unreachable",
+}
+
+
+def public_notification_settings(row, toggles):
+    return {key: bool(row[column]) if row else True for key, column in toggles.items()}
+
+
+def clean_company(payload):
+    name = str(payload.get("name", "")).strip()
+    email = str(payload.get("email", "")).strip()
+    phone = str(payload.get("phone", "")).strip()
+    website = str(payload.get("website", "")).strip()
+    address = str(payload.get("address", "")).strip()
+    logo = str(payload.get("logoDataUrl", "") or "")
+    if not name or len(name) > 120:
+        raise ApiError(400, "Enter the company name.")
+    if email and (len(email) > 120 or "@" not in email):
+        raise ApiError(400, "Enter a valid company email address.")
+    if phone and not 7 <= len(digits(phone)) <= 15:
+        raise ApiError(400, "Enter a company phone number with 7 to 15 digits.")
+    if len(website) > 160:
+        raise ApiError(400, "Enter a shorter company website.")
+    if len(address) > 200:
+        raise ApiError(400, "Enter a shorter company address.")
+    if logo and (not logo.startswith("data:image/") or len(logo) > 200_000):
+        raise ApiError(400, "The company logo could not be accepted.")
+    return {
+        "name": name,
+        "email": email,
+        "phone": phone,
+        "website": website,
+        "address": address,
+        "logo": logo or None,
+    }
+
+
+def public_company(row):
+    if not row:
+        return None
+    return {
+        "name": row["company_name"],
+        "email": row["email"],
+        "phone": row["phone"],
+        "website": row["website"],
+        "address": row["address"],
+        "logoDataUrl": row.get("logo_data_url") or "",
+        "updatedAt": stamp(row["updated_at"]) or str(row["updated_at"]),
     }
 
 
@@ -1103,6 +1191,34 @@ def ensure_schema():
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS company_profile_settings (
+                  id TINYINT NOT NULL PRIMARY KEY,
+                  company_name VARCHAR(120) NOT NULL,
+                  email VARCHAR(120) NOT NULL DEFAULT '',
+                  phone VARCHAR(20) NOT NULL DEFAULT '',
+                  website VARCHAR(160) NOT NULL DEFAULT '',
+                  address VARCHAR(200) NOT NULL DEFAULT '',
+                  logo_data_url MEDIUMTEXT NULL,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS company_notification_settings (
+                  id TINYINT NOT NULL PRIMARY KEY,
+                  server_unreachable TINYINT NOT NULL DEFAULT 1,
+                  mikrotik_unreachable TINYINT NOT NULL DEFAULT 1,
+                  mikrotik_added TINYINT NOT NULL DEFAULT 1,
+                  isp_registered TINYINT NOT NULL DEFAULT 1,
+                  communications_failed TINYINT NOT NULL DEFAULT 1,
+                  payments_failed TINYINT NOT NULL DEFAULT 1,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS isp_payment_settings (
                   client_id CHAR(36) NOT NULL,
                   scope ENUM('own', 'company') NOT NULL,
@@ -1208,6 +1324,46 @@ def ensure_schema():
                   api_key VARCHAR(255) NOT NULL,
                   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                   PRIMARY KEY (client_id, channel)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_communication_preferences (
+                  client_id CHAR(36) NOT NULL,
+                  channel ENUM('sms', 'whatsapp', 'email') NOT NULL,
+                  mode ENUM('own', 'company') NOT NULL,
+                  PRIMARY KEY (client_id, channel)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_notification_settings (
+                  client_id CHAR(36) NOT NULL PRIMARY KEY,
+                  mikrotik_onboarded TINYINT NOT NULL DEFAULT 1,
+                  mikrotik_unreachable TINYINT NOT NULL DEFAULT 1,
+                  mikrotik_no_internet TINYINT NOT NULL DEFAULT 1,
+                  client_cannot_surf TINYINT NOT NULL DEFAULT 1,
+                  subscription_ending TINYINT NOT NULL DEFAULT 1,
+                  communications_failed TINYINT NOT NULL DEFAULT 1,
+                  payments_failed TINYINT NOT NULL DEFAULT 1,
+                  server_unreachable TINYINT NOT NULL DEFAULT 1,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_company_settings (
+                  client_id CHAR(36) NOT NULL PRIMARY KEY,
+                  company_name VARCHAR(120) NOT NULL,
+                  email VARCHAR(120) NOT NULL DEFAULT '',
+                  phone VARCHAR(20) NOT NULL DEFAULT '',
+                  website VARCHAR(160) NOT NULL DEFAULT '',
+                  address VARCHAR(200) NOT NULL DEFAULT '',
+                  logo_data_url MEDIUMTEXT NULL,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                 )
                 """
             )
@@ -1432,10 +1588,26 @@ def other_label(kind):
     return "employee" if kind == "client" else "ISP client"
 
 
-def assert_unique(cursor, kind, fields):
+def clean_profile(payload, existing):
+    data = {
+        "firstName": payload.get("firstName", ""),
+        "lastName": payload.get("lastName", ""),
+        "username": payload.get("username", ""),
+        "email": payload.get("email", ""),
+        "phone": payload.get("phone", ""),
+        "loginCode": str(payload.get("loginCode", "")).strip() or existing["login_code"],
+        "password": str(payload.get("password", "")).strip() or "000000",
+        "photoDataUrl": str(payload.get("photoDataUrl", "")) or existing["photo_data_url"] or "data:image/jpeg;base64,",
+    }
+    return clean_registration(data)
+
+
+def assert_unique(cursor, kind, fields, exclude_id=None):
     table = "isp_clients" if kind == "client" else "isp_employees"
-    cursor.execute(f"SELECT username, email, phone, login_code FROM {table}")
+    cursor.execute(f"SELECT id, username, email, phone, login_code FROM {table}")
     for row in cursor.fetchall():
+        if exclude_id and row["id"] == exclude_id:
+            continue
         if row["username"].lower() == fields["username"].lower():
             raise ApiError(409, "That username is already in use.")
         if row["email"].lower() == fields["email"].lower():
@@ -1485,6 +1657,152 @@ def require_reviewer(cursor, employee_token):
         raise ApiError(403, "Only a signed-in Director can review accounts.")
 
 
+HOTSPOT_PREVIEW_TOKENS = {
+    "ip": "10.5.50.23",
+    "mac": "8A:4F:7D:2C:91:B6",
+    "mac-esc": "8A%3A4F%3A7D%3A2C%3A91%3AB6",
+    "link-login": "http://10.5.50.1/login",
+    "link-login-only": "http://10.5.50.1/login",
+    "link-status": "http://10.5.50.1/status",
+    "link-orig": "http://example.com/",
+    "link-orig-esc": "http%3A%2F%2Fexample.com%2F",
+    "error": "Your session ended — pay again to get back online.",
+    "username": "hs-1a2b3c4d",
+    "uptime": "0h42m",
+    "session-time-left": "23h18m",
+    "bytes-in-nice": "84 MB",
+    "bytes-out-nice": "412 MB",
+    "identity": "HotSpot",
+    "hostname": "guest-phone",
+}
+
+def hotspot_preview_html(body):
+    """Fill the RouterOS $(...) tokens with samples and drop the meta refresh
+    so the preview stays on the page instead of forwarding to the portal."""
+    html = body.decode("utf-8")
+    html = re.sub(
+        r"\$\(([\w-]+)\)",
+        lambda match: HOTSPOT_PREVIEW_TOKENS.get(match.group(1), match.group(0)),
+        html,
+    )
+    return re.sub(r'<meta[^>]*http-equiv="refresh"[^>]*>', "", html, flags=re.IGNORECASE)
+
+
+# Fallback pay settings so the interactive preview still shows the full
+# M-Pesa flow when the account has not saved Daraja details yet. Display-only:
+# the simulated payment never calls Daraja, so nothing is ever charged.
+PORTAL_PREVIEW_PAYMENT = {
+    "account_type": "paybill",
+    "short_code": "522001",
+}
+
+PREVIEW_BANNER = (
+    '<div class=card><div style="margin:-6px 0 14px;padding:6px 10px;background:#fef3c7;color:#92400e;'
+    "font-size:11px;font-weight:700;letter-spacing:.06em;text-align:center;border-radius:8px;"
+    'text-transform:uppercase">Preview — nothing here is charged or saved</div>'
+)
+
+# Answers the pay pages' fetch calls with a scripted M-Pesa flow so the whole
+# journey — pick a package, "pay", wait for the PIN, then land on a dummy
+# speed test — runs end-to-end without touching Daraja, the database,
+# or the router. Once the page sends a pay request a small panel asks the
+# person previewing to approve or decline the simulated M-Pesa prompt;
+# declining makes the status poll answer "failed" so the page itself shows
+# the reason and asks the customer to try again.
+PREVIEW_STUB = """
+<script>
+(function(){
+var SIG=__SIG__;
+var polls=0,onl=0,devices=1,outcome=null;
+var codes=['K7F2-9XPL-4QWD','M3TB-8RHZ-6CJV','P8QA-2NWL-7XRT','D5HC-9BJK-3MVS','T6ZR-4FDM-8QKX','W2YN-7CPL-5RGH','J9VK-3XNB-6TQD','R4GD-8KWM-2PVJ','N7SX-5QTC-9DLB','F3MH-6JRD-4WZK'];
+var realFetch=window.fetch;
+function js(o){return Promise.resolve(new Response(JSON.stringify(o),{status:200,headers:{"Content-Type":"application/json"}}));}
+function simPanel(){
+ var old=document.getElementById('pv-sim');if(old)old.remove();
+ var d=document.createElement('div');
+ d.id='pv-sim';
+ d.style.cssText='position:fixed;left:12px;right:12px;bottom:12px;z-index:2147483647;background:#0b1220;color:#e2e8f0;border-radius:12px;padding:12px 14px;box-shadow:0 10px 32px rgba(2,6,23,.45);font:13px/1.5 -apple-system,Segoe UI,Roboto,sans-serif';
+ d.innerHTML='<div style="font-size:11px;font-weight:700;letter-spacing:.07em;text-transform:uppercase;color:#fbbf24;margin-bottom:4px">Preview simulation</div>'
+  +'<div style="margin-bottom:10px;color:#cbd5e1">The M-Pesa prompt is on the phone. Pick what the customer does:</div>'
+  +'<button type=button id=pv-ok style="border:0;border-radius:9px;padding:9px 14px;font-weight:700;font-size:13px;background:#22c55e;color:#052e16;cursor:pointer;margin-right:8px">Approve payment</button>'
+  +'<button type=button id=pv-no style="border:0;border-radius:9px;padding:9px 14px;font-weight:700;font-size:13px;background:#ef4444;color:#fff;cursor:pointer">Decline payment</button>';
+ document.body.appendChild(d);
+ d.querySelector('#pv-ok').onclick=function(){outcome='paid';d.remove();};
+ d.querySelector('#pv-no').onclick=function(){outcome='failed';d.remove();};
+}
+window.fetch=function(u,o){
+ var p=String(u);
+ if(p==='/hotspot/pay'){try{devices=Math.min(50,Math.max(1,parseInt(JSON.parse(o.body).devices,10)||1));}catch(e){}polls=0;outcome=null;simPanel();return js({checkoutId:'demo-'+Date.now()});}
+ if(p.indexOf('/hotspot/status')===0){polls+=1;if(outcome==='failed')return js({state:'failed',reason:'The M-Pesa prompt was declined on the phone.'});if(outcome!=='paid'||polls<3)return js({state:'pending'});var vs=[];for(var i=0;i<devices;i++)vs.push({code:codes[i%codes.length],status:i===0?'used':'issued'});return js({state:'paid',purchase:'demo-purchase',username:'hs-demo1a2b',password:'demo1a2b',vouchers:vs});}
+ if(p.indexOf('/hotspot/offers')===0)return js({state:'sale',sig:SIG});
+ if(p==='/hotspot/redeem')return js({state:'connected',purchase:'demo-purchase'});
+ if(p==='/pay'){polls=0;onl=0;outcome=null;simPanel();return js({checkoutId:'demo-'+Date.now()});}
+ if(p.indexOf('/pay/status')===0){polls+=1;if(outcome==='failed')return js({state:'failed',reason:'The M-Pesa prompt was declined on the phone.'});if(outcome!=='paid'||polls<3)return js({state:'pending'});return js({state:'paid',voucher:codes[0]});}
+ if(p.indexOf('/pay/online')===0){onl+=1;if(onl<3)return js({state:'connecting'});return js({state:'online'});}
+ if(p.indexOf('/pay/offers')===0)return js({state:'sale',sig:SIG});
+ return realFetch.apply(this,arguments);
+};
+})();
+</script>
+"""
+
+
+# Landing page shown when the preview's "Done — continue" is pressed. The
+# sandboxed preview frame cannot send the session cookie, so this page is
+# fully self-contained and needs no account data — it stands in for the
+# customer's own destination once they are online.
+SPEEDTEST_HTML = """<!doctype html>
+<html><head><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1"><title>Internet speed test</title>
+<style>
+body{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;background:radial-gradient(1100px 700px at 50% -10%,#16233f,#0b1220);color:#e2e8f0;font:15px/1.55 -apple-system,"Segoe UI",Roboto,sans-serif}
+.box{width:320px;background:rgba(17,28,51,.92);border:1px solid #22345c;border-radius:20px;padding:26px 26px 18px;box-shadow:0 24px 60px rgba(0,0,0,.5);text-align:center}
+.brand{font-size:11px;font-weight:800;letter-spacing:.14em;text-transform:uppercase;color:#38bdf8}
+.num{font-size:56px;font-weight:800;color:#fff;font-variant-numeric:tabular-nums;line-height:1;margin:16px 0 2px}
+.unit{font-size:14px;color:#94a3b8;font-weight:600}
+.row{display:flex;justify-content:space-between;margin-top:14px;font-size:13px;color:#94a3b8}
+.row b{color:#e2e8f0;font-variant-numeric:tabular-nums}
+.note{margin-top:18px;font-size:11px;color:#64748b;border-top:1px dashed #334155;padding-top:12px}
+</style></head><body>
+<div class=box>
+<div class=brand>Speed test</div>
+<div class=num id=n>0.0</div><div class=unit id=u>connecting…</div>
+<div class=row><span>Ping</span><b id=pg>— ms</b></div>
+<div class=row><span>Download</span><b id=dl>— Mbps</b></div>
+<div class=row><span>Upload</span><b id=ul>— Mbps</b></div>
+<div class=note>You are online — this speed test is simulated for the preview.</div>
+</div>
+<script>
+(function(){
+var n=document.getElementById('n'),u=document.getElementById('u');
+var pg=document.getElementById('pg'),dl=document.getElementById('dl'),ul=document.getElementById('ul');
+var ping=6+Math.floor(Math.random()*14),down=18+Math.random()*40,up=6+Math.random()*20;
+pg.textContent=ping+' ms';
+function run(target,label,done){
+ u.textContent='Mbps '+label;var t0=null;
+ function step(ts){if(!t0)t0=ts;var k=Math.min(1,(ts-t0)/1800);var e=1-Math.pow(1-k,3);n.textContent=(target*e).toFixed(1);if(k<1)requestAnimationFrame(step);else if(done)done();}
+ requestAnimationFrame(step);
+}
+setTimeout(function(){run(down,'download',function(){dl.textContent=down.toFixed(1)+' Mbps';setTimeout(function(){run(up,'upload',function(){ul.textContent=up.toFixed(1)+' Mbps';});},500);});},600);
+})();
+</script></body></html>"""
+
+
+def portal_preview_html(body, sig="", interactive=False):
+    html = hotspot_preview_html(body)
+    html = html.replace("'/thank-you", "'/api/portal-preview/speedtest")
+    if interactive:
+        stub = PREVIEW_STUB.replace("__SIG__", json.dumps(sig))
+        html = html.replace("<div class=card>", PREVIEW_BANNER, 1).replace("</body>", stub + "</body>")
+    return html
+
+
+class PreviewPage:
+    __slots__ = ("html",)
+
+    def __init__(self, html):
+        self.html = html
+
+
 class ApiServer(ThreadingHTTPServer):
     """Refuses to share its port: without SO_EXCLUSIVEADDRUSE a second
     api.py instance can bind the same TCP port on Windows and silently
@@ -1526,6 +1844,9 @@ class Handler(BaseHTTPRequestHandler):
                 with db.cursor() as cursor:
                     body, cookie = self.dispatch(cursor, method, path, payload, token, query)
             status = 200
+            if isinstance(body, PreviewPage):
+                self.send_html(200, body.html.encode("utf-8"))
+                return
             self.send_json(status, body, cookie)
         except ApiError as error:
             status = error.status
@@ -1581,6 +1902,10 @@ class Handler(BaseHTTPRequestHandler):
             return {"account": self.register(cursor, "client", payload)}, None
         if method == "POST" and path == "/api/employee/register":
             return {"employee": self.register(cursor, "employee", payload)}, None
+        if method == "POST" and path == "/api/client/profile":
+            return self.update_profile(cursor, "client", payload, token.get("isp_client_session"))
+        if method == "POST" and path == "/api/employee/profile":
+            return self.update_profile(cursor, "employee", payload, token.get("isp_employee_session"))
         if method == "GET" and path == "/api/employee/company/packages":
             employee_token = token.get("isp_employee_session")
             return {
@@ -1604,6 +1929,18 @@ class Handler(BaseHTTPRequestHandler):
             return self.read_company_communications(cursor, token.get("isp_employee_session")), None
         if method == "POST" and path == "/api/employee/company/communications":
             return self.save_company_communication(cursor, payload, token.get("isp_employee_session")), None
+        if method == "POST" and path == "/api/employee/company/communications/test":
+            return {"test": self.test_company_communication(cursor, payload, token.get("isp_employee_session"))}, None
+        if method == "GET" and path == "/api/employee/company/profile":
+            return self.read_company_profile(cursor, token.get("isp_employee_session")), None
+        if method == "POST" and path == "/api/employee/company/profile":
+            return self.save_company_profile(cursor, payload, token.get("isp_employee_session")), None
+        if method == "GET" and path == "/api/employee/company/notifications":
+            return self.read_company_notifications(cursor, token.get("isp_employee_session")), None
+        if method == "POST" and path == "/api/employee/company/notifications":
+            return self.save_company_notifications(cursor, payload, token.get("isp_employee_session")), None
+        if method == "GET" and path == "/api/employee/company/notifications/feed":
+            return self.company_notification_feed(cursor, token.get("isp_employee_session")), None
         if method == "POST" and path == "/api/director/clients/enter":
             require_reviewer(cursor, token.get("isp_employee_session"))
             employee_id = session_account_id(cursor, token.get("isp_employee_session"), "employee")
@@ -1654,6 +1991,16 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST" and path.startswith("/api/mikrotiks/") and path.endswith("/hotspot"):
             device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/hotspot").strip("/")
             return self.save_hotspot_access(cursor, device_id, token.get("isp_client_session"), payload), None
+        if method == "GET" and path.startswith("/api/mikrotiks/") and path.endswith("/hotspot/pages"):
+            device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/hotspot/pages").strip("/")
+            return {"pages": self.hotspot_page_previews(cursor, device_id, token.get("isp_client_session"))}, None
+        if method == "GET" and path.startswith("/api/mikrotiks/") and path.endswith("/pppoe/pages"):
+            device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/pppoe/pages").strip("/")
+            return {"pages": self.pppoe_page_previews(cursor, device_id, token.get("isp_client_session"))}, None
+        if method == "GET" and path == "/api/portal-preview/thank-you":
+            return self.preview_thank_you(cursor, token.get("isp_client_session"), query), None
+        if method == "GET" and path == "/api/portal-preview/speedtest":
+            return PreviewPage(SPEEDTEST_HTML), None
         if method == "POST" and path.startswith("/api/mikrotiks/") and path.endswith("/apply"):
             device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/apply").strip("/")
             return self.apply_selection(cursor, device_id, token.get("isp_client_session"), payload), None
@@ -1705,6 +2052,10 @@ class Handler(BaseHTTPRequestHandler):
             return {"package": self.create_package(cursor, payload, token.get("isp_client_session"))}, None
         if method == "POST" and path.startswith("/api/packages/"):
             return self.change_package(cursor, path.removeprefix("/api/packages/").strip("/"), payload, token.get("isp_client_session"))
+        if method == "GET" and path == "/api/company":
+            return self.read_company(cursor, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/company":
+            return self.save_company(cursor, payload, token.get("isp_client_session")), None
         if method == "GET" and path == "/api/payments":
             return self.read_payments(cursor, token.get("isp_client_session")), None
         if method == "POST" and path == "/api/payments":
@@ -1715,6 +2066,14 @@ class Handler(BaseHTTPRequestHandler):
             return self.read_communications(cursor, token.get("isp_client_session")), None
         if method == "POST" and path == "/api/communications":
             return self.save_communication(cursor, payload, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/communications/test":
+            return {"test": self.test_communication(cursor, payload, token.get("isp_client_session"))}, None
+        if method == "GET" and path == "/api/notifications":
+            return self.read_notifications(cursor, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/notifications":
+            return self.save_notifications(cursor, payload, token.get("isp_client_session")), None
+        if method == "GET" and path == "/api/notifications/feed":
+            return self.notification_feed(cursor, token.get("isp_client_session")), None
         raise ApiError(404, "That account request was not found.")
 
     def login(self, cursor, kind, payload):
@@ -1793,6 +2152,39 @@ class Handler(BaseHTTPRequestHandler):
         )
         cursor.execute("SELECT * FROM isp_employees WHERE id = %s", (account_id,))
         return public_employee(cursor.fetchone())
+
+    def update_profile(self, cursor, kind, payload, token):
+        account_id = session_account_id(cursor, token, kind)
+        if not account_id:
+            raise ApiError(401, "Sign in before editing the profile.")
+        table = "isp_clients" if kind == "client" else "isp_employees"
+        cursor.execute(f"SELECT * FROM {table} WHERE id = %s", (account_id,))
+        existing = cursor.fetchone()
+        if not existing:
+            raise ApiError(404, "That account was not found.")
+        fields = clean_profile(payload, existing)
+        assert_unique(cursor, kind, fields, exclude_id=account_id)
+        columns = "first_name = %s, last_name = %s, username = %s, email = %s, phone = %s, login_code = %s, photo_data_url = %s"
+        values = [
+            fields["first"],
+            fields["last"],
+            fields["username"],
+            fields["email"],
+            fields["phone"],
+            fields["login_code"],
+            fields["photo"],
+        ]
+        if str(payload.get("password", "")).strip():
+            salt, password_hash = hash_password(fields["password"])
+            columns += ", password_salt = %s, password_hash = %s"
+            values += [salt, password_hash]
+        values.append(account_id)
+        cursor.execute(f"UPDATE {table} SET {columns} WHERE id = %s", tuple(values))
+        cursor.execute(f"SELECT * FROM {table} WHERE id = %s", (account_id,))
+        row = cursor.fetchone()
+        if kind == "client":
+            return {"account": public_client(row)}, None
+        return {"employee": public_employee(row)}, None
 
     def enter_client_portal(self, cursor, account_id, employee_id=None):
         cursor.execute("SELECT * FROM isp_clients WHERE id = %s", (account_id,))
@@ -2669,6 +3061,208 @@ class Handler(BaseHTTPRequestHandler):
         password = routeros_api.open_password(row["api_secret"])
         routeros_api.apply_hotspot_access(row["tunnel_ip"], password, enabled)
 
+    def hotspot_page_previews(self, cursor, device_id, token):
+        client_id = self.require_client(cursor, token)
+        cursor.execute(
+            "SELECT name, site FROM isp_mikrotik_devices WHERE id = %s AND client_id = %s",
+            (device_id, client_id),
+        )
+        found = cursor.fetchone() or {}
+        device = {
+            "id": device_id,
+            "name": found.get("name") or "Corner Shop Wi-Fi",
+            "site": found.get("site") or "Town centre",
+        }
+        offers = portal_server.company_hotspot_packages(cursor, client_id, device_id) or portal_server.hotspot_packages(
+            cursor, client_id, device_id
+        )
+        payment = portal_server.daraja_settings(cursor, client_id) or PORTAL_PREVIEW_PAYMENT
+        first = offers[0] if offers else {}
+        ctx = {
+            "ip": HOTSPOT_PREVIEW_TOKENS["ip"],
+            "mac": HOTSPOT_PREVIEW_TOKENS["mac"],
+            "login": HOTSPOT_PREVIEW_TOKENS["link-login-only"],
+            "orig": HOTSPOT_PREVIEW_TOKENS["link-orig"],
+        }
+        receipt = {
+            "package_name": first.get("name") or "Wi-Fi bundle",
+            "amount": str(first.get("price") or "100.00"),
+            "vouchers": [
+                {"code": "K7F2-9XPL-4QWD", "status": "issued"},
+                {"code": "M3TB-8RHZ-6CJV", "status": "issued"},
+            ],
+        }
+        pages = [
+            (
+                "login",
+                "login.html",
+                "Sign-in page",
+                "The first screen a guest sees after joining the Wi-Fi. It forwards them to the payment page.",
+                portal_server.router_page("login.html"),
+            ),
+            (
+                "buy",
+                "/hotspot",
+                "Bundle page",
+                "Guests pick a Wi-Fi bundle, pay with M-Pesa, or enter a voucher code.",
+                portal_server.hotspot_page(device, offers, ctx, payment),
+            ),
+            (
+                "thank-you",
+                "/thank-you",
+                "Connected / thank-you page",
+                "Shown once the guest is online after a payment or voucher — it confirms the connection and lists the voucher code for each paid device slot.",
+                portal_server.thankyou_hotspot_page(receipt),
+            ),
+            (
+                "error",
+                "error.html",
+                "Error page",
+                "The router shows this when a sign-in or session fails.",
+                portal_server.router_page("error.html"),
+            ),
+        ]
+        sig = portal_server.hotspot_signature(offers, payment)
+        return [
+            {
+                "id": slug,
+                "name": name,
+                "title": title,
+                "description": description,
+                "html": portal_preview_html(body, sig, slug == "buy"),
+            }
+            for slug, name, title, description, body in pages
+            if body
+        ]
+
+    def pppoe_page_previews(self, cursor, device_id, token):
+        client_id = self.require_client(cursor, token)
+        support_phone = self.preview_support_phone(cursor, client_id)
+        offers = portal_server.company_pppoe_packages(cursor, client_id, device_id)
+        payment = portal_server.daraja_settings(cursor, client_id) or PORTAL_PREVIEW_PAYMENT
+        first = offers[0] if offers else {}
+        subscriber = {
+            "client_id": client_id,
+            "router_id": device_id,
+            "package_id": first.get("id") or "sample-package",
+            "package_name": first.get("name") or "Home 10 Mbps",
+            "price": first.get("price") or "500.00",
+            "download_mbps": first.get("download_mbps") or 10,
+            "upload_mbps": first.get("upload_mbps") or 10,
+            "package_devices": first.get("simultaneous_devices"),
+            "cycle_days": 30,
+            "first_name": "Amina",
+            "last_name": "Wanjiku",
+            "phone": "0712 345 678",
+            "pppoe_username": "amina.wanjiku",
+        }
+        if not offers:
+            offers = portal_server.pppoe_offers(cursor, subscriber)
+        voucher = {
+            "first_name": subscriber["first_name"],
+            "last_name": subscriber["last_name"],
+            "status": "issued",
+            "code": "K7F2-9XPL-4QWD",
+            "package_name": subscriber["package_name"],
+            "amount": str(subscriber["price"] or "0"),
+            "pppoe_username": subscriber["pppoe_username"],
+        }
+        pages = [
+            (
+                "pay",
+                "/",
+                "Recharge page",
+                "What a blocked customer sees — they pick a package and pay with M-Pesa to get back online.",
+                portal_server.pay_page(subscriber, offers, payment),
+            ),
+            (
+                "paused",
+                "/",
+                "Paused page",
+                "Shown instead of the recharge page while the account is paused by the provider.",
+                portal_server.paused_page(subscriber),
+            ),
+            (
+                "unknown",
+                "/",
+                "No subscription page",
+                "Shown when a session cannot be matched to an account.",
+                portal_server.unknown_page(),
+            ),
+            (
+                "help",
+                "/help",
+                "Help page",
+                "The page a customer lands on when a payment fails or the link has not come back yet — it lists your customer care number.",
+                portal_server.help_page(support_phone),
+            ),
+            (
+                "thank-you",
+                "/thank-you",
+                "Thank-you page",
+                "Shown after a payment lands — it lists the single-use voucher receipt.",
+                portal_server.thankyou_page(voucher),
+            ),
+            (
+                "error",
+                "error.html",
+                "Error page",
+                "Shown when the M-Pesa prompt is declined or the payment cannot complete.",
+                portal_server.router_page("error.html"),
+            ),
+        ]
+        sig = portal_server.pay_signature(subscriber, offers, payment)
+        return [
+            {
+                "id": slug,
+                "name": name,
+                "title": title,
+                "description": description,
+                "html": portal_preview_html(body, sig, slug == "pay"),
+            }
+            for slug, name, title, description, body in pages
+            if body
+        ]
+
+    def preview_thank_you(self, cursor, token, query):
+        """Receipt page the interactive preview lands on after a simulated payment."""
+        self.require_client(cursor, token)
+        purchase = str((query.get("purchase") or [""])[0])
+        code = str((query.get("code") or [""])[0])
+        if purchase:
+            receipt = portal_server.hotspot_receipt(cursor, purchase) or {
+                "package_name": "Wi-Fi bundle",
+                "amount": "100.00",
+                "vouchers": [
+                    {"code": "K7F2-9XPL-4QWD", "status": "used"},
+                    {"code": "M3TB-8RHZ-6CJV", "status": "issued"},
+                ],
+            }
+            return PreviewPage(portal_server.thankyou_hotspot_page(receipt).decode("utf-8"))
+        voucher = (pppoe_store.voucher_detail(cursor, code) if code else None) or {
+            "first_name": "Amina",
+            "last_name": "Wanjiku",
+            "status": "issued",
+            "code": code or "K7F2-9XPL-4QWD",
+            "package_name": "Home 10 Mbps",
+            "amount": "500.00",
+            "pppoe_username": "amina.wanjiku",
+        }
+        return PreviewPage(portal_server.thankyou_page(voucher).decode("utf-8"))
+
+    def preview_support_phone(self, cursor, client_id):
+        """The customer care line shown on preview help pages — the company
+        phone when one is saved, otherwise the account phone."""
+        cursor.execute(
+            "SELECT phone FROM isp_company_settings WHERE client_id = %s",
+            (client_id,),
+        )
+        phone = str((cursor.fetchone() or {}).get("phone") or "").strip()
+        if not phone:
+            cursor.execute("SELECT phone FROM isp_clients WHERE id = %s", (client_id,))
+            phone = str((cursor.fetchone() or {}).get("phone") or "").strip()
+        return phone
+
     def reboot_mikrotik(self, cursor, device_id, token):
         client_id = self.require_client(cursor, token)
         if not router_jobs.allow_job(client_id):
@@ -3102,32 +3696,228 @@ class Handler(BaseHTTPRequestHandler):
         )
         return {row["channel"]: row for row in cursor.fetchall()}
 
+    def communication_modes(self, cursor, client_id):
+        cursor.execute(
+            "SELECT channel, mode FROM isp_communication_preferences WHERE client_id = %s",
+            (client_id,),
+        )
+        return {row["channel"]: row["mode"] for row in cursor.fetchall()}
+
     def read_communications(self, cursor, token):
         client_id = self.require_communication_client(cursor, token)
         rows = self.communication_rows(cursor, client_id)
+        shared = self.company_communication_rows(cursor)
+        modes = self.communication_modes(cursor, client_id)
         return {
-            "sms": public_communication(rows.get("sms")),
-            "whatsapp": public_communication(rows.get("whatsapp")),
-            "email": public_communication(rows.get("email")),
+            channel: {
+                "mode": modes.get(channel) or "own",
+                "own": public_communication(rows.get(channel)),
+                "company": public_communication(shared.get(channel)),
+            }
+            for channel in ("sms", "whatsapp", "email")
         }
 
     def save_communication(self, cursor, payload, token):
         client_id = self.require_communication_client(cursor, token)
         channel = str(payload.get("channel", "")).strip()
-        rows = self.communication_rows(cursor, client_id)
-        fields = clean_communication(payload, rows.get(channel) if channel in rows else None)
+        if channel not in {"sms", "whatsapp", "email"}:
+            raise ApiError(400, "Choose the SMS, WhatsApp, or email API.")
+        mode = str(payload.get("mode", "")).strip() or "own"
+        if mode not in {"own", "company"}:
+            raise ApiError(400, "Choose your own API or the company API.")
+        if mode == "own":
+            rows = self.communication_rows(cursor, client_id)
+            fields = clean_communication(payload, rows.get(channel))
+            cursor.execute(
+                """
+                INSERT INTO isp_communication_settings (client_id, channel, endpoint, sender, api_key)
+                VALUES (%s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                  endpoint = VALUES(endpoint),
+                  sender = VALUES(sender),
+                  api_key = VALUES(api_key)
+                """,
+                (client_id, fields["channel"], fields["endpoint"], fields["sender"], fields["api_key"]),
+            )
         cursor.execute(
             """
-            INSERT INTO isp_communication_settings (client_id, channel, endpoint, sender, api_key)
-            VALUES (%s, %s, %s, %s, %s)
-            ON DUPLICATE KEY UPDATE
-              endpoint = VALUES(endpoint),
-              sender = VALUES(sender),
-              api_key = VALUES(api_key)
+            INSERT INTO isp_communication_preferences (client_id, channel, mode)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE mode = VALUES(mode)
             """,
-            (client_id, fields["channel"], fields["endpoint"], fields["sender"], fields["api_key"]),
+            (client_id, channel, mode),
         )
         return self.read_communications(cursor, token)
+
+    def test_communication(self, cursor, payload, token):
+        client_id = self.require_communication_client(cursor, token)
+        channel = str(payload.get("channel", "")).strip()
+        if channel not in {"sms", "whatsapp", "email"}:
+            raise ApiError(400, "Choose the SMS, WhatsApp, or email API.")
+        source = str(payload.get("source", "")).strip()
+        if source not in {"own", "company"}:
+            raise ApiError(400, "Choose your own API or the company API.")
+        if source == "company":
+            row = self.company_communication_rows(cursor).get(channel)
+        else:
+            row = self.communication_rows(cursor, client_id).get(channel)
+        submitted = payload.get("settings") or {}
+        endpoint = str(submitted.get("endpoint") or "").strip() or (row or {}).get("endpoint", "")
+        return probe_endpoint(endpoint)
+
+    def require_notification_client(self, cursor, token):
+        client_id = session_account_id(cursor, token, "client")
+        if not client_id:
+            raise ApiError(401, "Sign in to the ISP client account before managing notification settings.")
+        return client_id
+
+    def isp_notification_row(self, cursor, client_id):
+        cursor.execute("SELECT * FROM isp_notification_settings WHERE client_id = %s", (client_id,))
+        return cursor.fetchone()
+
+    def read_notifications(self, cursor, token):
+        client_id = self.require_notification_client(cursor, token)
+        return {
+            "notifications": public_notification_settings(
+                self.isp_notification_row(cursor, client_id), ISP_NOTIFICATION_TOGGLES
+            )
+        }
+
+    def save_notifications(self, cursor, payload, token):
+        client_id = self.require_notification_client(cursor, token)
+        current = public_notification_settings(self.isp_notification_row(cursor, client_id), ISP_NOTIFICATION_TOGGLES)
+        submitted = payload.get("notifications") or {}
+        fields = {key: 1 if bool(submitted.get(key, current[key])) else 0 for key in ISP_NOTIFICATION_TOGGLES}
+        cursor.execute(
+            """
+            INSERT INTO isp_notification_settings (
+              client_id, mikrotik_onboarded, mikrotik_unreachable, mikrotik_no_internet, client_cannot_surf,
+              subscription_ending, communications_failed, payments_failed, server_unreachable
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+              mikrotik_onboarded = VALUES(mikrotik_onboarded),
+              mikrotik_unreachable = VALUES(mikrotik_unreachable),
+              mikrotik_no_internet = VALUES(mikrotik_no_internet),
+              client_cannot_surf = VALUES(client_cannot_surf),
+              subscription_ending = VALUES(subscription_ending),
+              communications_failed = VALUES(communications_failed),
+              payments_failed = VALUES(payments_failed),
+              server_unreachable = VALUES(server_unreachable)
+            """,
+            (
+                client_id,
+                fields["mikrotikOnboarded"],
+                fields["mikrotikUnreachable"],
+                fields["mikrotikNoInternet"],
+                fields["clientCannotSurf"],
+                fields["subscriptionEnding"],
+                fields["communicationsFailed"],
+                fields["paymentsFailed"],
+                fields["serverUnreachable"],
+            ),
+        )
+        return self.read_notifications(cursor, token)
+
+    def notification_feed(self, cursor, token):
+        client_id = self.require_notification_client(cursor, token)
+        prefs = public_notification_settings(
+            self.isp_notification_row(cursor, client_id), ISP_NOTIFICATION_TOGGLES
+        )
+        items = []
+        if prefs["mikrotikOnboarded"]:
+            cursor.execute(
+                """
+                SELECT id, name, site, COALESCE(authorized_at, created_at) AS happened_at
+                FROM isp_mikrotik_devices
+                WHERE client_id = %s
+                ORDER BY happened_at DESC
+                LIMIT 20
+                """,
+                (client_id,),
+            )
+            for row in cursor.fetchall():
+                site = str(row["site"] or "").strip()
+                items.append(
+                    {
+                        "id": f"onboarded-{row['id']}",
+                        "kind": "mikrotikOnboarded",
+                        "subject": f"{row['name']} was onboarded",
+                        "detail": f"Router {row['name']} at {site} is under management." if site else f"Router {row['name']} is under management.",
+                        "at": stamp(row["happened_at"]),
+                        "open": False,
+                    }
+                )
+        if prefs["mikrotikUnreachable"]:
+            cursor.execute(
+                """
+                SELECT e.id, e.subject, e.reason, e.started_at, e.ended_at, d.name AS device_name
+                FROM isp_mikrotik_health_events e
+                JOIN isp_mikrotik_devices d ON d.id = e.device_id
+                WHERE e.client_id = %s
+                ORDER BY e.started_at DESC
+                LIMIT 30
+                """,
+                (client_id,),
+            )
+            for row in cursor.fetchall():
+                ended = row["ended_at"] is not None
+                items.append(
+                    {
+                        "id": f"health-{row['id']}",
+                        "kind": "mikrotikUnreachable",
+                        "subject": row["subject"],
+                        "detail": f"{row['device_name']}: {row['reason']}" + ("" if ended else " — still down."),
+                        "at": stamp(row["started_at"]),
+                        "open": not ended,
+                    }
+                )
+        items.sort(key=lambda item: item["at"] or "", reverse=True)
+        return {"notifications": items[:50]}
+
+    def require_company_client(self, cursor, token):
+        client_id = session_account_id(cursor, token, "client")
+        if not client_id:
+            raise ApiError(401, "Sign in to the ISP client account before managing company details.")
+        return client_id
+
+    def read_company(self, cursor, token):
+        client_id = self.require_company_client(cursor, token)
+        cursor.execute(
+            """
+            SELECT company_name, email, phone, website, address, logo_data_url, updated_at
+            FROM isp_company_settings
+            WHERE client_id = %s
+            """,
+            (client_id,),
+        )
+        return {"company": public_company(cursor.fetchone())}
+
+    def save_company(self, cursor, payload, token):
+        client_id = self.require_company_client(cursor, token)
+        fields = clean_company(payload)
+        cursor.execute(
+            """
+            INSERT INTO isp_company_settings (client_id, company_name, email, phone, website, address, logo_data_url)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+              company_name = VALUES(company_name),
+              email = VALUES(email),
+              phone = VALUES(phone),
+              website = VALUES(website),
+              address = VALUES(address),
+              logo_data_url = VALUES(logo_data_url)
+            """,
+            (
+                client_id,
+                fields["name"],
+                fields["email"],
+                fields["phone"],
+                fields["website"],
+                fields["address"],
+                fields["logo"],
+            ),
+        )
+        return self.read_company(cursor, token)
 
     def require_payment_client(self, cursor, token):
         client_id = session_account_id(cursor, token, "client")
@@ -3622,6 +4412,168 @@ class Handler(BaseHTTPRequestHandler):
         )
         return self.read_company_communications(cursor, token)
 
+    def test_company_communication(self, cursor, payload, token):
+        self.require_company_employee(cursor, token, "company communications")
+        channel = str(payload.get("channel", "")).strip()
+        if channel not in {"sms", "whatsapp", "email"}:
+            raise ApiError(400, "Choose the SMS, WhatsApp, or email API.")
+        row = self.company_communication_rows(cursor).get(channel)
+        endpoint = str(payload.get("endpoint") or "").strip() or (row or {}).get("endpoint", "")
+        return probe_endpoint(endpoint)
+
+    def company_profile_row(self, cursor):
+        cursor.execute(
+            """
+            SELECT company_name, email, phone, website, address, logo_data_url, updated_at
+            FROM company_profile_settings
+            WHERE id = 1
+            """
+        )
+        return cursor.fetchone()
+
+    def read_company_profile(self, cursor, token):
+        self.require_company_employee(cursor, token, "company profile")
+        return {"company": public_company(self.company_profile_row(cursor))}
+
+    def save_company_profile(self, cursor, payload, token):
+        self.require_company_employee(cursor, token, "company profile")
+        fields = clean_company(payload)
+        cursor.execute(
+            """
+            INSERT INTO company_profile_settings (id, company_name, email, phone, website, address, logo_data_url)
+            VALUES (1, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+              company_name = VALUES(company_name),
+              email = VALUES(email),
+              phone = VALUES(phone),
+              website = VALUES(website),
+              address = VALUES(address),
+              logo_data_url = VALUES(logo_data_url)
+            """,
+            (
+                fields["name"],
+                fields["email"],
+                fields["phone"],
+                fields["website"],
+                fields["address"],
+                fields["logo"],
+            ),
+        )
+        return self.read_company_profile(cursor, token)
+
+    def company_notification_row(self, cursor):
+        cursor.execute("SELECT * FROM company_notification_settings WHERE id = 1")
+        return cursor.fetchone()
+
+    def read_company_notifications(self, cursor, token):
+        self.require_company_employee(cursor, token, "company notifications")
+        return {"notifications": public_notification_settings(self.company_notification_row(cursor), NOTIFICATION_TOGGLES)}
+
+    def save_company_notifications(self, cursor, payload, token):
+        self.require_company_employee(cursor, token, "company notifications")
+        current = public_notification_settings(self.company_notification_row(cursor), NOTIFICATION_TOGGLES)
+        submitted = payload.get("notifications") or {}
+        fields = {key: 1 if bool(submitted.get(key, current[key])) else 0 for key in NOTIFICATION_TOGGLES}
+        cursor.execute(
+            """
+            INSERT INTO company_notification_settings (
+              id, server_unreachable, mikrotik_unreachable, mikrotik_added, isp_registered,
+              communications_failed, payments_failed
+            ) VALUES (1, %s, %s, %s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+              server_unreachable = VALUES(server_unreachable),
+              mikrotik_unreachable = VALUES(mikrotik_unreachable),
+              mikrotik_added = VALUES(mikrotik_added),
+              isp_registered = VALUES(isp_registered),
+              communications_failed = VALUES(communications_failed),
+              payments_failed = VALUES(payments_failed)
+            """,
+            (
+                fields["serverUnreachable"],
+                fields["mikrotikUnreachable"],
+                fields["mikrotikAdded"],
+                fields["ispRegistered"],
+                fields["communicationsFailed"],
+                fields["paymentsFailed"],
+            ),
+        )
+        return self.read_company_notifications(cursor, token)
+
+    def company_notification_feed(self, cursor, token):
+        self.require_company_employee(cursor, token, "company notifications")
+        prefs = public_notification_settings(self.company_notification_row(cursor), NOTIFICATION_TOGGLES)
+        items = []
+        if prefs["ispRegistered"]:
+            cursor.execute(
+                """
+                SELECT id, first_name, last_name, status, created_at
+                FROM isp_clients
+                ORDER BY created_at DESC
+                LIMIT 20
+                """
+            )
+            for row in cursor.fetchall():
+                name = f"{row['first_name']} {row['last_name']}".strip()
+                items.append(
+                    {
+                        "id": f"client-{row['id']}",
+                        "kind": "ispRegistered",
+                        "subject": "New ISP registered",
+                        "detail": f"{name} signed up — status {row['status']}.",
+                        "at": stamp(row["created_at"]),
+                        "open": row["status"] == "pending",
+                    }
+                )
+        if prefs["mikrotikAdded"]:
+            cursor.execute(
+                """
+                SELECT d.id, d.name, d.created_at, c.first_name, c.last_name
+                FROM isp_mikrotik_devices d
+                JOIN isp_clients c ON c.id = d.client_id
+                ORDER BY d.created_at DESC
+                LIMIT 20
+                """
+            )
+            for row in cursor.fetchall():
+                owner = f"{row['first_name']} {row['last_name']}".strip()
+                items.append(
+                    {
+                        "id": f"device-{row['id']}",
+                        "kind": "mikrotikAdded",
+                        "subject": "New MikroTik added",
+                        "detail": f"{row['name']} was added by {owner}.",
+                        "at": stamp(row["created_at"]),
+                        "open": False,
+                    }
+                )
+        if prefs["mikrotikUnreachable"]:
+            cursor.execute(
+                """
+                SELECT e.id, e.subject, e.reason, e.started_at, e.ended_at,
+                       d.name AS device_name, c.first_name, c.last_name
+                FROM isp_mikrotik_health_events e
+                JOIN isp_mikrotik_devices d ON d.id = e.device_id
+                JOIN isp_clients c ON c.id = e.client_id
+                ORDER BY e.started_at DESC
+                LIMIT 30
+                """
+            )
+            for row in cursor.fetchall():
+                ended = row["ended_at"] is not None
+                owner = f"{row['first_name']} {row['last_name']}".strip()
+                items.append(
+                    {
+                        "id": f"health-{row['id']}",
+                        "kind": "mikrotikUnreachable",
+                        "subject": row["subject"],
+                        "detail": f"{row['device_name']} ({owner}): {row['reason']}" + ("" if ended else " — still down."),
+                        "at": stamp(row["started_at"]),
+                        "open": not ended,
+                    }
+                )
+        items.sort(key=lambda item: item["at"] or "", reverse=True)
+        return {"notifications": items[:50]}
+
     def public_package_clients(self, cursor):
         cursor.execute(
             """
@@ -4055,6 +5007,14 @@ class Handler(BaseHTTPRequestHandler):
             )
         self.end_headers()
         self.wfile.write(encoded)
+
+    def send_html(self, status, body):
+        self.send_response(status)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(body)
 
     def serve_static(self, path):
         root = web_root()

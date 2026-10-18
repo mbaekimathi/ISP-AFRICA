@@ -5,6 +5,7 @@ type SessionMenuProps = {
   name: string;
   detail: string;
   photoUrl: string;
+  dashboardTo: string;
   profileTo: string;
   signOutTo: string;
   phone?: string;
@@ -13,7 +14,7 @@ type SessionMenuProps = {
   onSignOut: () => Promise<void> | void;
 };
 
-export function SessionMenu({ name, detail, photoUrl, profileTo, signOutTo, phone, accountNumber, role, onSignOut }: SessionMenuProps) {
+export function SessionMenu({ name, detail, photoUrl, dashboardTo, profileTo, signOutTo, phone, accountNumber, role, onSignOut }: SessionMenuProps) {
   const [open, setOpen] = useState(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const menuId = useId();
@@ -50,7 +51,7 @@ export function SessionMenu({ name, detail, photoUrl, profileTo, signOutTo, phon
     <div className="relative" ref={rootRef}>
       <button
         type="button"
-        className="inline-flex h-11 items-center gap-2 rounded-full border border-border bg-surface py-1 pl-1 pr-1.5 text-sm font-semibold text-foreground shadow-sm sm:pr-3"
+        className="inline-flex h-11 items-center gap-2 rounded-full border border-border bg-surface/80 py-1 pl-1 pr-1.5 text-sm font-semibold text-foreground shadow-xs transition duration-fast ease-out hover:bg-surface sm:pr-3"
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={menuId}
@@ -65,9 +66,9 @@ export function SessionMenu({ name, detail, photoUrl, profileTo, signOutTo, phon
           id={menuId}
           role="menu"
           aria-label={name}
-          className="absolute right-0 z-50 mt-2 w-60 rounded-xl border border-border bg-surface p-2 shadow-card"
+          className="absolute right-0 z-50 mt-2 w-60 rounded-xl border border-border bg-surface-raised p-2 shadow-lift"
         >
-          <div className="flex items-center gap-3 px-2 py-2">
+          <div className="mb-1 flex items-center gap-3 border-b border-border px-2 pb-3 pt-2">
             <img src={photoUrl} alt="" className="h-10 w-10 rounded-full object-cover" />
             <div className="min-w-0">
               <p className="truncate text-sm font-semibold text-foreground">{name}</p>
@@ -79,8 +80,16 @@ export function SessionMenu({ name, detail, photoUrl, profileTo, signOutTo, phon
           </div>
           <Link
             role="menuitem"
+            to={dashboardTo}
+            className="flex min-h-11 items-center rounded-lg px-3 text-sm font-medium text-muted-foreground transition duration-fast ease-out hover:bg-surface-muted hover:text-foreground"
+            onClick={() => setOpen(false)}
+          >
+            Dashboard
+          </Link>
+          <Link
+            role="menuitem"
             to={profileTo}
-            className="flex min-h-11 items-center rounded-lg px-3 text-sm font-medium text-foreground hover:bg-surface-muted"
+            className="flex min-h-11 items-center rounded-lg px-3 text-sm font-medium text-muted-foreground transition duration-fast ease-out hover:bg-surface-muted hover:text-foreground"
             onClick={() => setOpen(false)}
           >
             Profile
@@ -88,7 +97,7 @@ export function SessionMenu({ name, detail, photoUrl, profileTo, signOutTo, phon
           <button
             type="button"
             role="menuitem"
-            className="flex min-h-11 w-full items-center rounded-lg px-3 text-left text-sm font-medium text-foreground hover:bg-surface-muted"
+            className="flex min-h-11 w-full items-center rounded-lg px-3 text-left text-sm font-medium text-muted-foreground transition duration-fast ease-out hover:bg-surface-muted hover:text-foreground"
             onClick={() => void signOut()}
           >
             Sign out

@@ -1,4 +1,5 @@
 import { Navigate } from "react-router-dom";
+import { ProfileForm } from "@/components/profile/ProfileForm";
 import { PrimaryButton } from "@/components/ui/Buttons";
 import { LiveLoad } from "@/components/ui/LiveLoad";
 import { DetailGrid, PageHeader } from "@/components/ui/DetailGrid";
@@ -7,7 +8,7 @@ import { usePageMeta } from "@/hooks/usePageMeta";
 import { useAuth } from "@/providers/AuthProvider";
 
 export function AccountPage() {
-  const { user, ready, logout } = useAuth();
+  const { user, ready, logout, saveProfile } = useAuth();
   const accountNumber = user?.clientCode ?? "";
   usePageMeta(
     accountNumber ? `${accountNumber} — ISP CENTRIC` : "Account — ISP CENTRIC",
@@ -25,13 +26,13 @@ export function AccountPage() {
   if (user.status !== "approved") {
     return (
       <div className="page-shell py-8">
-        <article className="rounded-xl border border-border bg-surface p-5">
+        <article className="card p-5">
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex min-w-0 items-center gap-3">
               <img
                 src={user.photoDataUrl}
                 alt={`Profile photo of ${user.firstName} ${user.lastName}`}
-                className="h-10 w-10 rounded-full object-cover"
+                className="h-10 w-10 rounded-full border border-border object-cover"
               />
               <div>
                 <h1 className="text-base font-semibold">Waiting for approval</h1>
@@ -62,23 +63,25 @@ export function AccountPage() {
 
   return (
     <div className="page-shell py-8">
-      <PageHeader title="Account" description="ISP client account." />
-      <article className="mt-6 rounded-xl border border-border bg-surface p-5">
-        <div className="flex items-center gap-3">
-          <img src={user.photoDataUrl} alt="" className="h-10 w-10 rounded-full object-cover" />
-          <h2 className="text-base font-semibold">{user.firstName} {user.lastName}</h2>
-        </div>
-        <div className="mt-3">
-          <DetailGrid
-            items={[
-              { label: "Account", value: accountNumber || "Not assigned" },
-              { label: "Username", value: user.username },
-              { label: "Email", value: user.email },
-              { label: "Phone", value: user.phone },
-            ]}
-          />
-        </div>
+      <PageHeader title="Profile" description="View and edit the details on this ISP client account." />
+      <article className="card mt-6 p-5">
+        <DetailGrid
+          items={[{ label: "Account", value: accountNumber || "Not assigned" }]}
+        />
       </article>
+      <ProfileForm
+        idPrefix="client-profile"
+        account={{
+          firstName: user.firstName,
+          lastName: user.lastName,
+          username: user.username,
+          email: user.email,
+          phone: user.phone,
+          loginCode: user.loginCode,
+          photoDataUrl: user.photoDataUrl,
+        }}
+        onSubmit={saveProfile}
+      />
     </div>
   );
 }

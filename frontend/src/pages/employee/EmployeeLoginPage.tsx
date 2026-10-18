@@ -65,7 +65,7 @@ export function EmployeeLoginPage() {
           Sign in with your 6-digit login code and 6-digit password. A role is available only after approval and allocation.
         </p>
         {registered ? (
-          <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground" role="status">
+          <p className="mt-4 notice" role="status">
             Employee account submitted and pending approval. Sign in to check the status.
           </p>
         ) : null}

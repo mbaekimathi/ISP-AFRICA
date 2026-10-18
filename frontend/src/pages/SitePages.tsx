@@ -119,7 +119,7 @@ export function DemoPage() {
             />
           </FormField>
           {pendingNotice ? (
-            <p className="rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground" role="status">
+            <p className="notice" role="status">
               {pendingNotice} Planned endpoint: {pendingIntegrations.demoRequest.plannedEndpoint}.
             </p>
           ) : null}
@@ -140,14 +140,16 @@ export function PrivacyPage() {
   );
 
   return (
-    <article className="page-shell max-w-3xl py-16">
-      <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Privacy Policy</h1>
-      <p className="mt-4 text-base leading-7 text-muted-foreground">
-        A privacy policy will be published before ISP CENTRIC collects customer or subscriber information. This landing page does not send form data to a server.
-      </p>
-      <p className="mt-4 text-base leading-7 text-muted-foreground">
-        Demo request details stay in your browser for validation only and are discarded when you leave or refresh the page.
-      </p>
+    <article className="page-shell py-16">
+      <div className="legal-prose">
+        <h1>Privacy Policy</h1>
+        <p>
+          A privacy policy will be published before ISP CENTRIC collects customer or subscriber information. This landing page does not send form data to a server.
+        </p>
+        <p>
+          Demo request details stay in your browser for validation only and are discarded when you leave or refresh the page.
+        </p>
+      </div>
     </article>
   );
 }
@@ -159,11 +161,13 @@ export function TermsPage() {
   );
 
   return (
-    <article className="page-shell max-w-3xl py-16">
-      <h1 className="text-3xl font-semibold tracking-tight sm:text-4xl">Terms of Service</h1>
-      <p className="mt-4 text-base leading-7 text-muted-foreground">
-        Terms of service will be published before the billing platform is offered for use. This website is a product introduction, not a service agreement.
-      </p>
+    <article className="page-shell py-16">
+      <div className="legal-prose">
+        <h1>Terms of Service</h1>
+        <p>
+          Terms of service will be published before the billing platform is offered for use. This website is a product introduction, not a service agreement.
+        </p>
+      </div>
     </article>
   );
 }

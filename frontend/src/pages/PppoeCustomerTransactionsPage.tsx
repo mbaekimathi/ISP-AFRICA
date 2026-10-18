@@ -5,11 +5,20 @@ import { ArrowLeft, CalendarClock, Wallet } from "lucide-react";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { FormField } from "@/components/ui/FormField";
+import { LiveLoad } from "@/components/ui/LiveLoad";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
 import { clientPage } from "@/lib/accounts";
 import { useAuth } from "@/providers/AuthProvider";
 import { billingLabelFor, invoiceTone, type Subscriber } from "@/pages/PppoeCustomerPage";
+
+function shiftDay(day: string, days: number) {
+  const value = new Date(`${day}T00:00:00`);
+  value.setDate(value.getDate() + days);
+  const month = `${value.getMonth() + 1}`.padStart(2, "0");
+  const date = `${value.getDate()}`.padStart(2, "0");
+  return `${value.getFullYear()}-${month}-${date}`;
+}
 
 export function PppoeCustomerTransactionsPage() {
   const { subscriberId = "" } = useParams();
@@ -19,15 +28,25 @@ export function PppoeCustomerTransactionsPage() {
   const [message, setMessage] = useState("");
   const [amount, setAmount] = useState("");
   const [reference, setReference] = useState("");
+  const [startDate, setStartDate] = useState("");
   const [payOpen, setPayOpen] = useState(search.get("pay") === "1");
   const amountRef = useRef<HTMLInputElement>(null);
 
   usePageMeta("Customer transactions — ISP CENTRIC", "Payments and invoices for one PPPoE client.");
 
+  function primePaymentForm(target: Subscriber) {
+    const today = new Date().toISOString().slice(0, 10);
+    const expiry = target.billing.expiry;
+    setStartDate(expiry && expiry > today ? expiry : today);
+    const price = Number(target.billing.price);
+    setAmount(price > 0 ? String(price) : "");
+  }
+
   function load() {
     apiRequest<{ subscriber: Subscriber }>(`/api/pppoe/subscribers/${subscriberId}`)
       .then((body) => {
         setSubscriber(body.subscriber);
+        if (search.get("pay") === "1") primePaymentForm(body.subscriber);
         setMessage("");
       })
       .catch((error: unknown) => setMessage(error instanceof Error ? error.message : "That client could not be loaded."));
@@ -52,18 +71,23 @@ export function PppoeCustomerTransactionsPage() {
   }
 
   if (!subscriber) {
-    return <div className="page-shell py-8 text-sm text-muted-foreground">{message || "Loading transactions…"}</div>;
+    if (message) {
+      return <div className="page-shell py-8 text-sm text-muted-foreground">{message}</div>;
+    }
+    return <LiveLoad label="Loading transactions" />;
   }
 
   const home = (path: string) => (user ? clientPage(user, path) : path);
   const billing = billingLabelFor(subscriber.billingStatus);
   const outstandingDue = Number(subscriber.billing.outstanding) > 0;
+  const today = new Date().toISOString().slice(0, 10);
   const paidAmount = Number(amount);
   const packagePrice = Number(subscriber.billing.price);
-  const purchasedDays = packagePrice > 0 && paidAmount > 0 ? Math.floor((paidAmount * subscriber.billing.cycleDays) / packagePrice) : 0;
-  const anchor = subscriber.billing.expiry && subscriber.billing.expiry > new Date().toISOString().slice(0, 10) ? subscriber.billing.expiry : new Date().toISOString().slice(0, 10);
-  const newExpiry = purchasedDays > 0 ? new Date(`${anchor}T00:00:00`) : null;
-  if (newExpiry) newExpiry.setDate(newExpiry.getDate() + purchasedDays + subscriber.billing.graceDays);
+  const purchasedDays =
+    packagePrice > 0 && paidAmount > 0 ? Math.max(1, Math.ceil((paidAmount * subscriber.billing.cycleDays) / packagePrice)) : 0;
+  const anchorDay = startDate || (subscriber.billing.expiry && subscriber.billing.expiry > today ? subscriber.billing.expiry : today);
+  const dueDate = purchasedDays > 0 ? shiftDay(anchorDay, purchasedDays) : null;
+  const newExpiry = dueDate ? shiftDay(dueDate, subscriber.billing.graceDays) : null;
 
   const ledger = [
     ...subscriber.billing.invoices.map((invoice) => ({
@@ -107,6 +131,7 @@ export function PppoeCustomerTransactionsPage() {
             <PrimaryButton
               type="button"
               onClick={() => {
+                primePaymentForm(subscriber);
                 setPayOpen(true);
                 window.setTimeout(() => amountRef.current?.focus(), 50);
               }}
@@ -153,7 +178,7 @@ export function PppoeCustomerTransactionsPage() {
         )}
       </section>
 
-      {message ? <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{message}</p> : null}
+      {message ? <p className="mt-4 notice" role="alert">{message}</p> : null}
 
       <Dialog.Root open={payOpen} onOpenChange={setPayOpen}>
         <Dialog.Portal>
@@ -169,17 +194,18 @@ export function PppoeCustomerTransactionsPage() {
               className="grid gap-3"
               onSubmit={(event) => {
                 event.preventDefault();
-                void post("renew", { amount, mpesaReference: reference }).then(() => setPayOpen(false));
+                void post("renew", { amount, mpesaReference: reference, startDate }).then(() => setPayOpen(false));
               }}
             >
+              <FormField id="payment-start" label="Start date">
+                <input id="payment-start" type="date" className="field" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
+              </FormField>
               <FormField id="payment-amount" label="Amount (KSh)">
                 <input id="payment-amount" ref={amountRef} className="field" value={amount} onChange={(event) => setAmount(event.target.value)} />
               </FormField>
-              {paidAmount > 0 && packagePrice > 0 ? (
+              {paidAmount > 0 && packagePrice > 0 && newExpiry ? (
                 <p className="text-xs text-muted-foreground">
-                  ≈ {purchasedDays} {purchasedDays === 1 ? "day" : "days"} of internet
-                  {newExpiry ? ` · access until ${newExpiry.toISOString().slice(0, 10)}` : ""}
-                  {purchasedDays === 0 ? " · less than a day — enter a higher amount" : ""}
+                  ≈ {purchasedDays} {purchasedDays === 1 ? "day" : "days"} of internet from {anchorDay} · access until {newExpiry}
                 </p>
               ) : null}
               <FormField id="payment-reference" label="M-Pesa reference (optional)">

@@ -1,4 +1,5 @@
 import { Link } from "react-router-dom";
+import { Activity, CheckCircle2, CircleAlert, CircleMinus } from "lucide-react";
 import { useSavedQuery } from "@/hooks/useSavedQuery";
 import { clientPage } from "@/lib/accounts";
 import { cn } from "@/lib/cn";
@@ -61,21 +62,46 @@ function Metric({
   tone: "good" | "warn" | "muted" | "info";
 }) {
   const toneClass = {
-    good: "border-success/40",
-    warn: "border-warning/40",
+    good: "border-success-border",
+    warn: "border-warning-border",
     muted: "border-border",
-    info: "border-primary/40",
+    info: "border-info-border",
   }[tone];
+  const chipClass = {
+    good: "bg-success-soft text-success",
+    warn: "bg-warning-soft text-warning",
+    muted: "bg-surface-muted text-muted-foreground",
+    info: "bg-info-soft text-info",
+  }[tone];
+  const Icon = {
+    good: CheckCircle2,
+    warn: CircleAlert,
+    muted: CircleMinus,
+    info: Activity,
+  }[tone];
+  const loading = value === "—";
   const body = (
-    <article className={cn("h-full rounded-xl border bg-surface px-4 py-4", toneClass)}>
-      <h3 className="text-xs text-muted-foreground">{label}</h3>
-      <p className="mt-1 text-xl font-semibold tabular-nums tracking-tight sm:text-2xl">{value}</p>
-      <p className="mt-1 text-xs leading-5 text-muted-foreground">{detail}</p>
+    <article className={cn("card h-full px-4 py-4", toneClass)}>
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-caption font-medium uppercase tracking-wide text-muted-foreground">{label}</h3>
+        <span className={cn("inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg", chipClass)} aria-hidden="true">
+          <Icon className="h-4 w-4" />
+        </span>
+      </div>
+      {loading ? (
+        <div className="skeleton mt-2 h-7 w-16 sm:h-8" aria-hidden="true" />
+      ) : (
+        <p className="mt-1 text-h2 font-semibold tabular tracking-tight">{value}</p>
+      )}
+      <p className="mt-1 text-caption leading-5 text-muted-foreground">{detail}</p>
     </article>
   );
   if (!to) return body;
   return (
-    <Link className="block h-full rounded-xl outline-none focus-visible:ring-2 focus-visible:ring-primary" to={to}>
+    <Link
+      className="block h-full rounded-xl outline-none transition-transform duration-fast ease-out hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
+      to={to}
+    >
       {body}
     </Link>
   );
@@ -126,7 +152,7 @@ export function NetworkAnalysis() {
   return (
     <div className="mt-6 space-y-6">
       {error ? (
-        <p className="rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+        <p className="notice" role="alert">
           {error}
         </p>
       ) : null}

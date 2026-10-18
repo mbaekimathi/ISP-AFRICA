@@ -25,20 +25,23 @@
     <link rel="icon" href="/favicon.svg" type="image/svg+xml" />
     <script>
       (function () {
-        var theme = "light";
+        var theme = "dark";
         try {
           var stored = localStorage.getItem("isp-centric-theme");
           if (stored === "light" || stored === "dark") {
             theme = stored;
-          } else if (window.matchMedia("(prefers-color-scheme: dark)").matches) {
-            theme = "dark";
           }
         } catch (error) {
-          theme = "light";
+          theme = "dark";
         }
         var root = document.documentElement;
         if (theme === "dark") root.classList.add("dark");
         root.style.colorScheme = theme;
+        try {
+          var preset = localStorage.getItem("isp-centric-theme-name");
+          var presets = ["classic", "cobalt", "ocean", "evergreen", "plum", "burgundy", "bronze", "graphite"];
+          if (presets.indexOf(preset) !== -1) root.classList.add("theme-" + preset);
+        } catch (error) {}
         var meta = document.querySelector('meta[name="theme-color"]');
         if (meta) meta.setAttribute("content", theme === "dark" ? "#080D18" : "#F4F7FB");
       })();

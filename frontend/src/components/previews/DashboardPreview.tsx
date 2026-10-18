@@ -104,7 +104,7 @@ export function DashboardPreview() {
               <p className="text-sm font-semibold text-foreground">Subscribers</p>
             </div>
             <div className="overflow-x-auto">
-              <table className="w-full min-w-[34rem] text-left text-sm">
+              <table className="data-table min-w-[34rem]">
                 <caption className="sr-only">Sample subscriber records in the product preview</caption>
                 <thead className="bg-surface-muted text-xs uppercase tracking-wide text-muted-foreground">
                   <tr>

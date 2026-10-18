@@ -102,7 +102,7 @@ export function IspPaymentsPage() {
     own: { state: "idle", reason: "" },
     company: { state: "idle", reason: "" },
   });
-  const [savedMode, setSavedMode] = useState<PaymentMode | null>(null);
+  const [, setSavedMode] = useState<PaymentMode | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [pending, setPending] = useState(false);
@@ -217,23 +217,18 @@ export function IspPaymentsPage() {
         title="Payments"
         description="Set up this account’s Daraja API, or use the company payment settings. Saved secrets stay hidden and are kept when you leave those fields unchanged."
       />
-      {savedMode ? (
-        <p className="mt-4 text-sm text-muted-foreground">
-          Payments currently use {savedMode === "own" ? "this account’s Daraja API" : "the company payment settings"}.
-        </p>
-      ) : null}
       {error ? (
-        <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+        <p className="mt-4 notice" role="alert">
           {error}
         </p>
       ) : null}
       {notice ? (
-        <p className="mt-4 rounded-xl border border-success/30 bg-success/10 px-4 py-3 text-sm text-foreground" role="status">
+        <p className="notice mt-4 border-success-border bg-success-soft/60" role="status">
           {notice}
         </p>
       ) : null}
       <form
-        className="form-card mt-6"
+        className="form-card mt-6 max-w-2xl"
         onSubmit={(event) => {
           event.preventDefault();
           setError("");
@@ -265,8 +260,8 @@ export function IspPaymentsPage() {
               <label
                 key={choice.mode}
                 className={cn(
-                  "grid cursor-pointer gap-1 rounded-lg border px-3 py-2",
-                  selected ? "border-primary" : "border-border",
+                  "grid cursor-pointer gap-1 rounded-lg border px-3 py-2 transition-colors duration-fast ease-out",
+                  selected ? "border-primary bg-primary/5 shadow-xs" : "border-border hover:border-input hover:bg-surface-muted/50",
                 )}
               >
                 <span className="flex items-center gap-3">
@@ -446,7 +441,7 @@ export function IspPaymentsPage() {
               </FormField>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-3">
+          <div className="sticky bottom-3 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-surface/90 px-4 py-3 shadow-card backdrop-blur-md">
             <PrimaryButton type="submit" disabled={pending || !loaded}>
               {mode === "own" ? "Save my Daraja API" : "Save company payment settings"}
             </PrimaryButton>

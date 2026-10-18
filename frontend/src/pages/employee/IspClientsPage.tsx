@@ -49,22 +49,35 @@ export function IspClientsPage() {
         description="Every ISP client in this system. Access opens their portal in this browser as that client."
       />
       {message ? (
-        <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+        <p className="notice mt-4" role="alert">
           {message}
         </p>
       ) : null}
       {!loaded && !message ? (
-        <p className="mt-6 text-sm text-muted-foreground">Loading ISP clients…</p>
+        <div className="mt-6 grid gap-4" aria-hidden="true">
+          {[0, 1, 2].map((index) => (
+            <div key={index} className="card p-5">
+              <div className="flex items-center gap-3">
+                <div className="skeleton h-10 w-10 rounded-full" />
+                <div className="grid flex-1 gap-2">
+                  <div className="skeleton h-4 w-1/3" />
+                  <div className="skeleton h-3 w-1/2" />
+                </div>
+              </div>
+            </div>
+          ))}
+          <span className="sr-only">Loading ISP clients…</span>
+        </div>
       ) : null}
       {loaded && clients.length === 0 && !message ? (
-        <p className="mt-6 rounded-xl border border-border bg-surface p-5 text-sm text-muted-foreground">No ISP clients are registered yet.</p>
+        <p className="panel mt-6 p-5 text-sm text-muted-foreground">No ISP clients are registered yet.</p>
       ) : (
         <div className="mt-6 grid gap-4">
           {clients.map((client) => (
-            <article key={client.id} className="rounded-xl border border-border bg-surface p-5">
+            <article key={client.id} className="card p-5">
               <div className="flex flex-wrap items-center justify-between gap-3">
                 <div className="flex min-w-0 items-center gap-3">
-                  <img src={client.photoDataUrl} alt="" className="h-10 w-10 rounded-full object-cover" />
+                  <img src={client.photoDataUrl} alt="" className="h-10 w-10 rounded-full border border-border object-cover" />
                   <div className="flex min-w-0 flex-wrap items-center gap-2">
                     <h2 className="text-base font-semibold">{client.firstName} {client.lastName}</h2>
                     <StatusBadge tone={client.status === "approved" ? "active" : "due"}>

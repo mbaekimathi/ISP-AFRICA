@@ -1,8 +1,9 @@
-import { Menu } from "lucide-react";
+import { Globe, Menu, UserRound } from "lucide-react";
 import { useCallback, useState } from "react";
 import { Link, Navigate, Outlet, useLocation } from "react-router-dom";
 import { Logo } from "@/components/brand/Logo";
 import { AppSidebar } from "@/components/layout/AppSidebar";
+import { NotificationBell } from "@/components/layout/NotificationBell";
 import { SessionMenu } from "@/components/layout/SessionMenu";
 import { LiveClock } from "@/components/ui/LiveClock";
 import { LiveLoad } from "@/components/ui/LiveLoad";
@@ -34,8 +35,16 @@ const settingsLinks = [
 
 const ispCompanyLinks = [
   { label: "Company", to: "/account/settings/isp-company/company" },
-  { label: "Profile", to: "/account/settings/isp-company/profile" },
   { label: "Theme", to: "/account/settings/isp-company/theme" },
+];
+
+const notificationLinks = [
+  { label: "Notifications", to: "/account/settings/isp-notifications" },
+  { label: "Settings", to: "/account/settings/isp-notifications/settings" },
+];
+
+const communicationsLinks = [
+  { label: "Notifications", to: "/account/settings/isp-notifications/settings" },
 ];
 
 function pagePath(pathname: string, code: string | null | undefined) {
@@ -60,6 +69,14 @@ function linksForPage(pathname: string) {
     ];
   }
   if (pathname === "/mikrotiks" || pathname.endsWith("/mikrotiks")) return mikrotikLinks;
+  const subscriber = pathname.match(/^\/pppoe\/([^/]+)/);
+  if (subscriber && subscriber[1] !== "register") {
+    const id = subscriber[1];
+    return [
+      { label: "Client payments", to: `/pppoe/${id}/transactions` },
+      { label: "Client usage", to: `/pppoe/${id}` },
+    ];
+  }
   if (pathname === "/clients" || pathname === "/clients/payments" || pathname === "/clients/usage" || pathname.startsWith("/pppoe")) {
     return [
       { label: "PPPoE-clients", to: "/clients" },
@@ -79,6 +96,8 @@ function linksForPage(pathname: string) {
   if (pathname === "/billings" || pathname.endsWith("/billings")) {
     return [{ label: "Packages", to: "/account/settings/isp-package" }];
   }
+  if (pathname.startsWith("/account/settings/isp-notifications")) return notificationLinks;
+  if (pathname.endsWith("/account/settings/isp-communications")) return communicationsLinks;
   if (pathname === "/account/settings" || pathname.endsWith("/account/settings")) return settingsLinks;
   if (pathname.endsWith("/account/settings/isp-company")) return ispCompanyLinks;
   return [];
@@ -129,7 +148,7 @@ export function ClientLayout() {
       {sidebarOpen ? (
         <button
           type="button"
-          className="fixed inset-0 z-30 bg-[var(--overlay)] lg:hidden"
+          className="fixed inset-0 z-30 bg-[var(--overlay)] backdrop-blur-sm lg:hidden"
           aria-label="Close menu"
           onClick={closeSidebar}
         />
@@ -142,6 +161,7 @@ export function ClientLayout() {
         onClose={closeSidebar}
         dashboardTo={clientPage(user, "/dashboard")}
         settingsTo={clientPage(user, "/account/settings")}
+        notifyTo={clientPage(user, "/account/settings/isp-notifications")}
         signOutTo="/login"
         onSignOut={logout}
         profile={
@@ -157,11 +177,11 @@ export function ClientLayout() {
         }
       />
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-50 border-b border-border bg-background/95 backdrop-blur-md">
+        <header className="sticky top-0 z-50 border-b border-border/80 bg-surface/80 shadow-header backdrop-blur-md">
           <div className="app-bar">
             <button
               type="button"
-              className="inline-flex h-11 w-11 items-center justify-center rounded-lg border border-border bg-surface/80 text-foreground lg:hidden"
+              className="inline-flex h-11 w-11 items-center justify-center rounded-lg border border-border bg-surface/80 text-foreground shadow-xs transition duration-fast ease-out hover:bg-surface lg:hidden"
               aria-label="Open menu"
               aria-expanded={sidebarOpen}
               onClick={() => setSidebarOpen(true)}
@@ -172,7 +192,12 @@ export function ClientLayout() {
               <Logo />
             </Link>
             <LiveClock />
-            <div className="ml-auto flex items-center gap-2">
+            <div className="ml-auto flex items-center gap-2 border-l border-border pl-3 max-sm:border-l-0 max-sm:pl-0">
+              <NotificationBell
+                feedPath="/api/notifications/feed"
+                to={clientPage(user, "/account/settings/isp-notifications")}
+                enabled={Boolean(user)}
+              />
               <ThemeToggle />
               {user ? (
                 <SessionMenu
@@ -181,6 +206,7 @@ export function ClientLayout() {
                   detail={user.email}
                   accountNumber={user.clientCode ?? undefined}
                   photoUrl={user.photoDataUrl}
+                  dashboardTo={clientPage(user, "/dashboard")}
                   profileTo={clientPage(user, "/account")}
                   signOutTo="/login"
                   onSignOut={logout}
@@ -196,10 +222,15 @@ export function ClientLayout() {
           <div className="app-footer">
             <p>© {new Date().getFullYear()} ISP CENTRIC</p>
             <nav aria-label="Account footer" className="flex flex-wrap gap-x-4 gap-y-1">
-              <Link className="hover:text-foreground" to={clientPage(user, "/account")}>
+              <Link
+                className="inline-flex items-center gap-1.5 text-foreground hover:text-primary"
+                to={clientPage(user, "/account")}
+              >
+                <UserRound className="h-3.5 w-3.5 text-indigo-500" aria-hidden="true" />
                 Account
               </Link>
-              <Link className="hover:text-foreground" to="/">
+              <Link className="inline-flex items-center gap-1.5 text-foreground hover:text-primary" to="/">
+                <Globe className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />
                 Public site
               </Link>
             </nav>

@@ -53,6 +53,14 @@ export async function registerAccount(input: AccountInput): Promise<PublicAccoun
   return withProfilePhoto(body.account);
 }
 
+export async function updateAccountProfile(input: AccountInput): Promise<PublicAccount> {
+  const body = await apiRequest<{ account: PublicAccount }>("/api/client/profile", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return withProfilePhoto(body.account);
+}
+
 export async function loginWithCode(loginCode: string, password: string): Promise<PublicAccount> {
   const body = await apiRequest<{ account: PublicAccount }>("/api/client/login", {
     method: "POST",
@@ -130,7 +138,7 @@ export function fileToPackageImage(file: File) {
   });
 }
 
-export function fileToProfilePhoto(file: File) {
+function fileToSquareImage(file: File, size: number) {
   return new Promise<string>((resolve, reject) => {
     if (!file.type.startsWith("image/")) {
       reject(new Error("Choose an image file."));
@@ -144,7 +152,6 @@ export function fileToProfilePhoto(file: File) {
     const image = new Image();
     const url = URL.createObjectURL(file);
     image.onload = () => {
-      const size = 256;
       const canvas = document.createElement("canvas");
       canvas.width = size;
       canvas.height = size;
@@ -167,4 +174,12 @@ export function fileToProfilePhoto(file: File) {
     };
     image.src = url;
   });
+}
+
+export function fileToProfilePhoto(file: File) {
+  return fileToSquareImage(file, 256);
+}
+
+export function fileToCompanyLogo(file: File) {
+  return fileToSquareImage(file, 256);
 }

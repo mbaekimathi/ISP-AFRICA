@@ -175,7 +175,7 @@ export function OnboardMikrotikPage() {
 
         <section className="rounded-2xl border border-border bg-surface p-6 shadow-card">
           {error ? (
-            <p className="mb-5 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+            <p className="mb-5 notice" role="alert">
               {error}{" "}
               {error.includes("Sign in") ? (
                 <Link className="font-semibold text-primary" to="/login">
@@ -245,7 +245,7 @@ export function OnboardMikrotikPage() {
                 <li>Creates an API user that can read, test, and use the API.</li>
               </ul>
               {!built.applicable ? (
-                <p className="rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm">
+                <p className="notice">
                   {built.reason} Copy stays closed so this script cannot be pasted onto the router.
                 </p>
               ) : null}

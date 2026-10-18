@@ -157,7 +157,10 @@ function StatCard({ label, value, detail, meter }: { label: string; value: strin
       <p className="mt-1.5 text-xl font-semibold tracking-tight tabular-nums sm:text-2xl">{value}</p>
       <p className="mt-1 text-xs leading-5 text-muted-foreground">{detail}</p>
       {meter != null ? (
-        <div className="live-meter mt-3">
+        <div
+          className="live-meter mt-3"
+          data-tone={meter >= 90 ? "crit" : meter >= 70 ? "warn" : "ok"}
+        >
           <span style={{ ["--meter" as string]: `${meter}%` }} />
         </div>
       ) : null}
@@ -330,7 +333,7 @@ export function MikrotikLivePage() {
         />
       ) : null}
       {error ? (
-        <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+        <p className="mt-4 notice" role="alert">
           {error}
         </p>
       ) : null}
@@ -378,11 +381,14 @@ export function MikrotikLivePage() {
             <StatCard label="PPPoE" value={live.pppoeActive == null ? "—" : String(live.pppoeActive)} detail={live.pppoeActive == null ? "Not installed" : "Active sessions"} />
           </section>
           <section className="live-panel overflow-x-auto">
-            <div className="flex items-center justify-between border-b border-border px-5 py-3">
-              <h2 className="text-sm font-semibold">Interfaces</h2>
-              <p className="text-xs text-muted-foreground">{live.interfaces.length}</p>
+            <div className="live-panel-header">
+              <h2>
+                <span className="live-dot" aria-hidden="true" />
+                Interfaces
+              </h2>
+              <p className="text-caption tabular text-muted-foreground">{live.interfaces.length}</p>
             </div>
-            <table className="w-full min-w-[36rem] text-left text-sm">
+            <table className="data-table min-w-[36rem]">
               <thead className="text-xs text-muted-foreground">
                 <tr>
                   <th className="px-5 py-2.5 font-medium">Name</th>
@@ -422,16 +428,19 @@ export function MikrotikLivePage() {
             </table>
           </section>
           <section className="live-panel overflow-x-auto">
-            <div className="flex items-center justify-between border-b border-border px-5 py-3">
-              <h2 className="text-sm font-semibold">Health</h2>
-              <p className="text-xs text-muted-foreground">{live.health?.drops.length ?? 0} drops</p>
+            <div className="live-panel-header">
+              <h2>
+                <span className="live-dot" aria-hidden="true" />
+                Health
+              </h2>
+              <p className="text-caption tabular text-muted-foreground">{live.health?.drops.length ?? 0} drops</p>
             </div>
             <HealthTrend
               range={healthRange}
               trend={(healthRange === "live" ? live.health?.trend : live.health?.trends?.[healthRange] ?? healthTrends[healthRange]) ?? []}
               onRange={setHealthRange}
             />
-            <table className="w-full min-w-[36rem] text-left text-sm">
+            <table className="data-table min-w-[36rem]">
               <thead className="text-xs text-muted-foreground">
                 <tr>
                   <th className="px-5 py-2.5 font-medium">Where</th>

@@ -1,6 +1,6 @@
 import { Outlet } from "react-router-dom";
-import { PublicFooter } from "@/components/layout/PublicFooter";
-import { PublicHeader } from "@/components/layout/PublicHeader";
+import { PublicFooter } from "@/components/public/PublicFooter";
+import { PublicNavbar } from "@/components/public/PublicNavbar";
 
 export function PublicLayout() {
   return (
@@ -11,8 +11,12 @@ export function PublicLayout() {
       >
         Skip to content
       </a>
-      <PublicHeader />
-      <main id="main" className="flex-1">
+      <PublicNavbar />
+      <main id="main" className="relative flex-1">
+        <div
+          className="pointer-events-none absolute inset-x-0 top-0 h-[26rem] bg-gradient-glow"
+          aria-hidden="true"
+        />
         <Outlet />
       </main>
       <PublicFooter />

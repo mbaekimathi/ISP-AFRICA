@@ -5,15 +5,15 @@ export function LogoMark({ className = "h-8 w-8", variant = "client" }: { classN
       <rect width="32" height="32" rx="9" className="fill-sidebar" />
       <path
         d="M16 16 9.5 10.5M16 16 23 8.5M16 16 24.5 18M16 16 11 23.5"
-        stroke={employee ? "#FDBA74" : "#BFDBFE"}
+        stroke="var(--sidebar-accent)"
         strokeWidth="1.4"
         strokeLinecap="round"
       />
-      <circle cx="16" cy="16" r="2.7" fill={employee ? "#FFF7ED" : "#F8FBFF"} />
-      <circle cx="9" cy="10" r="2.1" fill={employee ? "#FDBA74" : "#67E8F9"} />
-      <circle cx="23.2" cy="8.2" r="2.1" fill={employee ? "#2DD4BF" : "#93C5FD"} />
-      <circle cx="24.6" cy="18.4" r="2.1" fill={employee ? "#C2410C" : "#3B82F6"} />
-      <circle cx="10.6" cy="23.6" r="2.1" fill={employee ? "#14B8A6" : "#22D3EE"} />
+      <circle cx="16" cy="16" r="2.7" fill="var(--sidebar-foreground)" />
+      <circle cx="9" cy="10" r="2.1" fill={employee ? "var(--sidebar-accent)" : "var(--accent)"} />
+      <circle cx="23.2" cy="8.2" r="2.1" fill={employee ? "var(--accent)" : "rgb(var(--brand-300-rgb))"} />
+      <circle cx="24.6" cy="18.4" r="2.1" fill={employee ? "var(--primary)" : "var(--primary)"} />
+      <circle cx="10.6" cy="23.6" r="2.1" fill={employee ? "var(--accent)" : "var(--accent)"} />
     </svg>
   );
 }

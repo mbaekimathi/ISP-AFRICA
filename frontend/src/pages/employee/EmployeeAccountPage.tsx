@@ -1,14 +1,16 @@
 import { Navigate } from "react-router-dom";
+import { ProfileForm } from "@/components/profile/ProfileForm";
 import { PrimaryButton } from "@/components/ui/Buttons";
 import { LiveLoad } from "@/components/ui/LiveLoad";
-import { DetailGrid } from "@/components/ui/DetailGrid";
+import { DetailGrid, PageHeader } from "@/components/ui/DetailGrid";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
+import { employeeRoleLabel } from "@/lib/employees";
 import { useEmployeeAuth } from "@/providers/EmployeeAuthProvider";
 
 export function EmployeeAccountPage() {
   usePageMeta("Employee account — ISP CENTRIC", "ISP CENTRIC employee account.");
-  const { employee, ready, logout } = useEmployeeAuth();
+  const { employee, ready, logout, saveProfile } = useEmployeeAuth();
 
   if (!ready) {
     return <LiveLoad label="Loading account" />;
@@ -22,7 +24,32 @@ export function EmployeeAccountPage() {
   const waitingForRole = !waitingForApproval && !employee.role;
 
   if (!waitingForApproval && !waitingForRole) {
-    return null;
+    return (
+      <div className="page-shell py-8">
+        <PageHeader title="Profile" description="View and edit the details on this employee account." />
+        <article className="card mt-6 p-5">
+          <DetailGrid
+            items={[
+              { label: "Employee", value: employee.employeeCode ?? "Not assigned" },
+              ...(employee.role ? [{ label: "Role", value: employeeRoleLabel(employee.role) }] : []),
+            ]}
+          />
+        </article>
+        <ProfileForm
+          idPrefix="employee-profile"
+          account={{
+            firstName: employee.firstName,
+            lastName: employee.lastName,
+            username: employee.username,
+            email: employee.email,
+            phone: employee.phone,
+            loginCode: employee.loginCode,
+            photoDataUrl: employee.photoDataUrl,
+          }}
+          onSubmit={saveProfile}
+        />
+      </div>
+    );
   }
 
   return (

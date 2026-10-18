@@ -296,7 +296,7 @@ export function WanUplinkPanel({ deviceId, version, ports, sample = false }: { d
           ))}
         </ul>
       ) : null}
-      {error ? <p className="mt-3 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{error}</p> : null}
+      {error ? <p className="mt-3 notice" role="alert">{error}</p> : null}
     </section>
   );
 }

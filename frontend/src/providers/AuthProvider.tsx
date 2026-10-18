@@ -1,5 +1,5 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
-import { approveAccount, enterClientPortal, loginWithCode, logoutAccount, readSession, registerAccount, type AccountInput, type PublicAccount } from "@/lib/accounts";
+import { approveAccount, enterClientPortal, loginWithCode, logoutAccount, readSession, registerAccount, updateAccountProfile, type AccountInput, type PublicAccount } from "@/lib/accounts";
 import { logoutEmployee } from "@/lib/employees";
 import { activePortal, clearActivePortal, rememberPortal } from "@/lib/portal";
 
@@ -10,6 +10,7 @@ type AuthContextValue = {
   login: (loginCode: string, password: string) => Promise<PublicAccount>;
   approve: (id: string) => Promise<void>;
   openAsClient: (id: string) => Promise<PublicAccount>;
+  saveProfile: (input: AccountInput) => Promise<void>;
   logout: () => Promise<void>;
 };
 
@@ -71,6 +72,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return account;
   }, []);
 
+  const saveProfile = useCallback(async (input: AccountInput) => {
+    setUser(await updateAccountProfile(input));
+  }, []);
+
   const logout = useCallback(async () => {
     await logoutAccount();
     await logoutEmployee();
@@ -79,8 +84,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ user, ready, register, login, approve, openAsClient, logout }),
-    [user, ready, register, login, approve, openAsClient, logout],
+    () => ({ user, ready, register, login, approve, openAsClient, saveProfile, logout }),
+    [user, ready, register, login, approve, openAsClient, saveProfile, logout],
   );
 
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;

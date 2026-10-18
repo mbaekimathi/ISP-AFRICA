@@ -82,6 +82,14 @@ export async function registerEmployee(input: EmployeeInput): Promise<PublicEmpl
   return withProfilePhoto(body.employee);
 }
 
+export async function updateEmployeeProfile(input: EmployeeInput): Promise<PublicEmployee> {
+  const body = await apiRequest<{ employee: PublicEmployee }>("/api/employee/profile", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+  return withProfilePhoto(body.employee);
+}
+
 export async function loginEmployee(loginCode: string, password: string): Promise<PublicEmployee> {
   const body = await apiRequest<{ employee: PublicEmployee }>("/api/employee/login", {
     method: "POST",

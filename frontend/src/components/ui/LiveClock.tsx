@@ -19,12 +19,13 @@ export function LiveClock() {
 
   return (
     <div
-      className="hidden items-baseline gap-2 sm:flex"
+      className="hidden items-center gap-2 sm:flex"
       role="timer"
       aria-label={`${date}, ${hours}:${minutes}:${seconds}`}
     >
-      <span className="text-xs text-muted-foreground">{date}</span>
-      <span className="font-mono text-sm font-semibold tabular-nums tracking-tight text-foreground">
+      <span className="live-dot" aria-hidden="true" />
+      <span className="text-xs text-subtle">{date}</span>
+      <span className="font-mono text-sm font-semibold tabular tracking-tight text-foreground">
         {hours}:{minutes}:
         <span key={seconds} className="clock-tick inline-block">
           {seconds}

@@ -142,11 +142,11 @@ export function BillingsPage() {
         description="Every payment, invoice, and hotspot sale on this account. Filter by service, or pick a day, month, year, or custom period."
       />
       {message ? (
-        <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+        <p className="notice mt-4" role="alert">
           {message}
         </p>
       ) : null}
-      <form className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4" onSubmit={(event) => event.preventDefault()}>
+      <form className="toolbar mt-6 sm:grid-cols-2 lg:grid-cols-4" onSubmit={(event) => event.preventDefault()}>
         <label className="grid gap-1.5 text-sm font-medium">
           Service
           <select className="field" value={service} onChange={(event) => setService(event.target.value as ServiceFilter)}>
@@ -204,9 +204,9 @@ export function BillingsPage() {
           </>
         ) : null}
       </form>
-      <div className="mt-4 overflow-x-auto rounded-xl border border-border bg-surface">
-        <table className="min-w-[64rem] w-full text-left text-sm">
-          <thead className="border-b border-border text-xs text-muted-foreground">
+      <div className="table-wrap mt-4">
+        <table className="data-table min-w-[64rem]">
+          <thead>
             <tr>
               <th className="px-3 py-3 font-medium">Date</th>
               <th className="px-3 py-3 font-medium">Customer</th>
@@ -221,17 +221,24 @@ export function BillingsPage() {
           <tbody>
             {!report && !message ? (
               <tr>
-                <td colSpan={8} className="px-3 py-6 text-muted-foreground">Loading transactions…</td>
+                <td colSpan={8} className="px-3 py-6">
+                  <div className="grid gap-2.5" aria-hidden="true">
+                    <div className="skeleton h-4 w-1/3" />
+                    <div className="skeleton h-4 w-3/5" />
+                    <div className="skeleton h-4 w-2/5" />
+                  </div>
+                  <span className="sr-only">Loading transactions…</span>
+                </td>
               </tr>
             ) : null}
             {report?.transactions.length === 0 ? (
               <tr>
-                <td colSpan={8} className="px-3 py-6 text-muted-foreground">No transactions match these filters.</td>
+                <td colSpan={8} className="px-3 py-10 text-center text-muted-foreground">No transactions match these filters.</td>
               </tr>
             ) : null}
             {report?.transactions.map((item) => (
-              <tr key={item.id} className="border-b border-border last:border-0">
-                <td className="whitespace-nowrap px-3 py-3">{item.createdAt}</td>
+              <tr key={item.id}>
+                <td className="whitespace-nowrap px-3 py-3 tabular">{item.createdAt}</td>
                 <td className="px-3 py-3">
                   <div className="font-medium">{item.customer || "—"}</div>
                   <div className="text-xs text-muted-foreground">{item.contact}</div>
@@ -243,8 +250,18 @@ export function BillingsPage() {
                 </td>
                 <td className="px-3 py-3">{kindLabel[item.kind]}</td>
                 <td className="px-3 py-3">{item.detail || "—"}</td>
-                <td className="px-3 py-3 text-xs text-muted-foreground">{item.reference || "—"}</td>
-                <td className="px-3 py-3 text-right font-semibold">{money(item.amount)}</td>
+                <td className="px-3 py-3 font-mono text-xs text-muted-foreground">{item.reference || "—"}</td>
+                <td
+                  className={`px-3 py-3 text-right font-semibold tabular ${
+                    item.status === "paid"
+                      ? "text-success"
+                      : item.status === "failed" || item.status === "void"
+                        ? "text-destructive"
+                        : "text-warning"
+                  }`}
+                >
+                  {money(item.amount)}
+                </td>
                 <td className="px-3 py-3">
                   <StatusBadge tone={statusTone[item.status] ?? "neutral"}>{item.status}</StatusBadge>
                 </td>
@@ -254,7 +271,7 @@ export function BillingsPage() {
         </table>
       </div>
       {report ? (
-        <p className="mt-3 text-xs text-muted-foreground">
+        <p className="mt-3 text-xs text-muted-foreground tabular">
           {report.total} transactions · Collected {money(report.collected)}
           {Number(report.outstanding) > 0 ? ` · Outstanding ${money(report.outstanding)}` : ""}
         </p>

@@ -123,11 +123,11 @@ export function CompanyPaymentsPage() {
         description="Set up the company Daraja API credentials and the company payment gateway. Saved secrets stay hidden and are kept when you leave those fields unchanged."
       />
       {error ? (
-        <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+        <p className="mt-4 notice" role="alert">
           {error}
         </p>
       ) : null}
-      <div className="form-stack mt-6">
+      <div className="form-stack mt-6 max-w-2xl">
         <FormPicker
           label="Company payment form"
           value={panel}
@@ -139,7 +139,7 @@ export function CompanyPaymentsPage() {
         />
       </div>
       <form
-        className="form-card mt-4"
+        className="form-card mt-4 max-w-2xl"
         hidden={panel !== "daraja"}
         onSubmit={(event) => {
           event.preventDefault();
@@ -221,7 +221,7 @@ export function CompanyPaymentsPage() {
         </div>
       </form>
       <form
-        className="form-card mt-4"
+        className="form-card mt-4 max-w-2xl"
         hidden={panel !== "gateway"}
         onSubmit={(event) => {
           event.preventDefault();

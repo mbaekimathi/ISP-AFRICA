@@ -1377,29 +1377,137 @@ def session_rows(cursor, username, limit, offset):
     return {"sessions": sessions, "total": total, "limit": limit, "offset": offset}
 
 
-def general_usage(cursor, client_id, service):
+USAGE_BUCKETS = {
+    "hour": "HOUR(a.acctstarttime)",
+    "day": "DATE(a.acctstarttime)",
+    "month": "DATE_FORMAT(a.acctstarttime, '%%Y-%%m')",
+}
+
+
+def usage_window(query):
+    """Resolve ?view=day|period|month|year into a date range and bucket size.
+
+    A day reports by hour, a period or month reports by day, and a year
+    reports by month. `finish` is exclusive; every value falls back to a
+    sensible default so an empty pick still renders the report.
+    """
+    mode = str((query.get("view") or [""])[0] or "month").strip().lower()
+    today = date.today()
+    if mode == "day":
+        raw = str((query.get("date") or [""])[0]).strip()
+        start = as_day(raw) if raw else today
+        if start is None:
+            raise PppoeError(400, "Pick a valid date.")
+        finish = start + timedelta(days=1)
+        return "day", start, finish, "hour", start.strftime("%d %b %Y")
+    if mode == "period":
+        raw_start = str((query.get("start") or [""])[0]).strip()
+        raw_end = str((query.get("end") or [""])[0]).strip()
+        start = as_day(raw_start) if raw_start else today - timedelta(days=29)
+        finish = as_day(raw_end) if raw_end else today
+        if raw_start and start is None:
+            raise PppoeError(400, "Enter a valid start date.")
+        if raw_end and finish is None:
+            raise PppoeError(400, "Enter a valid end date.")
+        if finish < start:
+            raise PppoeError(400, "The end date cannot be before the start date.")
+        if (finish - start).days > 366:
+            raise PppoeError(400, "Pick a period of one year or less.")
+        label = f"{start.strftime('%d %b %Y')} – {finish.strftime('%d %b %Y')}"
+        return "period", start, finish + timedelta(days=1), "day", label
+    if mode == "year":
+        raw = str((query.get("year") or [""])[0]).strip()
+        try:
+            chosen = int(raw) if raw else today.year
+        except ValueError:
+            raise PppoeError(400, "Pick a valid year.") from None
+        if chosen < 2000 or chosen > today.year:
+            raise PppoeError(400, "Pick a year between 2000 and this year.")
+        return "year", date(chosen, 1, 1), date(chosen + 1, 1, 1), "month", str(chosen)
+    raw = str((query.get("month") or [""])[0]).strip()
+    if raw:
+        try:
+            start = datetime.strptime(raw[:7], "%Y-%m").date().replace(day=1)
+        except ValueError:
+            raise PppoeError(400, "Pick a valid month.") from None
+    else:
+        start = today.replace(day=1)
+    finish = (start.replace(day=28) + timedelta(days=4)).replace(day=1)
+    return "month", start, finish, "day", start.strftime("%B %Y")
+
+
+def usage_slots(start, finish, granularity):
+    """Zero-filled buckets so the trend chart shows the quiet stretches too."""
+    if granularity == "hour":
+        return [(f"{hour:02d}", f"{hour:02d}:00") for hour in range(24)]
+    slots = []
+    cursor_day = start
+    while cursor_day < finish:
+        if granularity == "month":
+            slots.append((cursor_day.strftime("%Y-%m"), cursor_day.strftime("%b")))
+            cursor_day = (cursor_day.replace(day=28) + timedelta(days=4)).replace(day=1)
+        else:
+            slots.append((cursor_day.isoformat(), cursor_day.strftime("%d %b")))
+            cursor_day += timedelta(days=1)
+    return slots
+
+
+def usage_series(rows, start, finish, granularity):
+    totals = {}
+    for row in rows:
+        key = row["bucket"]
+        if granularity == "hour":
+            key = f"{int(key):02d}"
+        elif granularity == "day":
+            key = stamp(key)[:10]
+        else:
+            key = str(key)
+        totals[key] = (int(row["bytes_in"]), int(row["bytes_out"]))
+    return [
+        {
+            "key": key,
+            "label": label,
+            "bytesIn": totals.get(key, (0, 0))[0],
+            "bytesOut": totals.get(key, (0, 0))[1],
+        }
+        for key, label in usage_slots(start, finish, granularity)
+    ]
+
+
+def usage_view(mode, start, finish, label):
+    return {
+        "mode": mode,
+        "label": label,
+        "start": start.isoformat(),
+        "end": (finish - timedelta(days=1)).isoformat(),
+    }
+
+
+def general_usage(cursor, client_id, service, query):
+    mode, start, finish, granularity, label = usage_window(query or {})
     cursor.execute(
         """
         SELECT s.id, s.first_name, s.last_name, s.pppoe_username, d.name AS router_name,
-               COALESCE(SUM(CASE WHEN a.acctstarttime >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN a.acctinputoctets ELSE 0 END), 0) AS month_in,
-               COALESCE(SUM(CASE WHEN a.acctstarttime >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN a.acctoutputoctets ELSE 0 END), 0) AS month_out
+               COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
+               COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
         FROM pppoe_subscribers s
         LEFT JOIN isp_mikrotik_devices d ON d.id = s.router_id
         LEFT JOIN radacct a ON a.username = s.pppoe_username
+            AND a.acctstarttime >= %s AND a.acctstarttime < %s
         WHERE s.client_id = %s AND s.service = %s
         GROUP BY s.id, s.first_name, s.last_name, s.pppoe_username, d.name
-        ORDER BY (month_in + month_out) DESC, s.first_name, s.last_name
+        ORDER BY (bytes_in + bytes_out) DESC, s.first_name, s.last_name
         """,
-        (client_id, service),
+        (start.isoformat(), finish.isoformat(), client_id, service),
     )
     clients = []
-    month_in = 0
-    month_out = 0
+    range_in = 0
+    range_out = 0
     for row in cursor.fetchall():
-        download = int(row["month_in"] or 0)
-        upload = int(row["month_out"] or 0)
-        month_in += download
-        month_out += upload
+        download = int(row["bytes_in"] or 0)
+        upload = int(row["bytes_out"] or 0)
+        range_in += download
+        range_out += upload
         clients.append(
             {
                 "id": row["id"],
@@ -1412,28 +1520,25 @@ def general_usage(cursor, client_id, service):
             }
         )
     cursor.execute(
-        """
-        SELECT DATE(a.acctstarttime) AS day, COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
+        f"""
+        SELECT {USAGE_BUCKETS[granularity]} AS bucket, COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
                COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
         FROM radacct a
         JOIN pppoe_subscribers s ON s.pppoe_username = a.username
-        WHERE s.client_id = %s AND s.service = %s AND a.acctstarttime >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
-        GROUP BY DATE(a.acctstarttime)
-        ORDER BY day
+        WHERE s.client_id = %s AND s.service = %s AND a.acctstarttime >= %s AND a.acctstarttime < %s
+        GROUP BY {USAGE_BUCKETS[granularity]}
+        ORDER BY bucket
         """,
-        (client_id, service),
+        (client_id, service, start.isoformat(), finish.isoformat()),
     )
-    days = [
-        {"day": stamp(row["day"]), "bytesIn": int(row["bytes_in"]), "bytesOut": int(row["bytes_out"])}
-        for row in cursor.fetchall()
-    ]
     return {
         "service": service,
+        "view": usage_view(mode, start, finish, label),
         "clients": clients,
         "total": len(clients),
-        "monthBytesIn": month_in,
-        "monthBytesOut": month_out,
-        "days": days,
+        "rangeBytesIn": range_in,
+        "rangeBytesOut": range_out,
+        "series": usage_series(cursor.fetchall(), start, finish, granularity),
     }
 
 
@@ -1784,10 +1889,16 @@ def renew(cursor, client_id, subscriber_id, payload):
     if price <= 0 or period <= 0:
         raise PppoeError(400, "This subscription has no package price to bill against.")
     days = max(1, int(-(-amount * period // price)))
-    anchor = as_day(row["expiry_date"])
-    today = date.today()
-    if anchor is None or anchor < today:
-        anchor = today
+    anchor = None
+    if payload.get("startDate"):
+        anchor = as_day(payload.get("startDate"))
+        if anchor is None:
+            raise PppoeError(400, "Enter a valid start date.")
+    if anchor is None:
+        anchor = as_day(row["expiry_date"])
+        today = date.today()
+        if anchor is None or anchor < today:
+            anchor = today
     due = anchor + timedelta(days=days)
     expiry = due + timedelta(days=int(row["grace_days"] or 0))
     begin(cursor)
@@ -2418,13 +2529,14 @@ def list_hotspot_clients(cursor, client_id, query):
     }
 
 
-def hotspot_usage(cursor, client_id):
+def hotspot_usage(cursor, client_id, query):
     """Usage for hotspot guests — radacct is keyed by the hs- usernames.
 
     Each purchase's paying device surfs under h.username, and every redeemed
     voucher surfs under v.username; both join back to the purchase for the
     phone, router, and voucher code shown on the report.
     """
+    mode, start, finish, granularity, label = usage_window(query or {})
     identities = """
         SELECT h.client_id, h.device_id, h.phone, v.username, v.code
         FROM hotspot_vouchers v
@@ -2439,25 +2551,26 @@ def hotspot_usage(cursor, client_id):
         f"""
         SELECT ids.username, ids.code, ids.phone, d.name AS router_name,
                COUNT(a.radacctid) AS sessions,
-               COALESCE(SUM(CASE WHEN a.acctstarttime >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN a.acctinputoctets ELSE 0 END), 0) AS month_in,
-               COALESCE(SUM(CASE WHEN a.acctstarttime >= DATE_SUB(CURDATE(), INTERVAL 30 DAY) THEN a.acctoutputoctets ELSE 0 END), 0) AS month_out
+               COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
+               COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
         FROM ({identities}) ids
         LEFT JOIN radacct a ON a.username = ids.username
+            AND a.acctstarttime >= %s AND a.acctstarttime < %s
         LEFT JOIN isp_mikrotik_devices d ON d.id = ids.device_id
         WHERE ids.client_id = %s
         GROUP BY ids.username, ids.code, ids.phone, d.name
-        ORDER BY (month_in + month_out) DESC, ids.username
+        ORDER BY (bytes_in + bytes_out) DESC, ids.username
         """,
-        (client_id,),
+        (start.isoformat(), finish.isoformat(), client_id),
     )
     clients = []
-    month_in = 0
-    month_out = 0
+    range_in = 0
+    range_out = 0
     for row in cursor.fetchall():
-        download = int(row["month_in"] or 0)
-        upload = int(row["month_out"] or 0)
-        month_in += download
-        month_out += upload
+        download = int(row["bytes_in"] or 0)
+        upload = int(row["bytes_out"] or 0)
+        range_in += download
+        range_out += upload
         clients.append(
             {
                 "id": row["username"],
@@ -2472,27 +2585,24 @@ def hotspot_usage(cursor, client_id):
         )
     cursor.execute(
         f"""
-        SELECT DATE(a.acctstarttime) AS day, COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
+        SELECT {USAGE_BUCKETS[granularity]} AS bucket, COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
                COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
         FROM radacct a
         JOIN ({identities}) ids ON ids.username = a.username
-        WHERE ids.client_id = %s AND a.acctstarttime >= DATE_SUB(CURDATE(), INTERVAL 14 DAY)
-        GROUP BY DATE(a.acctstarttime)
-        ORDER BY day
+        WHERE ids.client_id = %s AND a.acctstarttime >= %s AND a.acctstarttime < %s
+        GROUP BY {USAGE_BUCKETS[granularity]}
+        ORDER BY bucket
         """,
-        (client_id,),
+        (client_id, start.isoformat(), finish.isoformat()),
     )
-    days = [
-        {"day": stamp(row["day"]), "bytesIn": int(row["bytes_in"]), "bytesOut": int(row["bytes_out"])}
-        for row in cursor.fetchall()
-    ]
     return {
         "service": "hotspot",
+        "view": usage_view(mode, start, finish, label),
         "clients": clients,
         "total": len(clients),
-        "monthBytesIn": month_in,
-        "monthBytesOut": month_out,
-        "days": days,
+        "rangeBytesIn": range_in,
+        "rangeBytesOut": range_out,
+        "series": usage_series(cursor.fetchall(), start, finish, granularity),
     }
 
 
@@ -2966,7 +3076,7 @@ def dispatch(cursor, method, path, payload, token, query):
     if path == "/api/hotspot/subscribers" and method == "GET":
         return list_hotspot_clients(cursor, client_id_from(cursor, token), query), None
     if path == "/api/hotspot/usage" and method == "GET":
-        return hotspot_usage(cursor, client_id_from(cursor, token)), None
+        return hotspot_usage(cursor, client_id_from(cursor, token), query), None
     hotspot_prefix = "/api/hotspot/clients/"
     if path.startswith(hotspot_prefix):
         client_id = client_id_from(cursor, token)
@@ -2992,7 +3102,7 @@ def dispatch(cursor, method, path, payload, token, query):
         checked["normalized"] = None if checked["errors"] else {key: value for key, value in checked["normalized"].items() if key != "password"}
         return checked, None
     if path == "/api/pppoe/usage" and method == "GET":
-        return general_usage(cursor, client_id, "pppoe"), None
+        return general_usage(cursor, client_id, "pppoe", query), None
     if path == "/api/pppoe/subscribers" and method == "GET":
         return list_subscribers(cursor, client_id, query, "pppoe"), None
     if path == "/api/pppoe/subscribers" and method == "POST":

@@ -48,7 +48,7 @@ export function ReviewsPage() {
         />
         {message ? (
           <p
-            className={`rounded-xl border px-4 py-3 text-sm text-foreground ${messageTone === "error" ? "border-warning/40 bg-warning/10" : "border-success/30 bg-success/10"}`}
+            className={`notice ${messageTone === "error" ? "" : "border-success-border bg-success-soft/60"}`}
             role="status"
           >
             {message}

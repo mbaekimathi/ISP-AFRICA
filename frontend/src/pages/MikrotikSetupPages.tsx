@@ -144,7 +144,7 @@ function ScriptBox({ script, reason }: { script: string; reason: string }) {
   const [copyFailed, setCopyFailed] = useState(false);
   return (
     <div className="mt-5 grid gap-3">
-      {reason ? <p className="rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm">{reason}</p> : null}
+      {reason ? <p className="notice">{reason}</p> : null}
       <pre className="overflow-x-auto rounded-xl bg-surface-muted p-4 text-xs leading-6">{script}</pre>
       <PrimaryButton
         type="button"
@@ -294,7 +294,7 @@ export function MikrotikPortPage() {
 
   return (
     <SetupFrame wide title="Port setup" description="Each port is the internet uplink, a customer connection, or the local network.">
-      {error ? <p className="mb-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{error}</p> : null}
+      {error ? <p className="mb-4 notice" role="alert">{error}</p> : null}
       {device && !device.apiReady ? (
         <form
           className="mb-4 max-w-md rounded-xl border border-border bg-surface p-5"
@@ -314,7 +314,7 @@ export function MikrotikPortPage() {
           >
             <input id="port-api-password" className="field" type="password" autoComplete="off" value={password} onChange={(event) => setPassword(event.target.value)} />
           </FormField>
-          {accessError ? <p className="mt-3 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{accessError}</p> : null}
+          {accessError ? <p className="mt-3 notice" role="alert">{accessError}</p> : null}
           <div className="mt-4">
             <PrimaryButton type="submit" disabled={saving || password.length < 12}>
               {saving ? "Saving access…" : "Access router"}
@@ -479,7 +479,7 @@ export function MikrotikPppoePage() {
 
   return (
     <SetupFrame title="PPPoE setup" description="Turn PPPoE enforcement on to require a PPPoE login, or off to let clients use the internet with DHCP.">
-      {error ? <p className="mb-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{error}</p> : null}
+      {error ? <p className="mb-4 notice" role="alert">{error}</p> : null}
       <div className="grid gap-4 rounded-xl border border-border bg-surface p-5">
         <div className="flex items-center justify-between gap-4 rounded-xl border border-border px-4 py-3">
           <div>
@@ -511,7 +511,106 @@ export function MikrotikPppoePage() {
         </p>
         {note && !saving ? <RouterWriteNotice note={note} /> : null}
       </div>
+      <PortalPagePreviews
+        deviceId={deviceId}
+        kind="pppoe"
+        title="PPPoE pay pages"
+        description="What a customer sees when the router sends their browsing to the portal — from the recharge page to the thank-you receipt. Packages, prices, and payment details are this account's real setup; the customer is a sample."
+      />
     </SetupFrame>
+  );
+}
+
+type PortalPagePreview = {
+  id: string;
+  name: string;
+  title: string;
+  description: string;
+  html: string;
+};
+
+function PortalPagePreviews({
+  deviceId,
+  kind,
+  title,
+  description,
+}: {
+  deviceId: string;
+  kind: "hotspot" | "pppoe";
+  title: string;
+  description: string;
+}) {
+  const [pages, setPages] = useState<PortalPagePreview[]>([]);
+  const [activePage, setActivePage] = useState("");
+  const [pagesNote, setPagesNote] = useState("Loading page previews…");
+
+  useEffect(() => {
+    if (!deviceId) return;
+    let stopped = false;
+    const controller = new AbortController();
+    apiRequest<{ pages: PortalPagePreview[] }>(`/api/mikrotiks/${deviceId}/${kind}/pages`, { signal: controller.signal })
+      .then((body) => {
+        if (stopped) return;
+        setPages(body.pages);
+        setActivePage(body.pages[0]?.id ?? "");
+        setPagesNote(body.pages.length ? "" : `No ${kind} pages are available for this router.`);
+      })
+      .catch((cause: unknown) => {
+        if (stopped || (cause instanceof DOMException && cause.name === "AbortError")) return;
+        setPages([]);
+        setPagesNote(cause instanceof Error ? cause.message : `The ${kind} pages could not be loaded.`);
+      });
+    return () => {
+      stopped = true;
+      controller.abort();
+    };
+  }, [deviceId, kind]);
+
+  return (
+    <section className="mt-4 rounded-xl border border-border bg-surface p-5">
+      <h2 className="font-semibold">{title}</h2>
+      <p className="mt-2 text-sm text-muted-foreground">{description}</p>
+      {pagesNote ? <p className="mt-3 text-sm text-muted-foreground">{pagesNote}</p> : null}
+      {pages.length > 0 ? (
+        <>
+          <div className="mt-4 flex flex-wrap gap-2" role="tablist" aria-label={`${title} previews`}>
+            {pages.map((preview) => (
+              <button
+                key={preview.id}
+                type="button"
+                role="tab"
+                aria-selected={activePage === preview.id}
+                className={`min-h-11 rounded-lg border px-3 text-sm font-medium transition ${
+                  activePage === preview.id
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border bg-surface text-muted-foreground hover:text-foreground"
+                }`}
+                onClick={() => setActivePage(preview.id)}
+              >
+                {preview.title}
+              </button>
+            ))}
+          </div>
+          {pages
+            .filter((preview) => preview.id === activePage)
+            .map((preview) => (
+              <div key={preview.id} className="mt-4">
+                <p className="text-sm text-muted-foreground">
+                  {preview.description} <span className="text-xs">({preview.name})</span>
+                </p>
+                <div className="mt-3 flex justify-center rounded-xl border border-border bg-sidebar p-3">
+                  <iframe
+                    title={`${preview.title} preview`}
+                    srcDoc={preview.html}
+                    sandbox="allow-scripts"
+                    className="h-[560px] w-full max-w-[430px] rounded-lg border-0 bg-sidebar"
+                  />
+                </div>
+              </div>
+            ))}
+        </>
+      ) : null}
+    </section>
   );
 }
 
@@ -560,7 +659,7 @@ export function MikrotikHotspotPage() {
 
   return (
     <SetupFrame title="Hotspot setup" description="Turn the hotspot on so connected users can reach it, or off so they cannot reach the hotspot or the internet.">
-      {error ? <p className="mb-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{error}</p> : null}
+      {error ? <p className="mb-4 notice" role="alert">{error}</p> : null}
       <div className="grid gap-4 rounded-xl border border-border bg-surface p-5">
         <div className="flex items-center justify-between gap-4 rounded-xl border border-border px-4 py-3">
           <div>
@@ -592,6 +691,12 @@ export function MikrotikHotspotPage() {
         </p>
         {note && !saving ? <RouterWriteNotice note={note} /> : null}
       </div>
+      <PortalPagePreviews
+        deviceId={deviceId}
+        kind="hotspot"
+        title="Hotspot pages"
+        description="What a guest sees on this router, from the sign-in screen to the thank-you receipt. Bundles, prices, and payment details are this account's real setup; the guest and vouchers are samples."
+      />
     </SetupFrame>
   );
 }
@@ -746,7 +851,7 @@ export function MikrotikRouterSetupPage() {
           polling={false}
         />
       ) : null}
-      {error ? <p className="mb-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{error}</p> : null}
+      {error ? <p className="mb-4 notice" role="alert">{error}</p> : null}
       {device ? (
         <p className="mb-4 text-sm text-muted-foreground">
           {device.role || "No access method"} · tunnel {device.tunnelIp} ({device.tunnelStatus}) · RouterOS {device.routerosVersion || "unknown"}
@@ -910,7 +1015,7 @@ export function MikrotikRecoveryPage() {
       title="WinBox recovery"
       description="If WinBox still opens from the same LAN, use the MAC address, paste the script you need, and press Enter. The restore script reboots the router from the onboarding backup."
     >
-      {error ? <p className="mb-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">{error}</p> : null}
+      {error ? <p className="mb-4 notice" role="alert">{error}</p> : null}
       <section className="rounded-xl border border-border bg-surface p-5">
         <h2 className="font-semibold">Restore the onboarding backup</h2>
         <p className="mt-2 text-sm text-muted-foreground">This loads {backup || "the saved backup"} and restarts the router.</p>

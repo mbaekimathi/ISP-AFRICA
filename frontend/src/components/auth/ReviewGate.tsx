@@ -45,7 +45,7 @@ export function ReviewGate({ children }: { children: ReactNode }) {
   return (
     <>
       {access === "bootstrap" ? (
-        <p className="rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-foreground">
+        <p className="notice">
           No Director exists yet. Approve the first employee and allocate the Director role. After that, only a signed-in Director can use review pages.
         </p>
       ) : null}

@@ -991,7 +991,7 @@ export function IspPackagePage() {
         description="Company packages appear here as defaults. Edit a default for this account, or register a package of your own."
       />
       {error ? (
-        <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+        <p className="mt-4 notice" role="alert">
           {error}
         </p>
       ) : null}

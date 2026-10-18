@@ -6,6 +6,7 @@ import {
   logoutEmployee,
   readEmployeeSession,
   registerEmployee,
+  updateEmployeeProfile,
   type EmployeeInput,
   type EmployeeRole,
   type PublicEmployee,
@@ -20,6 +21,7 @@ type EmployeeAuthValue = {
   login: (loginCode: string, password: string) => Promise<PublicEmployee>;
   approve: (id: string) => Promise<void>;
   allocateRole: (id: string, role: EmployeeRole) => Promise<void>;
+  saveProfile: (input: EmployeeInput) => Promise<void>;
   resume: () => Promise<PublicEmployee | null>;
   logout: () => Promise<void>;
 };
@@ -78,6 +80,10 @@ export function EmployeeAuthProvider({ children }: { children: ReactNode }) {
     setEmployee(await readEmployeeSession());
   }, []);
 
+  const saveProfile = useCallback(async (input: EmployeeInput) => {
+    setEmployee(await updateEmployeeProfile(input));
+  }, []);
+
   const resume = useCallback(async () => {
     const account = await readEmployeeSession();
     if (!account) return null;
@@ -94,8 +100,8 @@ export function EmployeeAuthProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const value = useMemo(
-    () => ({ employee, ready, register, login, approve, allocateRole, resume, logout }),
-    [employee, ready, register, login, approve, allocateRole, resume, logout],
+    () => ({ employee, ready, register, login, approve, allocateRole, saveProfile, resume, logout }),
+    [employee, ready, register, login, approve, allocateRole, saveProfile, resume, logout],
   );
 
   return <EmployeeAuthContext.Provider value={value}>{children}</EmployeeAuthContext.Provider>;

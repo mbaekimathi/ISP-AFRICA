@@ -2,31 +2,37 @@ import type { LucideIcon } from "lucide-react";
 import {
   Activity,
   Bell,
+  Boxes,
   Building2,
   Cable,
   BarChart3,
   FileText,
+  Home,
+  Info,
   KeyRound,
   LockKeyhole,
+  Mail,
   Radio,
   Receipt,
   Router,
   ScrollText,
   Shield,
+  Sparkles,
   Store,
   Users,
   Wallet,
   Wifi,
+  Workflow,
   UserRound,
 } from "lucide-react";
 
 export const navItems = [
-  { label: "Home", href: "/#top" },
-  { label: "Features", href: "/#features" },
-  { label: "Solutions", href: "/#solutions" },
-  { label: "How It Works", href: "/#how-it-works" },
-  { label: "About", href: "/#about" },
-  { label: "Contact", href: "/#contact" },
+  { label: "Home", href: "/#top", icon: Home, chip: "bg-sky-500/15 text-sky-600 dark:text-sky-400" },
+  { label: "Features", href: "/#features", icon: Sparkles, chip: "bg-violet-500/15 text-violet-600 dark:text-violet-400" },
+  { label: "Solutions", href: "/#solutions", icon: Boxes, chip: "bg-emerald-500/15 text-emerald-600 dark:text-emerald-400" },
+  { label: "How It Works", href: "/#how-it-works", icon: Workflow, chip: "bg-amber-500/15 text-amber-600 dark:text-amber-400" },
+  { label: "About", href: "/#about", icon: Info, chip: "bg-cyan-500/15 text-cyan-600 dark:text-cyan-400" },
+  { label: "Contact", href: "/#contact", icon: Mail, chip: "bg-rose-500/15 text-rose-600 dark:text-rose-400" },
 ] as const;
 
 export type Feature = {

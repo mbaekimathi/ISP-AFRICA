@@ -9,42 +9,48 @@ import {
 } from "react";
 import {
   applyTheme,
-  getSystemTheme,
+  applyThemeName,
   readStoredTheme,
+  readStoredThemeName,
   storeTheme,
+  storeThemeName,
   type Theme,
+  type ThemeName,
 } from "@/lib/theme";
 
 type ThemeContextValue = {
   theme: Theme;
   setTheme: (theme: Theme) => void;
   toggleTheme: () => void;
+  themeName: ThemeName;
+  savedThemeName: ThemeName;
+  setThemeName: (name: ThemeName) => void;
+  previewThemeName: (name: ThemeName) => void;
+  resetThemeName: () => void;
 };
 
 const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 function resolveInitialTheme(): Theme {
-  return readStoredTheme() ?? getSystemTheme();
+  return readStoredTheme() ?? "dark";
+}
+
+function resolveInitialThemeName(): ThemeName {
+  return readStoredThemeName() ?? "classic";
 }
 
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(resolveInitialTheme);
+  const [themeName, setThemeNameState] = useState<ThemeName>(resolveInitialThemeName);
+  const [savedThemeName, setSavedThemeName] = useState<ThemeName>(themeName);
 
   useEffect(() => {
     applyTheme(theme);
   }, [theme]);
 
   useEffect(() => {
-    const media = window.matchMedia("(prefers-color-scheme: dark)");
-    const onChange = () => {
-      if (!readStoredTheme()) {
-        setThemeState(getSystemTheme());
-      }
-    };
-
-    media.addEventListener("change", onChange);
-    return () => media.removeEventListener("change", onChange);
-  }, []);
+    applyThemeName(themeName);
+  }, [themeName]);
 
   const setTheme = useCallback((next: Theme) => {
     storeTheme(next);
@@ -55,9 +61,32 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     setTheme(theme === "dark" ? "light" : "dark");
   }, [setTheme, theme]);
 
+  const setThemeName = useCallback((next: ThemeName) => {
+    storeThemeName(next);
+    setThemeNameState(next);
+    setSavedThemeName(next);
+  }, []);
+
+  const previewThemeName = useCallback((next: ThemeName) => {
+    setThemeNameState(next);
+  }, []);
+
+  const resetThemeName = useCallback(() => {
+    setThemeNameState(savedThemeName);
+  }, [savedThemeName]);
+
   const value = useMemo(
-    () => ({ theme, setTheme, toggleTheme }),
-    [theme, setTheme, toggleTheme],
+    () => ({
+      theme,
+      setTheme,
+      toggleTheme,
+      themeName,
+      savedThemeName,
+      setThemeName,
+      previewThemeName,
+      resetThemeName,
+    }),
+    [theme, setTheme, toggleTheme, themeName, savedThemeName, setThemeName, previewThemeName, resetThemeName],
   );
 
   return <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>;

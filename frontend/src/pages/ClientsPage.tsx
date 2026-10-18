@@ -166,14 +166,14 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
           {kind === "pppoe" ? (
             <Link
               to={home("/pppoe/register")}
-              className="inline-flex min-h-10 items-center justify-center rounded-xl bg-white px-4 text-sm font-semibold text-primary shadow-sm transition hover:bg-white/90"
+              className="inline-flex min-h-10 items-center justify-center rounded-xl bg-primary-foreground px-4 text-sm font-semibold text-primary shadow-sm transition duration-fast ease-out hover:bg-primary-foreground/90"
             >
               + Register PPPoE client
             </Link>
           ) : null}
         </div>
-        <div className="grid grid-cols-2 gap-x-6 gap-y-4 border-t border-white/15 px-5 py-4 sm:grid-cols-4 sm:px-7">
-          <HeroStat label="Clients" value={page?.total ?? "…"} icon={<Users className="h-4 w-4" />} tint="bg-white/15" />
+        <div className="grid grid-cols-2 gap-x-6 gap-y-4 border-t border-primary-foreground/15 px-5 py-4 sm:grid-cols-4 sm:px-7">
+          <HeroStat label="Clients" value={page?.total ?? "…"} icon={<Users className="h-4 w-4" />} tint="bg-primary-foreground/15" />
           <HeroStat label="Surfing" value={surfing} icon={<Wifi className="h-4 w-4" />} tint="bg-success/80" />
           <HeroStat label="Idle" value={idle} icon={<WifiOff className="h-4 w-4" />} tint="bg-warning/80" />
           <HeroStat label="Expired / off" value={lapsed} icon={<Clock className="h-4 w-4" />} tint="bg-destructive/70" />
@@ -181,13 +181,13 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
       </section>
 
       {message ? (
-        <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+        <p className="notice mt-4" role="alert">
           {message}
         </p>
       ) : null}
 
       <form
-        className="mt-4 grid gap-3 rounded-2xl border border-border bg-surface p-4 shadow-card sm:grid-cols-2 lg:grid-cols-[1.5fr_1fr_1fr_1fr_1fr_auto] lg:items-end"
+        className="toolbar mt-4 sm:grid-cols-2 lg:grid-cols-[1.5fr_1fr_1fr_1fr_1fr_auto] lg:items-end"
         onSubmit={(event) => {
           event.preventDefault();
           load();
@@ -247,9 +247,9 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
         <PrimaryButton type="submit">Filter</PrimaryButton>
       </form>
 
-      <div className="mt-4 hidden overflow-hidden rounded-2xl border border-border bg-surface shadow-card md:block">
-        <table className="min-w-[64rem] w-full text-left text-sm">
-          <thead className="bg-surface-muted text-xs uppercase tracking-wide text-muted-foreground">
+      <div className="table-wrap mt-4 hidden md:block">
+        <table className="data-table min-w-[64rem]">
+          <thead className="uppercase tracking-wide">
             <tr>
               <th className="px-4 py-3 font-medium">Client</th>
               <th className="px-4 py-3 font-medium">Phone / username</th>
@@ -265,7 +265,14 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
           <tbody>
             {!page && !message ? (
               <tr>
-                <td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">Loading {label} clients…</td>
+                <td colSpan={9} className="px-4 py-6">
+                  <div className="grid gap-2.5" aria-hidden="true">
+                    <div className="skeleton h-4 w-2/5" />
+                    <div className="skeleton h-4 w-3/5" />
+                    <div className="skeleton h-4 w-1/3" />
+                  </div>
+                  <span className="sr-only">Loading {label} clients…</span>
+                </td>
               </tr>
             ) : null}
             {page && clients.length === 0 ? (
@@ -310,7 +317,14 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
       </div>
 
       <div className="mt-4 grid gap-3 md:hidden">
-        {!page && !message ? <p className="py-8 text-center text-sm text-muted-foreground">Loading {label} clients…</p> : null}
+        {!page && !message ? (
+          <div className="card grid gap-3 p-4" aria-hidden="true">
+            <div className="skeleton h-4 w-2/5" />
+            <div className="skeleton h-4 w-3/5" />
+            <div className="skeleton h-4 w-1/3" />
+            <span className="sr-only">Loading {label} clients…</span>
+          </div>
+        ) : null}
         {page && clients.length === 0 ? (
           <p className="rounded-2xl border border-border bg-surface px-4 py-8 text-center text-sm text-muted-foreground shadow-card">
             No {label} clients match these filters.

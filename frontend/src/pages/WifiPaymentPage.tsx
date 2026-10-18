@@ -303,7 +303,7 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
                 </p>
               ) : null}
               {loadError ? (
-                <p className="rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+                <p className="notice" role="alert">
                   {loadError}
                 </p>
               ) : null}
@@ -445,12 +445,12 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
             ) : null}
           </div>
           {reportError ? (
-            <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+            <p className="mt-4 notice" role="alert">
               {reportError}
             </p>
           ) : null}
-          <div className="mt-4 overflow-x-auto rounded-xl border border-border bg-surface">
-            <table className="min-w-[56rem] w-full text-left text-sm">
+          <div className="table-wrap mt-4">
+            <table className="data-table min-w-[56rem]">
               <thead className="border-b border-border text-xs text-muted-foreground">
                 <tr>
                   <th className="px-3 py-3 font-medium">Date</th>

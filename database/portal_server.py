@@ -544,7 +544,16 @@ refresh();
     ).replace(b"</style>", HOTSPOT_CSS.encode() + b"</style>")
 
 
-def help_page():
+def help_page(support_phone=""):
+    phone = str(support_phone or "").strip()
+    if phone:
+        contact = (
+            f'<div class=row><span>Customer care</span><span><a href="tel:{esc(phone)}" '
+            f'style="color:#1d4ed8;font-weight:700">{esc(phone)}</a></span></div>'
+            f"<p class=note>Still offline after a restart? Call customer care on {esc(phone)} and quote your M-Pesa receipt code — the payment is already on your account.</p>"
+        )
+    else:
+        contact = "<p class=note>Still offline after a restart? Contact the provider and quote your M-Pesa receipt code — the payment is already on your account.</p>"
     return page(
         "Still offline",
         f"""{WARN_ICON}
@@ -555,7 +564,7 @@ def help_page():
 <div class=row><span>Step 1</span><span>Turn Wi-Fi off and back on, on this device.</span></div>
 <div class=row><span>Step 2</span><span>Restart the router — off for 30 seconds, then on. It re-dials by itself.</span></div>
 <div class=row><span>Step 3</span><span>Give it five more minutes — reconnects can lag behind the payment.</span></div>
-<p class=note>Still offline after a restart? Contact the provider and quote your M-Pesa receipt code — the payment is already on your account.</p>""",
+{contact}""",
     )
 
 
@@ -758,6 +767,57 @@ def hotspot_packages(cursor, client_id, device_id):
         routers = json_list(row.get("availability_routers"))
         if routers and device_id not in routers:
             continue
+        offers.append(row)
+    return offers
+
+
+def _company_offer_for(row, client_id, router_id):
+    """A company package reaches a client when it applies to all clients or
+    lists theirs, and lists the router when routers are restricted."""
+    clients = json_list(row.get("availability_clients"))
+    if not int(row.get("applies_to_all") or 0) and client_id not in clients:
+        return False
+    routers = json_list(row.get("availability_routers"))
+    if routers and router_id not in routers:
+        return False
+    return True
+
+
+def company_hotspot_packages(cursor, client_id, device_id):
+    """Active hotspot packages from the system catalog (employee side)."""
+    cursor.execute(
+        """
+        SELECT id, name, price, download_mbps, upload_mbps, availability_routers,
+               validity_amount, validity_unit,
+               simultaneous_devices AS devices,
+               extra_device_price, extra_period_price, image_data_url,
+               availability_clients, applies_to_all
+        FROM company_packages
+        WHERE status = 'active' AND service_type = 'hotspot'
+        ORDER BY name
+        """
+    )
+    return [row for row in cursor.fetchall() if _company_offer_for(row, client_id, device_id)]
+
+
+def company_pppoe_packages(cursor, client_id, router_id):
+    """Active PPPoE packages from the system catalog (employee side)."""
+    cursor.execute(
+        """
+        SELECT id, name, price, download_mbps, upload_mbps, availability_routers,
+               validity_amount, validity_unit, simultaneous_devices,
+               extra_device_price, extra_period_price, image_data_url,
+               availability_clients, applies_to_all
+        FROM company_packages
+        WHERE status = 'active' AND service_type = 'pppoe'
+        ORDER BY price, name
+        """
+    )
+    offers = []
+    for row in cursor.fetchall():
+        if not _company_offer_for(row, client_id, router_id):
+            continue
+        row["period"] = validity_label(row["validity_amount"], row["validity_unit"])
         offers.append(row)
     return offers
 

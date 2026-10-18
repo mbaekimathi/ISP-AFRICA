@@ -167,7 +167,7 @@ export function PppoeRegisterPage() {
         />
       ) : null}
       <PageHeader title="Register PPPoE client" description="Saving checks the username, package, router, and address, then writes the RADIUS login." />
-      {notice ? <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="status">{notice}</p> : null}
+      {notice ? <p className="mt-4 notice" role="status">{notice}</p> : null}
       {warnings.map((item) => (
         <p key={item} className="mt-3 text-sm text-muted-foreground">{item}</p>
       ))}

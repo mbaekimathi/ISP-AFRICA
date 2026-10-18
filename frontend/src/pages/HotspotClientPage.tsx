@@ -5,6 +5,7 @@ import * as Dialog from "@radix-ui/react-dialog";
 import { ArrowLeft, ChevronDown, Copy, Wifi } from "lucide-react";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { FormField } from "@/components/ui/FormField";
+import { LiveLoad } from "@/components/ui/LiveLoad";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
@@ -391,7 +392,10 @@ export function HotspotClientPage() {
   }
 
   if (!detail) {
-    return <div className="page-shell py-8 text-sm text-muted-foreground">{message || "Loading hotspot client…"}</div>;
+    if (message) {
+      return <div className="page-shell py-8 text-sm text-muted-foreground">{message}</div>;
+    }
+    return <LiveLoad label="Loading hotspot client" />;
   }
 
   const client = detail.client;
@@ -429,7 +433,7 @@ export function HotspotClientPage() {
           <div className="flex flex-wrap items-center justify-between gap-3">
             <Link
               to={home("/clients/hotspot")}
-              className="inline-flex items-center gap-1.5 text-sm font-medium text-primary-foreground/75 transition hover:text-white"
+              className="inline-flex items-center gap-1.5 text-sm font-medium text-primary-foreground/75 transition hover:text-primary-foreground"
             >
               <ArrowLeft className="h-4 w-4" />
               Hotspot clients
@@ -439,14 +443,14 @@ export function HotspotClientPage() {
                 <>
                   <button
                     type="button"
-                    className="inline-flex min-h-10 items-center justify-center rounded-xl bg-white px-4 text-sm font-semibold text-primary shadow-sm transition hover:bg-white/90"
+                    className="inline-flex min-h-10 items-center justify-center rounded-xl bg-primary-foreground px-4 text-sm font-semibold text-primary shadow-sm transition hover:bg-primary-foreground/90"
                     onClick={() => setDialog("recharge")}
                   >
                     Recharge
                   </button>
                   <button
                     type="button"
-                    className="inline-flex min-h-10 items-center justify-center rounded-xl bg-white/15 px-4 text-sm font-semibold transition hover:bg-white/25"
+                    className="inline-flex min-h-10 items-center justify-center rounded-xl bg-primary-foreground/15 px-4 text-sm font-semibold transition hover:bg-primary-foreground/25"
                     onClick={() => setDialog("end")}
                   >
                     End access
@@ -460,7 +464,7 @@ export function HotspotClientPage() {
                   aria-haspopup="menu"
                   aria-expanded={menuOpen}
                   onClick={() => setMenuOpen((open) => !open)}
-                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-white/15 px-4 text-sm font-semibold transition hover:bg-white/25"
+                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-primary-foreground/15 px-4 text-sm font-semibold transition hover:bg-primary-foreground/25"
                 >
                   More
                   <ChevronDown className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
@@ -507,18 +511,18 @@ export function HotspotClientPage() {
               className="flex min-w-0 items-center gap-4 rounded-xl text-left"
             >
               <div
-                className="relative flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-white text-primary shadow-sm"
+                className="relative flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-primary-foreground text-primary shadow-sm"
                 aria-hidden="true"
               >
                 <Wifi className="h-7 w-7" />
-                <span className={`absolute bottom-0 right-0 h-4 w-4 rounded-full border-2 border-white ${connectionDot}`} />
+                <span className={`absolute bottom-0 right-0 h-4 w-4 rounded-full border-2 border-primary-foreground ${connectionDot}`} />
               </div>
               <div className="min-w-0">
                 <div className="flex items-center gap-2">
                   <h1 className="truncate text-xl font-semibold tracking-tight sm:text-2xl">
                     {client.phone || "Hotspot guest"}
                   </h1>
-                  <span className="shrink-0 rounded-full bg-white/15 px-2.5 py-0.5 text-[11px] font-semibold">
+                  <span className="shrink-0 rounded-full bg-primary-foreground/15 px-2.5 py-0.5 text-[11px] font-semibold">
                     {client.status}
                   </span>
                   <ChevronDown
@@ -556,7 +560,7 @@ export function HotspotClientPage() {
             </div>
           </div>
 
-          <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4 border-t border-white/15 pt-4 sm:grid-cols-3 xl:grid-cols-6">
+          <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4 border-t border-primary-foreground/15 pt-4 sm:grid-cols-3 xl:grid-cols-6">
             <Stat
               label="Voucher"
               value={
@@ -567,7 +571,7 @@ export function HotspotClientPage() {
                       type="button"
                       aria-label="Copy voucher codes"
                       title="Copy voucher codes"
-                      className="shrink-0 text-primary-foreground/60 transition hover:text-white"
+                      className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
                       onClick={copyVouchers}
                     >
                       <Copy className="h-3.5 w-3.5" />
@@ -585,7 +589,7 @@ export function HotspotClientPage() {
           </div>
 
           {profileOpen ? (
-            <div className="mt-5 rounded-2xl bg-white/10 p-4 backdrop-blur-sm">
+            <div className="mt-5 rounded-2xl bg-primary-foreground/10 p-4 backdrop-blur-sm">
               <h2 className="text-xs font-semibold uppercase tracking-wide text-primary-foreground/70">Guest details</h2>
               <dl className="mt-3 grid gap-x-8 sm:grid-cols-2">
                 {[
@@ -601,7 +605,7 @@ export function HotspotClientPage() {
                   { label: "Periods", value: String(client.periods) },
                   { label: "Access ended", value: client.endedAt ?? "—" },
                 ].map((item) => (
-                  <div key={item.label} className="flex items-baseline justify-between gap-3 border-b border-white/10 py-2">
+                  <div key={item.label} className="flex items-baseline justify-between gap-3 border-b border-primary-foreground/10 py-2">
                     <dt className="text-xs text-primary-foreground/60">{item.label}</dt>
                     <dd className="min-w-0 break-words text-right text-sm font-medium">{item.value}</dd>
                   </div>
@@ -613,7 +617,7 @@ export function HotspotClientPage() {
       </section>
 
       {message ? (
-        <p className="mt-4 rounded-xl border border-warning/40 bg-warning/10 px-4 py-3 text-sm" role="alert">
+        <p className="mt-4 notice" role="alert">
           {message}
         </p>
       ) : null}
@@ -649,7 +653,7 @@ export function HotspotClientPage() {
               <div className="grid gap-5">
                 {detail.live.length ? (
                   <div className="overflow-x-auto">
-                    <table className="min-w-[44rem] w-full text-left text-sm">
+                    <table className="data-table min-w-[44rem]">
                       <thead className="border-b border-border text-xs text-muted-foreground">
                         <tr>
                           <th className="px-2 py-2 font-medium">Account</th>
@@ -683,7 +687,7 @@ export function HotspotClientPage() {
                       Connected — not surfing
                     </p>
                     <div className="overflow-x-auto">
-                      <table className="min-w-[40rem] w-full text-left text-sm">
+                      <table className="data-table min-w-[40rem]">
                         <thead className="border-b border-border text-xs text-muted-foreground">
                           <tr>
                             <th className="px-2 py-2 font-medium">Device</th>
@@ -742,7 +746,7 @@ export function HotspotClientPage() {
               <p className="text-sm text-muted-foreground">No vouchers issued for this purchase.</p>
             ) : (
               <div className="overflow-x-auto">
-                <table className="min-w-[44rem] w-full text-left text-sm">
+                <table className="data-table min-w-[44rem]">
                   <thead className="border-b border-border text-xs text-muted-foreground">
                     <tr>
                       <th className="px-2 py-2 font-medium">Code</th>
@@ -777,7 +781,7 @@ export function HotspotClientPage() {
               <p className="text-sm text-muted-foreground">No sessions have been accounted yet.</p>
             ) : (
               <div className="overflow-x-auto">
-                <table className="min-w-[48rem] w-full text-left text-sm">
+                <table className="data-table min-w-[48rem]">
                   <thead className="border-b border-border text-xs text-muted-foreground">
                     <tr>
                       <th className="px-2 py-2 font-medium">Account</th>
