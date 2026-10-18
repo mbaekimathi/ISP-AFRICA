@@ -384,12 +384,15 @@ def radius_plan(plan):
     return {"checks": checks, "replies": replies, "group": group, "groupReplies": group_replies}
 
 
-def router_status(status, open_sessions, expiry_date, today, last_action="", tunnel_status="up"):
+def router_status(status, open_sessions, expiry_date, today, last_action="", tunnel_status="up", any_sessions=False):
     """Router-facing state shown on the PPPoE client list.
 
     An open radacct session is the ground truth for "online" — it outranks
     tunnel_status, which only reflects whether the management API answered
-    recently and can flap while sessions stay up."""
+    recently and can flap while sessions stay up. An active client is
+    "disconnected" when their equipment is unreachable — either the
+    management tunnel is down or the CPE previously held a session and
+    dropped it. "not_surfing" is reserved for clients who never connected."""
     sessions = int(open_sessions or 0)
     if status == "pending_activation":
         return "pending_activation"
@@ -403,7 +406,7 @@ def router_status(status, open_sessions, expiry_date, today, last_action="", tun
         return "expired_online" if sessions else "expired"
     if status == "active" and sessions:
         return "surfing"
-    if status == "active" and tunnel_status != "up":
+    if status == "active" and (tunnel_status != "up" or any_sessions):
         return "disconnected"
     return "not_surfing"
 

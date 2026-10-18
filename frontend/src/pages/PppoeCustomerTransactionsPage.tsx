@@ -83,7 +83,12 @@ export function PppoeCustomerTransactionsPage() {
   const today = new Date().toISOString().slice(0, 10);
   const firstCyclePending =
     subscriber.status === "pending_activation" || subscriber.billing.billingStatus === "pending";
-  const paidUp = Boolean(!firstCyclePending && subscriber.billing.nextDueDate && subscriber.billing.nextDueDate >= today);
+  // Ended or expired service can't stack on the old due date — the payment
+  // restarts access from a chosen start day.
+  const serviceEnded = ["expired", "disconnected", "cancelled"].includes(subscriber.status);
+  const paidUp = Boolean(
+    !firstCyclePending && !serviceEnded && subscriber.billing.nextDueDate && subscriber.billing.nextDueDate >= today,
+  );
   const paidAmount = Number(amount);
   const packagePrice = Number(subscriber.billing.price);
   const purchasedDays =

@@ -2,7 +2,23 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import * as Dialog from "@radix-ui/react-dialog";
-import { ArrowLeft, ChevronDown, Copy, Wifi } from "lucide-react";
+import {
+  Activity,
+  ArrowLeft,
+  CalendarClock,
+  ChevronDown,
+  Copy,
+  Gauge,
+  Power,
+  Router,
+  Smartphone,
+  Ticket,
+  Trash2,
+  UserRound,
+  Wallet,
+  Wifi,
+  Zap,
+} from "lucide-react";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { FormField } from "@/components/ui/FormField";
 import { LiveLoad } from "@/components/ui/LiveLoad";
@@ -260,13 +276,17 @@ function TrendChart({
   );
 }
 
-function Stat({
+function StatCard({
+  icon,
+  iconClass,
   label,
   value,
   hint,
   valueClass,
   hintClass,
 }: {
+  icon: ReactNode;
+  iconClass?: string;
   label: string;
   value: ReactNode;
   hint?: ReactNode;
@@ -274,12 +294,49 @@ function Stat({
   hintClass?: string;
 }) {
   return (
-    <div className="min-w-0">
-      <p className="truncate text-[11px] font-medium uppercase tracking-wide text-primary-foreground/60">{label}</p>
-      <div className={`mt-1 flex min-w-0 items-center gap-1.5 text-sm font-semibold tracking-tight ${valueClass ?? ""}`}>{value}</div>
+    <div className="rounded-2xl border border-border bg-surface p-4 shadow-card">
+      <div className="flex items-center justify-between gap-2">
+        <p className="truncate text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
+        <span
+          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${iconClass ?? "bg-primary/10 text-primary"}`}
+          aria-hidden="true"
+        >
+          {icon}
+        </span>
+      </div>
+      <div className={`mt-2 flex min-w-0 items-center gap-1.5 text-lg font-semibold tracking-tight ${valueClass ?? ""}`}>{value}</div>
       {hint != null && hint !== "" ? (
-        <div className={`mt-0.5 truncate text-[11px] ${hintClass ?? "text-primary-foreground/60"}`}>{hint}</div>
+        <p className={`mt-0.5 truncate text-xs ${hintClass ?? "text-muted-foreground"}`}>{hint}</p>
       ) : null}
+    </div>
+  );
+}
+
+function CardHeader({
+  icon,
+  title,
+  children,
+}: {
+  icon: ReactNode;
+  title: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
+        {icon}
+      </span>
+      <h2 className="text-sm font-semibold">{title}</h2>
+      {children ? <div className="ml-auto flex flex-wrap items-center gap-2">{children}</div> : null}
+    </div>
+  );
+}
+
+function InfoRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 border-b border-border/60 py-2.5 last:border-b-0">
+      <dt className="shrink-0 text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 break-words text-right text-sm font-medium">{children}</dd>
     </div>
   );
 }
@@ -292,8 +349,7 @@ export function HotspotClientPage() {
   const [detail, setDetail] = useState<GuestDetail | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
-  const [profileOpen, setProfileOpen] = useState(false);
-  const [openSection, setOpenSection] = useState<string | null>("live");
+  const [openSection, setOpenSection] = useState<string | null>(null);
   const [dialog, setDialog] = useState<"recharge" | "end" | "delete" | null>(null);
   const [voucherCount, setVoucherCount] = useState(1);
   const [rechargePeriods, setRechargePeriods] = useState(1);
@@ -328,7 +384,7 @@ export function HotspotClientPage() {
     const place = () => {
       const rect = menuButtonRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const width = 224;
+      const width = 240;
       const estimatedHeight = Math.min(360, menuListRef.current?.offsetHeight ?? 360);
       const belowFits = rect.bottom + 6 + estimatedHeight <= window.innerHeight;
       setMenuPos({
@@ -421,214 +477,180 @@ export function HotspotClientPage() {
           : "Never connected";
   const statusColor = client.deleted || ended ? "text-destructive" : online ? "text-success" : "text-warning";
 
-  const menuItems: { label: string; danger?: boolean; onClick: () => void }[] = [
-    { label: "Copy voucher codes", onClick: copyVouchers },
-    ...(ended ? [] : [{ label: "divider", onClick: () => undefined }, { label: "Delete guest", danger: true, onClick: () => setDialog("delete") }]),
+  const menuItems: { label: string; icon?: ReactNode; danger?: boolean; onClick: () => void }[] = [
+    { label: copied ? "Copied" : "Copy voucher codes", icon: <Copy className="h-4 w-4" />, onClick: copyVouchers },
+    ...(ended ? [] : [{ label: "divider", onClick: () => undefined }, { label: "Delete guest", icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => setDialog("delete") }]),
   ];
 
   return (
-    <div className="page-shell py-8">
-      <section className="overflow-hidden rounded-3xl bg-gradient-to-br from-primary via-primary/85 to-primary/60 text-primary-foreground shadow-card">
-        <div className="px-5 pb-6 pt-5 sm:px-7 sm:pt-6">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <Link
-              to={home("/clients/hotspot")}
-              className="inline-flex items-center gap-1.5 text-sm font-medium text-primary-foreground/75 transition hover:text-primary-foreground"
+    <div className="page-shell py-6 sm:py-8">
+      <div className="page-header">
+        <Link
+          to={home("/clients/hotspot")}
+          className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground transition hover:text-foreground"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          Hotspot clients
+        </Link>
+        <div className="page-header-actions">
+          {!ended ? (
+            <>
+              <PrimaryButton className="min-h-10" onClick={() => setDialog("recharge")}>
+                <Zap className="h-4 w-4" aria-hidden="true" />
+                Recharge
+              </PrimaryButton>
+              <SecondaryButton className="min-h-10" onClick={() => setDialog("end")}>
+                <Power className="h-4 w-4" aria-hidden="true" />
+                End access
+              </SecondaryButton>
+            </>
+          ) : null}
+          <div>
+            <SecondaryButton
+              ref={menuButtonRef}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              className="min-h-10"
+              onClick={() => setMenuOpen((open) => !open)}
             >
-              <ArrowLeft className="h-4 w-4" />
-              Hotspot clients
-            </Link>
-            <div className="flex flex-wrap gap-2">
-              {!ended ? (
-                <>
-                  <button
-                    type="button"
-                    className="inline-flex min-h-10 items-center justify-center rounded-xl bg-primary-foreground px-4 text-sm font-semibold text-primary shadow-sm transition hover:bg-primary-foreground/90"
-                    onClick={() => setDialog("recharge")}
+              More
+              <ChevronDown className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
+            </SecondaryButton>
+            {menuOpen && menuPos
+              ? createPortal(
+                  <div
+                    role="menu"
+                    ref={menuListRef}
+                    style={{ top: menuPos.top, left: menuPos.left }}
+                    className="fixed z-50 w-60 overflow-hidden rounded-xl border border-border bg-surface py-1 text-foreground shadow-lg"
                   >
-                    Recharge
-                  </button>
-                  <button
-                    type="button"
-                    className="inline-flex min-h-10 items-center justify-center rounded-xl bg-primary-foreground/15 px-4 text-sm font-semibold transition hover:bg-primary-foreground/25"
-                    onClick={() => setDialog("end")}
-                  >
-                    End access
-                  </button>
-                </>
-              ) : null}
-              <div>
+                    {menuItems.map((item, index) =>
+                      item.label === "divider" ? (
+                        <div key={`divider-${index}`} className="my-1 border-t border-border" />
+                      ) : (
+                        <button
+                          key={item.label}
+                          type="button"
+                          role="menuitem"
+                          className={`flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm hover:bg-surface-muted ${item.danger ? "text-destructive" : "text-foreground"}`}
+                          onClick={() => {
+                            setMenuOpen(false);
+                            item.onClick();
+                          }}
+                        >
+                          <span className={item.danger ? undefined : "text-muted-foreground"} aria-hidden="true">
+                            {item.icon}
+                          </span>
+                          {item.label}
+                        </button>
+                      ),
+                    )}
+                  </div>,
+                  document.body,
+                )
+              : null}
+          </div>
+        </div>
+      </div>
+
+      <section className="card mt-5 overflow-hidden">
+        <div className="h-1 bg-gradient-brand" aria-hidden="true" />
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-4 px-5 py-5 sm:px-6">
+          <div className="flex min-w-0 items-center gap-4">
+            <div
+              className="relative flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-brand text-primary-foreground shadow-sm"
+              aria-hidden="true"
+            >
+              <Wifi className="h-6 w-6" />
+              <span className={`absolute -bottom-1 -right-1 h-4 w-4 rounded-full border-2 border-surface ${connectionDot}`} />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="truncate text-xl font-semibold tracking-tight sm:text-2xl">
+                  {client.phone || "Hotspot guest"}
+                </h1>
+                <StatusBadge tone={statusTone[client.status] ?? "neutral"}>{client.status}</StatusBadge>
+                <StatusBadge tone={client.deleted || ended ? "paused" : online ? "active" : connected ? "due" : "neutral"}>
+                  {statusLabel}
+                </StatusBadge>
+              </div>
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5">
+                  <Gauge className="h-3.5 w-3.5" aria-hidden="true" />
+                  {client.packageName}
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <Router className="h-3.5 w-3.5" aria-hidden="true" />
+                  {client.routerName || "This router"}
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <Ticket className="h-3.5 w-3.5" aria-hidden="true" />
+                  {usedVouchers}/{detail.vouchers.length} vouchers used
+                </span>
+              </div>
+            </div>
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <div className="flex items-center gap-2 rounded-xl border border-border bg-surface-muted/50 px-3 py-2">
+              <Ticket className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+              <code className="min-w-0 truncate text-sm font-medium">{detail.vouchers[0]?.code || "—"}</code>
+              {detail.vouchers.length ? (
                 <button
                   type="button"
-                  ref={menuButtonRef}
-                  aria-haspopup="menu"
-                  aria-expanded={menuOpen}
-                  onClick={() => setMenuOpen((open) => !open)}
-                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-primary-foreground/15 px-4 text-sm font-semibold transition hover:bg-primary-foreground/25"
+                  aria-label="Copy voucher codes"
+                  title="Copy voucher codes"
+                  className="shrink-0 text-muted-foreground transition hover:text-foreground"
+                  onClick={copyVouchers}
                 >
-                  More
-                  <ChevronDown className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
+                  <Copy className="h-3.5 w-3.5" />
                 </button>
-                {menuOpen && menuPos
-                  ? createPortal(
-                      <div
-                        role="menu"
-                        ref={menuListRef}
-                        style={{ top: menuPos.top, left: menuPos.left }}
-                        className="fixed z-50 w-56 overflow-hidden rounded-xl border border-border bg-surface py-1 text-foreground shadow-lg"
-                      >
-                        {menuItems.map((item, index) =>
-                          item.label === "divider" ? (
-                            <div key={`divider-${index}`} className="my-1 border-t border-border" />
-                          ) : (
-                            <button
-                              key={item.label}
-                              type="button"
-                              role="menuitem"
-                              className={`block w-full px-4 py-2 text-left text-sm hover:bg-surface-muted ${item.danger ? "text-destructive" : "text-foreground"}`}
-                              onClick={() => {
-                                setMenuOpen(false);
-                                item.onClick();
-                              }}
-                            >
-                              {item.label}
-                            </button>
-                          ),
-                        )}
-                      </div>,
-                      document.body,
-                    )
-                  : null}
-              </div>
+              ) : null}
             </div>
           </div>
-
-          <div className="mt-5 flex flex-wrap items-center gap-x-10 gap-y-5">
-            <button
-              type="button"
-              aria-expanded={profileOpen}
-              onClick={() => setProfileOpen((open) => !open)}
-              className="flex min-w-0 items-center gap-4 rounded-xl text-left"
-            >
-              <div
-                className="relative flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-primary-foreground text-primary shadow-sm"
-                aria-hidden="true"
-              >
-                <Wifi className="h-7 w-7" />
-                <span className={`absolute bottom-0 right-0 h-4 w-4 rounded-full border-2 border-primary-foreground ${connectionDot}`} />
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <h1 className="truncate text-xl font-semibold tracking-tight sm:text-2xl">
-                    {client.phone || "Hotspot guest"}
-                  </h1>
-                  <span className="shrink-0 rounded-full bg-primary-foreground/15 px-2.5 py-0.5 text-[11px] font-semibold">
-                    {client.status}
-                  </span>
-                  <ChevronDown
-                    className={`h-4 w-4 shrink-0 text-primary-foreground/70 transition-transform ${profileOpen ? "rotate-180" : ""}`}
-                    aria-hidden="true"
-                  />
-                </div>
-                <p className="mt-0.5 truncate text-sm text-primary-foreground/75">
-                  {client.packageName} · {client.routerName || "This router"} · {usedVouchers}/{detail.vouchers.length} vouchers used
-                </p>
-              </div>
-            </button>
-
-            <div className="grid min-w-[18rem] flex-1 grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
-              <Stat label="Status" value={statusLabel} valueClass={statusColor} hint={statusHint} hintClass={statusColor} />
-              <Stat
-                label="Live devices"
-                value={detail.routerReachable ? String(detail.live.length + (detail.hosts?.length ?? 0)) : "—"}
-                hint={
-                  detail.routerReachable
-                    ? online
-                      ? "On the router now"
-                      : connected
-                        ? "Connected — not surfing"
-                        : "None on the router"
-                    : "Router unreachable"
-                }
-              />
-              <Stat
-                label="Paid"
-                value={money(client.amount)}
-                hint={client.mpesaCode ? `Receipt ${client.mpesaCode}` : client.status}
-              />
-              <Stat label="Time left" value={online ? timeLeft : "—"} hint={online ? "On the live session" : "No open session"} />
-            </div>
-          </div>
-
-          <div className="mt-5 grid grid-cols-2 gap-x-6 gap-y-4 border-t border-primary-foreground/15 pt-4 sm:grid-cols-3 xl:grid-cols-6">
-            <Stat
-              label="Voucher"
-              value={
-                <>
-                  <code className="truncate">{detail.vouchers[0]?.code || "—"}</code>
-                  {detail.vouchers.length ? (
-                    <button
-                      type="button"
-                      aria-label="Copy voucher codes"
-                      title="Copy voucher codes"
-                      className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
-                      onClick={copyVouchers}
-                    >
-                      <Copy className="h-3.5 w-3.5" />
-                    </button>
-                  ) : null}
-                </>
-              }
-              hint={copied ? "Copied" : `${detail.vouchers.length} issued`}
-            />
-            <Stat label="IP" value={firstLive?.ip || firstHost?.ip || client.ip || "Not connected"} />
-            <Stat label="MAC" value={firstLive?.mac || firstHost?.mac || client.mac || "—"} />
-            <Stat label="Sessions" value={String(detail.usage.sessions)} hint={`${bytes(detail.usage.bytesIn)} down`} />
-            <Stat label="Uptime" value={firstLive?.uptime || firstHost?.uptime || "—"} />
-            <Stat label="Last seen" value={detail.usage.lastSeen ?? "Never"} />
-          </div>
-
-          {profileOpen ? (
-            <div className="mt-5 rounded-2xl bg-primary-foreground/10 p-4 backdrop-blur-sm">
-              <h2 className="text-xs font-semibold uppercase tracking-wide text-primary-foreground/70">Guest details</h2>
-              <dl className="mt-3 grid gap-x-8 sm:grid-cols-2">
-                {[
-                  { label: "Phone", value: client.phone || "—" },
-                  { label: "MAC", value: client.mac || "—" },
-                  { label: "IP", value: client.ip || "—" },
-                  { label: "Package", value: client.packageName },
-                  { label: "Router", value: client.routerName || "—" },
-                  { label: "Paid", value: `${money(client.amount)}${client.mpesaCode ? ` · ${client.mpesaCode}` : ""}` },
-                  { label: "Requested", value: client.createdAt ?? "—" },
-                  { label: "Paid at", value: client.paidAt ?? "—" },
-                  { label: "Devices", value: String(client.devices) },
-                  { label: "Periods", value: String(client.periods) },
-                  { label: "Access ended", value: client.endedAt ?? "—" },
-                ].map((item) => (
-                  <div key={item.label} className="flex items-baseline justify-between gap-3 border-b border-primary-foreground/10 py-2">
-                    <dt className="text-xs text-primary-foreground/60">{item.label}</dt>
-                    <dd className="min-w-0 break-words text-right text-sm font-medium">{item.value}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-          ) : null}
         </div>
       </section>
 
-      {message ? (
-        <p className="mt-4 notice" role="alert">
-          {message}
-        </p>
-      ) : null}
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          icon={<Activity className="h-4 w-4" />}
+          label="Status"
+          value={statusLabel}
+          valueClass={statusColor}
+          hint={statusHint}
+          hintClass={statusColor}
+        />
+        <StatCard
+          icon={<Smartphone className="h-4 w-4" />}
+          label="Live devices"
+          value={detail.routerReachable ? String(detail.live.length + (detail.hosts?.length ?? 0)) : "—"}
+          hint={
+            detail.routerReachable
+              ? online
+                ? "On the router now"
+                : connected
+                  ? "Connected — not surfing"
+                  : "None on the router"
+              : "Router unreachable"
+          }
+        />
+        <StatCard
+          icon={<Wallet className="h-4 w-4" />}
+          label="Paid"
+          value={money(client.amount)}
+          hint={client.mpesaCode ? `Receipt ${client.mpesaCode}` : client.status}
+        />
+        <StatCard
+          icon={<CalendarClock className="h-4 w-4" />}
+          label="Time left"
+          value={online ? timeLeft : "—"}
+          hint={online ? "On the live session" : "No open session"}
+        />
+      </div>
 
-      <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
-        <div className="min-w-0">
-          <Section
-            title="Live now"
-            open={openSection === "live"}
-            onToggle={toggleSection("live")}
-            action={
+      <div className="mt-4 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <div className="grid min-w-0 gap-4">
+          <section className="card overflow-hidden">
+            <CardHeader icon={<Activity className="h-4 w-4" />} title="Live now">
               <StatusBadge
                 tone={!detail.routerReachable ? "critical" : detail.live.length ? "active" : (detail.hosts?.length ?? 0) ? "due" : "paused"}
               >
@@ -640,108 +662,114 @@ export function HotspotClientPage() {
                       ? `${detail.hosts!.length} connected`
                       : "Idle"}
               </StatusBadge>
-            }
-          >
-            {!detail.routerReachable ? (
-              <p className="text-sm leading-6 text-muted-foreground">
-                Live device data comes straight from the router. It did not answer — check that the management tunnel
-                and the saved API login still work for {client.routerName || "this router"}.
-              </p>
-            ) : detail.live.length === 0 && (detail.hosts?.length ?? 0) === 0 ? (
-              <p className="text-sm text-muted-foreground">This guest has no device on the router right now.</p>
-            ) : (
-              <div className="grid gap-5">
-                {detail.live.length ? (
-                  <div className="overflow-x-auto">
-                    <table className="data-table min-w-[44rem]">
-                      <thead className="border-b border-border text-xs text-muted-foreground">
-                        <tr>
-                          <th className="px-2 py-2 font-medium">Account</th>
-                          <th className="px-2 py-2 font-medium">IP</th>
-                          <th className="px-2 py-2 font-medium">MAC</th>
-                          <th className="px-2 py-2 font-medium">Uptime</th>
-                          <th className="px-2 py-2 font-medium">Idle</th>
-                          <th className="px-2 py-2 font-medium">Time left</th>
-                          <th className="px-2 py-2 font-medium">Down / Up</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {detail.live.map((session) => (
-                          <tr key={session.username || session.mac} className="border-b border-border last:border-0">
-                            <td className="px-2 py-2 font-medium">{session.label || session.username || "—"}</td>
-                            <td className="px-2 py-2">{session.ip || "—"}</td>
-                            <td className="px-2 py-2 text-xs text-muted-foreground">{session.mac || "—"}</td>
-                            <td className="px-2 py-2">{session.uptime || "—"}</td>
-                            <td className="px-2 py-2">{session.idleTime || "—"}</td>
-                            <td className="px-2 py-2">{session.sessionTimeLeft || "—"}</td>
-                            <td className="px-2 py-2">{bytes(session.bytesIn)} / {bytes(session.bytesOut)}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : null}
-                {(detail.hosts?.length ?? 0) ? (
-                  <div>
-                    <p className="mb-2 text-xs font-medium uppercase tracking-wide text-warning">
-                      Connected — not surfing
-                    </p>
+            </CardHeader>
+            <div className="px-5 pb-5 pt-4">
+              {!detail.routerReachable ? (
+                <p className="text-sm leading-6 text-muted-foreground">
+                  Live device data comes straight from the router. It did not answer — check that the management tunnel
+                  and the saved API login still work for {client.routerName || "this router"}.
+                </p>
+              ) : detail.live.length === 0 && (detail.hosts?.length ?? 0) === 0 ? (
+                <p className="text-sm text-muted-foreground">This guest has no device on the router right now.</p>
+              ) : (
+                <div className="grid gap-5">
+                  {detail.live.length ? (
                     <div className="overflow-x-auto">
-                      <table className="data-table min-w-[40rem]">
+                      <table className="data-table min-w-[44rem]">
                         <thead className="border-b border-border text-xs text-muted-foreground">
                           <tr>
-                            <th className="px-2 py-2 font-medium">Device</th>
+                            <th className="px-2 py-2 font-medium">Account</th>
                             <th className="px-2 py-2 font-medium">IP</th>
                             <th className="px-2 py-2 font-medium">MAC</th>
-                            <th className="px-2 py-2 font-medium">On network</th>
+                            <th className="px-2 py-2 font-medium">Uptime</th>
                             <th className="px-2 py-2 font-medium">Idle</th>
+                            <th className="px-2 py-2 font-medium">Time left</th>
+                            <th className="px-2 py-2 font-medium">Down / Up</th>
                           </tr>
                         </thead>
                         <tbody>
-                          {(detail.hosts ?? []).map((host) => (
-                            <tr key={host.mac} className="border-b border-border last:border-0">
-                              <td className="px-2 py-2 font-medium">{host.label || host.mac}</td>
-                              <td className="px-2 py-2">{host.ip || "—"}</td>
-                              <td className="px-2 py-2 text-xs text-muted-foreground">{host.mac || "—"}</td>
-                              <td className="px-2 py-2">{host.uptime || "—"}</td>
-                              <td className="px-2 py-2">{host.idleTime || "—"}</td>
+                          {detail.live.map((session) => (
+                            <tr key={session.username || session.mac} className="border-b border-border last:border-0">
+                              <td className="px-2 py-2 font-medium">{session.label || session.username || "—"}</td>
+                              <td className="px-2 py-2">{session.ip || "—"}</td>
+                              <td className="px-2 py-2 text-xs text-muted-foreground">{session.mac || "—"}</td>
+                              <td className="px-2 py-2">{session.uptime || "—"}</td>
+                              <td className="px-2 py-2">{session.idleTime || "—"}</td>
+                              <td className="px-2 py-2">{session.sessionTimeLeft || "—"}</td>
+                              <td className="px-2 py-2">{bytes(session.bytesIn)} / {bytes(session.bytesOut)}</td>
                             </tr>
                           ))}
                         </tbody>
                       </table>
                     </div>
-                    <p className="mt-2 text-xs text-muted-foreground">
-                      These devices are on the router but have not paid or redeemed a voucher yet — they stay behind
-                      the portal until they do. Use Recharge above to put a device online right away.
-                    </p>
-                  </div>
-                ) : null}
-              </div>
-            )}
-          </Section>
+                  ) : null}
+                  {(detail.hosts?.length ?? 0) ? (
+                    <div>
+                      <p className="mb-2 text-xs font-medium uppercase tracking-wide text-warning">
+                        Connected — not surfing
+                      </p>
+                      <div className="overflow-x-auto">
+                        <table className="data-table min-w-[40rem]">
+                          <thead className="border-b border-border text-xs text-muted-foreground">
+                            <tr>
+                              <th className="px-2 py-2 font-medium">Device</th>
+                              <th className="px-2 py-2 font-medium">IP</th>
+                              <th className="px-2 py-2 font-medium">MAC</th>
+                              <th className="px-2 py-2 font-medium">On network</th>
+                              <th className="px-2 py-2 font-medium">Idle</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {(detail.hosts ?? []).map((host) => (
+                              <tr key={host.mac} className="border-b border-border last:border-0">
+                                <td className="px-2 py-2 font-medium">{host.label || host.mac}</td>
+                                <td className="px-2 py-2">{host.ip || "—"}</td>
+                                <td className="px-2 py-2 text-xs text-muted-foreground">{host.mac || "—"}</td>
+                                <td className="px-2 py-2">{host.uptime || "—"}</td>
+                                <td className="px-2 py-2">{host.idleTime || "—"}</td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                      <p className="mt-2 text-xs text-muted-foreground">
+                        These devices are on the router but have not paid or redeemed a voucher yet — they stay behind
+                        the portal until they do. Use Recharge above to put a device online right away.
+                      </p>
+                    </div>
+                  ) : null}
+                </div>
+              )}
+            </div>
+          </section>
 
-          <Section title="Usage" open={openSection === "usage"} onToggle={toggleSection("usage")}>
-            <p className="text-xs text-muted-foreground">
-              {bytes(detail.usage.bytesIn)} down · {bytes(detail.usage.bytesOut)} up across {detail.usage.sessions} sessions
-            </p>
-            <TrendChart
-              data={(detail.usage.days ?? []).map((day) => ({ x: day.day.slice(5), y: day.bytesIn + day.bytesOut }))}
-              formatY={bytes}
-              emptyText="No usage has been accounted for this guest yet."
-              ariaLabel="Hotspot guest usage for the last 14 days"
-            />
-          </Section>
+          <section className="card overflow-hidden">
+            <CardHeader icon={<Gauge className="h-4 w-4" />} title="Usage">
+              <p className="text-xs tabular-nums text-muted-foreground">
+                {bytes(detail.usage.bytesIn)} down · {bytes(detail.usage.bytesOut)} up across {detail.usage.sessions} sessions
+              </p>
+            </CardHeader>
+            <div className="px-5 pb-5 pt-1">
+              <TrendChart
+                data={(detail.usage.days ?? []).map((day) => ({ x: day.day.slice(5), y: day.bytesIn + day.bytesOut }))}
+                formatY={bytes}
+                emptyText="No usage has been accounted for this guest yet."
+                ariaLabel="Hotspot guest usage for the last 14 days"
+              />
+            </div>
+          </section>
 
-          <Section
-            title="Vouchers"
-            open={openSection === "vouchers"}
-            onToggle={toggleSection("vouchers")}
-            action={
-              detail.vouchers.length ? (
-                <span className="text-xs text-muted-foreground">{usedVouchers}/{detail.vouchers.length} used</span>
-              ) : undefined
-            }
-          >
+          <section className="card overflow-hidden">
+            <Section
+              title="Vouchers"
+              open={openSection === "vouchers"}
+              onToggle={toggleSection("vouchers")}
+              action={
+                detail.vouchers.length ? (
+                  <span className="text-xs text-muted-foreground">{usedVouchers}/{detail.vouchers.length} used</span>
+                ) : undefined
+              }
+            >
             {detail.vouchers.length === 0 ? (
               <p className="text-sm text-muted-foreground">No vouchers issued for this purchase.</p>
             ) : (
@@ -811,25 +839,59 @@ export function HotspotClientPage() {
             )}
           </Section>
 
-          <Section title="Timeline" open={openSection === "timeline"} onToggle={toggleSection("timeline")}>
-            {detail.timeline.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No events recorded yet.</p>
-            ) : (
-              <ol className="grid gap-3">
-                {detail.timeline.map((event, index) => (
-                  <li key={index} className="grid grid-cols-[7.5rem_minmax(0,1fr)] gap-3 border-b border-border/60 pb-3 last:border-0">
-                    <span className="text-xs leading-5 text-muted-foreground">{event.at ?? "—"}</span>
-                    <span>
-                      <span className="block text-sm font-medium">{event.event}</span>
-                      <span className="block text-xs leading-5 text-muted-foreground">{event.detail}</span>
-                    </span>
-                  </li>
-                ))}
-              </ol>
-            )}
-          </Section>
+            <Section title="Timeline" open={openSection === "timeline"} onToggle={toggleSection("timeline")}>
+              {detail.timeline.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No events recorded yet.</p>
+              ) : (
+                <ol className="grid gap-3">
+                  {detail.timeline.map((event, index) => (
+                    <li key={index} className="grid grid-cols-[7.5rem_minmax(0,1fr)] gap-3 border-b border-border/60 pb-3 last:border-0">
+                      <span className="text-xs leading-5 text-muted-foreground">{event.at ?? "—"}</span>
+                      <span>
+                        <span className="block text-sm font-medium">{event.event}</span>
+                        <span className="block text-xs leading-5 text-muted-foreground">{event.detail}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ol>
+              )}
+            </Section>
+          </section>
         </div>
-      </section>
+
+        <div className="grid min-w-0 content-start gap-4">
+          <section className="card overflow-hidden">
+            <CardHeader icon={<Wifi className="h-4 w-4" />} title="Connection" />
+            <dl className="px-5 py-3">
+              <InfoRow label="IP">{firstLive?.ip || firstHost?.ip || client.ip || "Not connected"}</InfoRow>
+              <InfoRow label="MAC">{firstLive?.mac || firstHost?.mac || client.mac || "—"}</InfoRow>
+              <InfoRow label="Uptime">{firstLive?.uptime || firstHost?.uptime || "—"}</InfoRow>
+              <InfoRow label="Idle">{firstLive?.idleTime || firstHost?.idleTime || "—"}</InfoRow>
+              <InfoRow label="Time left">{online ? timeLeft : "—"}</InfoRow>
+              <InfoRow label="Last seen">{detail.usage.lastSeen ?? "Never"}</InfoRow>
+            </dl>
+          </section>
+
+          <section className="card overflow-hidden">
+            <CardHeader icon={<UserRound className="h-4 w-4" />} title="Guest details" />
+            <dl className="px-5 py-3">
+              <InfoRow label="Phone">{client.phone || "—"}</InfoRow>
+              <InfoRow label="Package">{client.packageName}</InfoRow>
+              <InfoRow label="Router">{client.routerName || "—"}</InfoRow>
+              <InfoRow label="Paid">
+                {money(client.amount)}{client.mpesaCode ? ` · ${client.mpesaCode}` : ""}
+              </InfoRow>
+              <InfoRow label="Requested">{client.createdAt ?? "—"}</InfoRow>
+              <InfoRow label="Paid at">{client.paidAt ?? "—"}</InfoRow>
+              <InfoRow label="Devices">{client.devices}</InfoRow>
+              <InfoRow label="Periods">{client.periods}</InfoRow>
+              <InfoRow label="Access ended">{client.endedAt ?? "—"}</InfoRow>
+            </dl>
+          </section>
+        </div>
+      </div>
+
+      {message ? <p className="mt-4 notice" role="alert">{message}</p> : null}
 
       <Dialog.Root open={dialog === "recharge"} onOpenChange={(next) => { if (!next) setDialog(null); }}>
         <Dialog.Portal>

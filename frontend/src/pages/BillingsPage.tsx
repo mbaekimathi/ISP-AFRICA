@@ -1,7 +1,6 @@
-import { ArrowRight, PackagePlus, Pencil } from "lucide-react";
+import { ArrowRight, CircleAlert, Filter, Package, PackagePlus, Pencil, ReceiptText, Wallet } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
-import { PageHeader } from "@/components/ui/DetailGrid";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
@@ -78,19 +77,83 @@ function PackageAction({
   return (
     <Link
       to={to}
-      className="group flex h-full flex-col rounded-2xl border border-border bg-surface p-5 shadow-card transition duration-brand ease-brand hover:border-primary/40 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring sm:p-6"
+      className="group flex items-start gap-4 px-5 py-4 transition hover:bg-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
     >
-      <span className="inline-flex h-11 w-11 items-center justify-center rounded-xl bg-primary/10 text-primary">
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
         {icon}
       </span>
-      <h2 className="mt-4 text-base font-semibold tracking-tight sm:text-lg">{title}</h2>
-      <p className="mt-1 flex-1 text-sm leading-6 text-muted-foreground">{description}</p>
-      <span className="mt-5 inline-flex items-center gap-1.5 text-sm font-semibold text-primary">
-        Open packages
-        <ArrowRight className="h-4 w-4 transition duration-brand ease-brand group-hover:translate-x-0.5" aria-hidden="true" />
+      <span className="min-w-0 flex-1">
+        <span className="block text-sm font-semibold tracking-tight">{title}</span>
+        <span className="mt-0.5 block text-xs leading-5 text-muted-foreground">{description}</span>
       </span>
+      <ArrowRight
+        className="mt-1 h-4 w-4 shrink-0 text-muted-foreground transition duration-brand ease-brand group-hover:translate-x-0.5 group-hover:text-primary"
+        aria-hidden="true"
+      />
     </Link>
   );
+}
+
+function StatCard({
+  icon,
+  iconClass,
+  label,
+  value,
+  hint,
+  valueClass,
+  hintClass,
+}: {
+  icon: ReactNode;
+  iconClass?: string;
+  label: string;
+  value: ReactNode;
+  hint?: ReactNode;
+  valueClass?: string;
+  hintClass?: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-border bg-surface p-4 shadow-card">
+      <div className="flex items-center justify-between gap-2">
+        <p className="truncate text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
+        <span
+          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${iconClass ?? "bg-primary/10 text-primary"}`}
+          aria-hidden="true"
+        >
+          {icon}
+        </span>
+      </div>
+      <div className={`mt-2 flex min-w-0 items-center gap-1.5 text-lg font-semibold tracking-tight ${valueClass ?? ""}`}>{value}</div>
+      {hint != null && hint !== "" ? (
+        <p className={`mt-0.5 truncate text-xs ${hintClass ?? "text-muted-foreground"}`}>{hint}</p>
+      ) : null}
+    </div>
+  );
+}
+
+function CardHeader({
+  icon,
+  title,
+  children,
+}: {
+  icon: ReactNode;
+  title: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
+        {icon}
+      </span>
+      <h2 className="text-sm font-semibold">{title}</h2>
+      {children ? <div className="ml-auto flex flex-wrap items-center gap-2">{children}</div> : null}
+    </div>
+  );
+}
+
+function amountClass(status: string) {
+  if (status === "paid") return "text-success";
+  if (status === "failed" || status === "void") return "text-destructive";
+  return "text-warning";
 }
 
 export function BillingsPage() {
@@ -135,166 +198,239 @@ export function BillingsPage() {
     load();
   }, [service, range]);
 
+  const transactions = report?.transactions ?? [];
+  const outstandingDue = report ? Number(report.outstanding) > 0 : false;
+
   return (
-    <div className="page-shell py-8">
-      <PageHeader
-        title="Billings"
-        description="Every payment, invoice, and hotspot sale on this account. Filter by service, or pick a day, month, year, or custom period."
-      />
+    <div className="page-shell py-6 sm:py-8">
+      <div className="page-header">
+        <div className="page-header-text">
+          <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Billings</h1>
+          <p className="mt-1 text-sm leading-6 text-muted-foreground">
+            Every payment, invoice, and hotspot sale on this account. Filter by service, or pick a day, month, year, or custom period.
+          </p>
+        </div>
+      </div>
+
       {message ? (
         <p className="notice mt-4" role="alert">
           {message}
         </p>
       ) : null}
-      <form className="toolbar mt-6 sm:grid-cols-2 lg:grid-cols-4" onSubmit={(event) => event.preventDefault()}>
-        <label className="grid gap-1.5 text-sm font-medium">
-          Service
-          <select className="field" value={service} onChange={(event) => setService(event.target.value as ServiceFilter)}>
-            <option value="all">All services</option>
-            <option value="pppoe">PPPoE</option>
-            <option value="hotspot">Hotspot</option>
-          </select>
-        </label>
-        <label className="grid gap-1.5 text-sm font-medium">
-          Period
-          <select className="field" value={mode} onChange={(event) => setMode(event.target.value as PeriodMode)}>
-            <option value="all">All time</option>
-            <option value="day">Day</option>
-            <option value="month">Month</option>
-            <option value="year">Year</option>
-            <option value="period">Custom period</option>
-          </select>
-        </label>
-        {mode === "day" ? (
-          <label className="grid gap-1.5 text-sm font-medium">
-            Day
-            <input type="date" className="field" value={day} onChange={(event) => setDay(event.target.value)} />
-          </label>
-        ) : null}
-        {mode === "month" ? (
-          <label className="grid gap-1.5 text-sm font-medium">
-            Month
-            <input type="month" className="field" value={month} onChange={(event) => setMonth(event.target.value)} />
-          </label>
-        ) : null}
-        {mode === "year" ? (
-          <label className="grid gap-1.5 text-sm font-medium">
-            Year
-            <input
-              type="number"
-              className="field"
-              min={2000}
-              max={2100}
-              inputMode="numeric"
-              value={year}
-              onChange={(event) => setYear(event.target.value)}
-            />
-          </label>
-        ) : null}
-        {mode === "period" ? (
-          <>
-            <label className="grid gap-1.5 text-sm font-medium">
-              From
-              <input type="date" className="field" value={from} onChange={(event) => setFrom(event.target.value)} />
-            </label>
-            <label className="grid gap-1.5 text-sm font-medium">
-              To
-              <input type="date" className="field" value={to} onChange={(event) => setTo(event.target.value)} />
-            </label>
-          </>
-        ) : null}
-      </form>
-      <div className="table-wrap mt-4">
-        <table className="data-table min-w-[64rem]">
-          <thead>
-            <tr>
-              <th className="px-3 py-3 font-medium">Date</th>
-              <th className="px-3 py-3 font-medium">Customer</th>
-              <th className="px-3 py-3 font-medium">Service</th>
-              <th className="px-3 py-3 font-medium">Type</th>
-              <th className="px-3 py-3 font-medium">Details</th>
-              <th className="px-3 py-3 font-medium">M-Pesa code</th>
-              <th className="px-3 py-3 text-right font-medium">Amount</th>
-              <th className="px-3 py-3 font-medium">Status</th>
-            </tr>
-          </thead>
-          <tbody>
-            {!report && !message ? (
-              <tr>
-                <td colSpan={8} className="px-3 py-6">
-                  <div className="grid gap-2.5" aria-hidden="true">
-                    <div className="skeleton h-4 w-1/3" />
-                    <div className="skeleton h-4 w-3/5" />
-                    <div className="skeleton h-4 w-2/5" />
-                  </div>
-                  <span className="sr-only">Loading transactions…</span>
-                </td>
-              </tr>
-            ) : null}
-            {report?.transactions.length === 0 ? (
-              <tr>
-                <td colSpan={8} className="px-3 py-10 text-center text-muted-foreground">No transactions match these filters.</td>
-              </tr>
-            ) : null}
-            {report?.transactions.map((item) => (
-              <tr key={item.id}>
-                <td className="whitespace-nowrap px-3 py-3 tabular">{item.createdAt}</td>
-                <td className="px-3 py-3">
-                  <div className="font-medium">{item.customer || "—"}</div>
-                  <div className="text-xs text-muted-foreground">{item.contact}</div>
-                </td>
-                <td className="px-3 py-3">
-                  <StatusBadge tone={item.service === "pppoe" ? "active" : "neutral"}>
-                    {item.service === "pppoe" ? "PPPoE" : "Hotspot"}
-                  </StatusBadge>
-                </td>
-                <td className="px-3 py-3">{kindLabel[item.kind]}</td>
-                <td className="px-3 py-3">{item.detail || "—"}</td>
-                <td className="px-3 py-3 font-mono text-xs text-muted-foreground">{item.reference || "—"}</td>
-                <td
-                  className={`px-3 py-3 text-right font-semibold tabular ${
-                    item.status === "paid"
-                      ? "text-success"
-                      : item.status === "failed" || item.status === "void"
-                        ? "text-destructive"
-                        : "text-warning"
-                  }`}
-                >
-                  {money(item.amount)}
-                </td>
-                <td className="px-3 py-3">
-                  <StatusBadge tone={statusTone[item.status] ?? "neutral"}>{item.status}</StatusBadge>
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
-      {report ? (
-        <p className="mt-3 text-xs text-muted-foreground tabular">
-          {report.total} transactions · Collected {money(report.collected)}
-          {Number(report.outstanding) > 0 ? ` · Outstanding ${money(report.outstanding)}` : ""}
-        </p>
-      ) : null}
 
-      <h2 className="mt-10 text-base font-semibold tracking-tight sm:text-lg">Packages</h2>
-      <p className="mt-1 text-sm leading-6 text-muted-foreground">
-        Choose how this account is billed. Edit a default package, or register one of your own.
-      </p>
-      <div className="mt-4 grid gap-4 md:grid-cols-2">
-        <PackageAction
-          to={`${packagesTo}#registered-packages`}
-          icon={<Pencil className="h-5 w-5" aria-hidden="true" />}
-          title="Edit default packages"
-          description="Company packages start here as defaults. Change the name, price, speed, or routers for this account."
+      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+        <StatCard
+          icon={<ReceiptText className="h-4 w-4" />}
+          label="Transactions"
+          value={report ? String(report.total) : "…"}
+          hint="In the selected period"
         />
-        <PackageAction
-          to={`${packagesTo}#register-package`}
-          icon={<PackagePlus className="h-5 w-5" aria-hidden="true" />}
-          title="Register a new package"
-          description="Add a package with its own price and speed, then attach it to the routers on this account."
+        <StatCard
+          icon={<Wallet className="h-4 w-4" />}
+          iconClass="bg-success-soft/70 text-success"
+          label="Collected"
+          value={report ? money(report.collected) : "…"}
+          valueClass="text-success"
+          hint="Paid and settled"
+        />
+        <StatCard
+          icon={<CircleAlert className="h-4 w-4" />}
+          iconClass={outstandingDue ? "bg-destructive-soft/70 text-destructive" : "bg-success-soft/70 text-success"}
+          label="Outstanding"
+          value={report ? money(report.outstanding) : "…"}
+          valueClass={outstandingDue ? "text-destructive" : "text-success"}
+          hint={outstandingDue ? "Awaiting payment" : "Nothing owed"}
         />
       </div>
+
+      <section className="card mt-4 overflow-hidden">
+        <CardHeader icon={<Filter className="h-4 w-4" />} title="Filters" />
+        <form className="grid gap-3 px-5 pb-5 pt-4 sm:grid-cols-2 lg:grid-cols-4" onSubmit={(event) => event.preventDefault()}>
+          <label className="grid gap-1.5 text-sm font-medium">
+            Service
+            <select className="field" value={service} onChange={(event) => setService(event.target.value as ServiceFilter)}>
+              <option value="all">All services</option>
+              <option value="pppoe">PPPoE</option>
+              <option value="hotspot">Hotspot</option>
+            </select>
+          </label>
+          <label className="grid gap-1.5 text-sm font-medium">
+            Period
+            <select className="field" value={mode} onChange={(event) => setMode(event.target.value as PeriodMode)}>
+              <option value="all">All time</option>
+              <option value="day">Day</option>
+              <option value="month">Month</option>
+              <option value="year">Year</option>
+              <option value="period">Custom period</option>
+            </select>
+          </label>
+          {mode === "day" ? (
+            <label className="grid gap-1.5 text-sm font-medium">
+              Day
+              <input type="date" className="field" value={day} onChange={(event) => setDay(event.target.value)} />
+            </label>
+          ) : null}
+          {mode === "month" ? (
+            <label className="grid gap-1.5 text-sm font-medium">
+              Month
+              <input type="month" className="field" value={month} onChange={(event) => setMonth(event.target.value)} />
+            </label>
+          ) : null}
+          {mode === "year" ? (
+            <label className="grid gap-1.5 text-sm font-medium">
+              Year
+              <input
+                type="number"
+                className="field"
+                min={2000}
+                max={2100}
+                inputMode="numeric"
+                value={year}
+                onChange={(event) => setYear(event.target.value)}
+              />
+            </label>
+          ) : null}
+          {mode === "period" ? (
+            <>
+              <label className="grid gap-1.5 text-sm font-medium">
+                From
+                <input type="date" className="field" value={from} onChange={(event) => setFrom(event.target.value)} />
+              </label>
+              <label className="grid gap-1.5 text-sm font-medium">
+                To
+                <input type="date" className="field" value={to} onChange={(event) => setTo(event.target.value)} />
+              </label>
+            </>
+          ) : null}
+        </form>
+      </section>
+
+      <section className="card mt-4 overflow-hidden">
+        <CardHeader icon={<ReceiptText className="h-4 w-4" />} title="Transactions">
+          {report ? <p className="text-xs tabular-nums text-muted-foreground">{report.total} in this period</p> : null}
+        </CardHeader>
+
+        <div className="hidden overflow-x-auto md:block">
+          <table className="data-table min-w-[56rem]">
+            <thead>
+              <tr>
+                <th className="px-5 py-3 font-medium">Date</th>
+                <th className="px-5 py-3 font-medium">Customer</th>
+                <th className="px-5 py-3 font-medium">Service</th>
+                <th className="px-5 py-3 font-medium">Type</th>
+                <th className="px-5 py-3 font-medium">Details</th>
+                <th className="px-5 py-3 font-medium">M-Pesa code</th>
+                <th className="px-5 py-3 text-right font-medium">Amount</th>
+                <th className="px-5 py-3 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!report && !message ? (
+                <tr>
+                  <td colSpan={8} className="px-5 py-6">
+                    <div className="grid gap-2.5" aria-hidden="true">
+                      <div className="skeleton h-4 w-1/3" />
+                      <div className="skeleton h-4 w-3/5" />
+                      <div className="skeleton h-4 w-2/5" />
+                    </div>
+                    <span className="sr-only">Loading transactions…</span>
+                  </td>
+                </tr>
+              ) : null}
+              {report && transactions.length === 0 ? (
+                <tr>
+                  <td colSpan={8} className="px-5 py-10 text-center text-muted-foreground">No transactions match these filters.</td>
+                </tr>
+              ) : null}
+              {transactions.map((item) => (
+                <tr key={item.id}>
+                  <td className="whitespace-nowrap px-5 py-3 tabular">{item.createdAt}</td>
+                  <td className="px-5 py-3">
+                    <div className="font-medium">{item.customer || "—"}</div>
+                    <div className="text-xs text-muted-foreground">{item.contact}</div>
+                  </td>
+                  <td className="px-5 py-3">
+                    <StatusBadge tone={item.service === "pppoe" ? "active" : "neutral"}>
+                      {item.service === "pppoe" ? "PPPoE" : "Hotspot"}
+                    </StatusBadge>
+                  </td>
+                  <td className="px-5 py-3">{kindLabel[item.kind]}</td>
+                  <td className="px-5 py-3">{item.detail || "—"}</td>
+                  <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{item.reference || "—"}</td>
+                  <td className={`px-5 py-3 text-right font-semibold tabular ${amountClass(item.status)}`}>
+                    {money(item.amount)}
+                  </td>
+                  <td className="px-5 py-3">
+                    <StatusBadge tone={statusTone[item.status] ?? "neutral"}>{item.status}</StatusBadge>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div className="divide-y divide-border md:hidden">
+          {!report && !message ? (
+            <div className="grid gap-2.5 px-5 py-6" aria-hidden="true">
+              <div className="skeleton h-4 w-1/3" />
+              <div className="skeleton h-4 w-3/5" />
+              <div className="skeleton h-4 w-2/5" />
+              <span className="sr-only">Loading transactions…</span>
+            </div>
+          ) : null}
+          {report && transactions.length === 0 ? (
+            <p className="px-5 py-10 text-center text-sm text-muted-foreground">No transactions match these filters.</p>
+          ) : null}
+          {transactions.map((item) => (
+            <div key={item.id} className="grid gap-2 px-5 py-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <p className="truncate font-medium">{item.customer || "—"}</p>
+                  <p className="truncate text-xs text-muted-foreground">{item.contact || item.createdAt}</p>
+                </div>
+                <div className="flex shrink-0 flex-col items-end gap-1.5">
+                  <p className={`font-semibold tabular ${amountClass(item.status)}`}>{money(item.amount)}</p>
+                  <StatusBadge tone={statusTone[item.status] ?? "neutral"}>{item.status}</StatusBadge>
+                </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
+                <span className="tabular">{item.createdAt}</span>
+                <StatusBadge tone={item.service === "pppoe" ? "active" : "neutral"}>
+                  {item.service === "pppoe" ? "PPPoE" : "Hotspot"}
+                </StatusBadge>
+                <span>{kindLabel[item.kind]}</span>
+              </div>
+              {item.detail || item.reference ? (
+                <p className="truncate text-xs text-muted-foreground">
+                  {item.detail}
+                  {item.detail && item.reference ? " · " : ""}
+                  <span className="font-mono">{item.reference}</span>
+                </p>
+              ) : null}
+            </div>
+          ))}
+        </div>
+      </section>
+
+      <section className="card mt-4 overflow-hidden">
+        <CardHeader icon={<Package className="h-4 w-4" />} title="Packages">
+          <p className="text-xs text-muted-foreground">Choose how this account is billed</p>
+        </CardHeader>
+        <div className="grid divide-y divide-border md:grid-cols-2 md:divide-x md:divide-y-0">
+          <PackageAction
+            to={`${packagesTo}#registered-packages`}
+            icon={<Pencil className="h-5 w-5" aria-hidden="true" />}
+            title="Edit default packages"
+            description="Company packages start here as defaults. Change the name, price, speed, or routers for this account."
+          />
+          <PackageAction
+            to={`${packagesTo}#register-package`}
+            icon={<PackagePlus className="h-5 w-5" aria-hidden="true" />}
+            title="Register a new package"
+            description="Add a package with its own price and speed, then attach it to the routers on this account."
+          />
+        </div>
+      </section>
     </div>
   );
 }

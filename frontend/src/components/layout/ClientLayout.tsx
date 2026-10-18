@@ -82,6 +82,16 @@ function linksForPage(pathname: string) {
       { label: "Client payments", to: `/pppoe/${id}/transactions` },
       { label: "Client usage", to: `/pppoe/${id}` },
       { label: "Remote access", to: `/pppoe/${id}/remote-access` },
+      { label: "All clients", to: "/clients" },
+    ];
+  }
+  const guest = pathname.match(/^\/hotspot\/([^/]+)/);
+  if (guest) {
+    const id = guest[1];
+    return [
+      { label: "Client payments", to: "/clients/hotspot/payments" },
+      { label: "Client usage", to: `/hotspot/${id}` },
+      { label: "All clients", to: "/clients/hotspot" },
     ];
   }
   if (pathname === "/clients" || pathname === "/clients/payments" || pathname === "/clients/usage" || pathname.startsWith("/pppoe")) {

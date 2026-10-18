@@ -58,15 +58,29 @@ const routerStatusTone = {
   pending_activation: "neutral",
 } as const;
 
-const billingTone: Record<string, "active" | "due" | "critical" | "paused" | "neutral"> = {
-  paid: "active",
-  active: "active",
+const billingLabel = {
+  pending: "Pending",
+  paid: "Paid",
+  overdue: "Overdue",
+  suspended: "Suspended",
+  cancelled: "Cancelled",
+  failed: "Failed",
+} as const;
+
+const billingTone = {
   pending: "due",
+  paid: "active",
   overdue: "critical",
-  failed: "critical",
   suspended: "paused",
   cancelled: "paused",
-};
+  failed: "critical",
+} as const;
+
+function billingBadge(status: string) {
+  const key = status as keyof typeof billingLabel;
+  if (!(key in billingLabel)) return null;
+  return <StatusBadge tone={billingTone[key]}>{billingLabel[key]}</StatusBadge>;
+}
 
 function connectionDot(connection: Subscriber["connection"]) {
   return connection === "online" ? "bg-success" : connection === "offline" ? "bg-destructive" : "bg-warning";
@@ -248,24 +262,22 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
       </form>
 
       <div className="table-wrap mt-4 hidden md:block">
-        <table className="data-table min-w-[64rem]">
+        <table className="data-table min-w-[56rem]">
           <thead className="uppercase tracking-wide">
             <tr>
               <th className="px-4 py-3 font-medium">Client</th>
               <th className="px-4 py-3 font-medium">Phone / username</th>
               <th className="px-4 py-3 font-medium">Router</th>
-              <th className="px-4 py-3 font-medium">Package</th>
               <th className="px-4 py-3 font-medium">Status</th>
-              <th className="px-4 py-3 font-medium">Used</th>
-              <th className="px-4 py-3 font-medium">Billing</th>
-              <th className="px-4 py-3 font-medium">Expiry</th>
+              <th className="px-4 py-3 font-medium">Package / used</th>
+              <th className="px-4 py-3 font-medium">Billing / expiry</th>
               <th className="px-4 py-3 font-medium"><span className="sr-only">Actions</span></th>
             </tr>
           </thead>
           <tbody>
             {!page && !message ? (
               <tr>
-                <td colSpan={9} className="px-4 py-6">
+                <td colSpan={7} className="px-4 py-6">
                   <div className="grid gap-2.5" aria-hidden="true">
                     <div className="skeleton h-4 w-2/5" />
                     <div className="skeleton h-4 w-3/5" />
@@ -277,7 +289,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
             ) : null}
             {page && clients.length === 0 ? (
               <tr>
-                <td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">No {label} clients match these filters.</td>
+                <td colSpan={7} className="px-4 py-10 text-center text-muted-foreground">No {label} clients match these filters.</td>
               </tr>
             ) : null}
             {clients.map((client) => (
@@ -296,17 +308,19 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
                   <div className="text-xs text-muted-foreground">{client.username}</div>
                 </td>
                 <td className="px-4 py-3">{client.routerName}</td>
-                <td className="px-4 py-3">{client.packageName}</td>
                 <td className="px-4 py-3">
                   <StatusBadge tone={routerStatusTone[client.routerStatus]}>{routerStatusLabel[client.routerStatus]}</StatusBadge>
                 </td>
                 <td className="px-4 py-3">
+                  <div className="text-xs font-medium">{client.packageName}</div>
                   <UsedMeter percent={client.usedPercent} detail={client.usedDetail} />
                 </td>
                 <td className="px-4 py-3">
-                  <StatusBadge tone={billingTone[client.billingStatus] ?? "neutral"}>{client.billingStatus}</StatusBadge>
+                  <div className="grid w-max gap-1.5">
+                    {billingBadge(client.billingStatus)}
+                    <span className="text-xs">{client.expiry ?? "—"}</span>
+                  </div>
                 </td>
-                <td className="px-4 py-3">{client.expiry ?? "—"}</td>
                 <td className="px-4 py-3 text-right">
                   <SecondaryButton to={viewPath(client)}>View</SecondaryButton>
                 </td>
@@ -351,20 +365,18 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
                 <dd className="truncate font-medium">{client.routerName || "—"}</dd>
               </div>
               <div className="flex items-baseline justify-between gap-2 border-b border-border/60 pb-1.5">
-                <dt className="text-muted-foreground">Package</dt>
-                <dd className="truncate font-medium">{client.packageName || "—"}</dd>
-              </div>
-              <div className="flex items-baseline justify-between gap-2 border-b border-border/60 pb-1.5">
-                <dt className="text-muted-foreground">Billing</dt>
-                <dd><StatusBadge tone={billingTone[client.billingStatus] ?? "neutral"}>{client.billingStatus}</StatusBadge></dd>
-              </div>
-              <div className="flex items-baseline justify-between gap-2 border-b border-border/60 pb-1.5">
-                <dt className="text-muted-foreground">Expiry</dt>
-                <dd className="truncate font-medium">{client.expiry ?? "—"}</dd>
+                <dt className="text-muted-foreground">Billing / expiry</dt>
+                <dd className="flex items-center gap-1.5 font-medium">
+                  {billingBadge(client.billingStatus)}
+                  <span className="truncate">{client.expiry ?? "—"}</span>
+                </dd>
               </div>
             </dl>
             <div className="mt-3 flex items-center justify-between gap-3">
-              <UsedMeter percent={client.usedPercent} detail={client.usedDetail} />
+              <div className="min-w-0">
+                <p className="mb-1 truncate text-xs font-medium">{client.packageName || "—"}</p>
+                <UsedMeter percent={client.usedPercent} detail={client.usedDetail} />
+              </div>
               <SecondaryButton to={viewPath(client)}>View</SecondaryButton>
             </div>
           </article>

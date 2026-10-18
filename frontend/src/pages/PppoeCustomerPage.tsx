@@ -636,6 +636,10 @@ export function PppoeCustomerPage() {
     statusLabel = "Paused";
     statusHint = seenFor ? `Offline for ${seenFor}` : "Access paused";
     statusTone = "text-warning";
+  } else if (subscriber.connection === "offline") {
+    statusLabel = "Disconnected";
+    statusHint = seenFor ? `Disconnected for ${seenFor}` : "Went offline";
+    statusTone = "text-warning";
   } else {
     statusLabel = "Not surfing";
     statusHint = seenFor ? `Not surfing for ${seenFor}` : "Never connected";

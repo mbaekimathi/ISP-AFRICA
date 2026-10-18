@@ -892,6 +892,7 @@ def public_row(row):
             date.today(),
             row.get("last_action") or "",
             row.get("tunnel_status") or "unknown",
+            int(row.get("any_sessions") or 0) > 0,
         ),
         "billingStatus": row.get("billing_status") or "pending",
         "expiry": stamp(row.get("expiry_date")),
@@ -1952,7 +1953,11 @@ def renew(cursor, client_id, subscriber_id, payload):
             # start day; next_due_date would skip that cycle entirely.
             anchor = as_day(row["sub_start"]) or as_day(row["start_date"]) or anchor
         today = date.today()
-        if anchor is None or anchor < today:
+        if row["status"] in {"disconnected", "cancelled"}:
+            # Service was ended — the old due date is stale, restart access
+            # from the day the payment lands.
+            anchor = today
+        elif anchor is None or anchor < today:
             anchor = today
     due = anchor + timedelta(days=days)
     expiry = due + timedelta(days=int(row["grace_days"] or 0))
