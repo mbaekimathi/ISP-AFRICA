@@ -427,7 +427,9 @@ def send_disconnect(host, secret, username, session_id="", framed=""):
     packet = head + authenticator + attributes
     try:
         sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        sock.settimeout(2)
+        # PoD ACKs over the tunnel answer in tens of milliseconds — 0.8s is a
+        # generous wait and keeps a silent NAS from stalling the API for 2s.
+        sock.settimeout(0.8)
         sock.sendto(packet, (host, 3799))
         try:
             data, _source = sock.recvfrom(4096)
@@ -1159,7 +1161,9 @@ def live_rates(cursor, row):
     if not host or not secret:
         return None
     try:
-        return routeros_api.subscriber_rates(host, routeros_api.open_password(secret), username)
+        # Best-effort: a reachable router answers well under half a second, so
+        # cap the wait instead of letting a dead tunnel stall the response.
+        return routeros_api.subscriber_rates(host, routeros_api.open_password(secret), username, timeout=2)
     except Exception:
         return None
 

@@ -9,6 +9,7 @@ import {
   Copy,
   Eye,
   EyeOff,
+  Loader2,
 } from "lucide-react";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { FormField } from "@/components/ui/FormField";
@@ -154,7 +155,7 @@ function ActionDialog({
 }) {
   const [busy, setBusy] = useState(false);
   return (
-    <Dialog.Root open={open} onOpenChange={(next) => { if (!next) onClose(); }}>
+    <Dialog.Root open={open} onOpenChange={(next) => { if (!next && !busy) onClose(); }}>
       <Dialog.Portal>
         <Dialog.Overlay className="dialog-overlay" />
         <Dialog.Content className="dialog-content">
@@ -164,7 +165,7 @@ function ActionDialog({
           </div>
           {children}
           <div className="flex flex-wrap justify-end gap-2">
-            <SecondaryButton type="button" onClick={onClose}>Cancel</SecondaryButton>
+            <SecondaryButton type="button" onClick={onClose} disabled={busy}>Cancel</SecondaryButton>
             <PrimaryButton
               type="button"
               disabled={busy}
@@ -179,7 +180,14 @@ function ActionDialog({
                   });
               }}
             >
-              {confirmLabel}
+              {busy ? (
+                <span className="inline-flex items-center gap-2">
+                  <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                  Working…
+                </span>
+              ) : (
+                confirmLabel
+              )}
             </PrimaryButton>
           </div>
         </Dialog.Content>
@@ -301,6 +309,7 @@ export function PppoeCustomerPage() {
   const [profileOpen, setProfileOpen] = useState(search.get("edit") === "1");
   const [openSection, setOpenSection] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogKind | null>(search.get("edit") === "1" ? "edit" : null);
+  const [busyAction, setBusyAction] = useState(false);
   const [reason, setReason] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
@@ -438,6 +447,7 @@ export function PppoeCustomerPage() {
 
   async function post(action: string, body: Record<string, unknown>) {
     setMessage("");
+    setBusyAction(true);
     try {
       const response = await apiRequest<{ subscriber?: Subscriber; password?: string }>(`/api/pppoe/subscribers/${subscriberId}/${action}`, {
         method: "POST",
@@ -449,6 +459,8 @@ export function PppoeCustomerPage() {
       else load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "That action could not be completed.");
+    } finally {
+      setBusyAction(false);
     }
   }
 
@@ -1126,7 +1138,16 @@ export function PppoeCustomerPage() {
             {message ? <p className="text-sm text-destructive">{message}</p> : null}
             <div className="flex flex-wrap justify-end gap-2">
               <SecondaryButton type="button" onClick={closeDialog}>Close</SecondaryButton>
-              <PrimaryButton type="button" onClick={() => void post("password", {})}>Reset password</PrimaryButton>
+              <PrimaryButton type="button" disabled={busyAction} onClick={() => void post("password", {})}>
+                {busyAction ? (
+                  <span className="inline-flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    Working…
+                  </span>
+                ) : (
+                  "Reset password"
+                )}
+              </PrimaryButton>
             </div>
           </Dialog.Content>
         </Dialog.Portal>
@@ -1154,8 +1175,17 @@ export function PppoeCustomerPage() {
               </div>
               {message ? <p className="text-sm text-destructive">{message}</p> : null}
               <div className="flex flex-wrap justify-end gap-2">
-                <SecondaryButton type="button" onClick={closeDialog}>Cancel</SecondaryButton>
-                <PrimaryButton type="submit">Save</PrimaryButton>
+                <SecondaryButton type="button" onClick={closeDialog} disabled={busyAction}>Cancel</SecondaryButton>
+                <PrimaryButton type="submit" disabled={busyAction}>
+                  {busyAction ? (
+                    <span className="inline-flex items-center gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                      Working…
+                    </span>
+                  ) : (
+                    "Save"
+                  )}
+                </PrimaryButton>
               </div>
             </form>
           </Dialog.Content>
