@@ -1951,9 +1951,15 @@ setTimeout(function(){run(down,'download',function(){dl.textContent=down.toFixed
 </script></body></html>"""
 
 
-def portal_preview_html(body, sig="", interactive=False):
+def portal_preview_html(body, sig="", interactive=False, images=None):
     html = hotspot_preview_html(body)
     html = html.replace("'/thank-you", "'/api/portal-preview/speedtest")
+    # Live pages fetch package art from the portal's /pkg-img endpoint; the
+    # preview has no portal origin, so the stored data URLs are swapped back
+    # in — preview weight does not matter the way the captive pages' does.
+    for package_id, data_url in (images or {}).items():
+        if data_url:
+            html = html.replace(f'src="/pkg-img?id={package_id}"', f'src="{data_url}"')
     if interactive:
         stub = PREVIEW_STUB.replace("__SIG__", json.dumps(sig))
         html = html.replace("<div class=card>", PREVIEW_BANNER, 1).replace("</body>", stub + "</body>")
@@ -3298,7 +3304,9 @@ class Handler(BaseHTTPRequestHandler):
             "name": found.get("name") or "Corner Shop Wi-Fi",
             "site": found.get("site") or "Town centre",
         }
-        offers = portal_server.company_hotspot_packages(cursor, client_id, device_id) or portal_server.hotspot_packages(
+        # Match the live /hotspot page, which sells the client's own packages
+        # (isp_packages); the company catalog only stands in when none exist.
+        offers = portal_server.hotspot_packages(cursor, client_id, device_id) or portal_server.company_hotspot_packages(
             cursor, client_id, device_id
         )
         payment = portal_server.daraja_settings(cursor, client_id) or PORTAL_PREVIEW_PAYMENT
@@ -3348,13 +3356,14 @@ class Handler(BaseHTTPRequestHandler):
             ),
         ]
         sig = portal_server.hotspot_signature(offers, payment)
+        images = {str(offer["id"]): str(offer.get("image_data_url") or "") for offer in offers}
         return [
             {
                 "id": slug,
                 "name": name,
                 "title": title,
                 "description": description,
-                "html": portal_preview_html(body, sig, slug == "buy"),
+                "html": portal_preview_html(body, sig, slug == "buy", images),
             }
             for slug, name, title, description, body in pages
             if body
@@ -3363,9 +3372,13 @@ class Handler(BaseHTTPRequestHandler):
     def pppoe_page_previews(self, cursor, device_id, token):
         client_id = self.require_client(cursor, token)
         support_phone = self.preview_support_phone(cursor, client_id)
-        offers = portal_server.company_pppoe_packages(cursor, client_id, device_id)
+        # Match the live pay page, which offers the client's own packages
+        # (isp_packages); the company catalog only stands in when none exist.
+        live_offers = portal_server.pppoe_packages(cursor, client_id, device_id)
+        catalog = portal_server.company_pppoe_packages(cursor, client_id, device_id)
+        source = live_offers or catalog
         payment = portal_server.daraja_settings(cursor, client_id) or PORTAL_PREVIEW_PAYMENT
-        first = offers[0] if offers else {}
+        first = source[0] if source else {}
         subscriber = {
             "client_id": client_id,
             "router_id": device_id,
@@ -3381,8 +3394,7 @@ class Handler(BaseHTTPRequestHandler):
             "phone": "0712 345 678",
             "pppoe_username": "amina.wanjiku",
         }
-        if not offers:
-            offers = portal_server.pppoe_offers(cursor, subscriber)
+        offers = source or portal_server.pppoe_offers(cursor, subscriber)
         voucher = {
             "first_name": subscriber["first_name"],
             "last_name": subscriber["last_name"],
@@ -3437,13 +3449,14 @@ class Handler(BaseHTTPRequestHandler):
             ),
         ]
         sig = portal_server.pay_signature(subscriber, offers, payment)
+        images = {str(offer["id"]): str(offer.get("image_data_url") or "") for offer in offers}
         return [
             {
                 "id": slug,
                 "name": name,
                 "title": title,
                 "description": description,
-                "html": portal_preview_html(body, sig, slug == "pay"),
+                "html": portal_preview_html(body, sig, slug == "pay", images),
             }
             for slug, name, title, description, body in pages
             if body

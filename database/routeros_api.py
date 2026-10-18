@@ -1205,6 +1205,10 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None, shared=False):
                 "=disabled=no",
             ],
         )
+    # Configure RADIUS before any firewall change: if the secret is rejected we
+    # abort here, while subscribers can still dial — not after drop rules are
+    # already live and the API rolls the enforcement flag back.
+    _configure_subscriber_radius(sock, reader, radius)
     for row in talk(sock, reader, ["/ip/firewall/filter/print"]):
         if row.get("comment") in PPPOE_FILTERS and _row_id(row):
             talk(sock, reader, ["/ip/firewall/filter/remove", f"=.id={_row_id(row)}"])
@@ -1357,7 +1361,6 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None, shared=False):
         ours = row.get("name") == DHCP_PORTAL_NAME or (row.get("interface") == iface and row.get("profile") == DHCP_PORTAL_PROFILE)
         if ours and row.get("disabled") != "true" and _row_id(row):
             talk(sock, reader, ["/ip/hotspot/set", f"=.id={_row_id(row)}", "=disabled=yes"])
-    _configure_subscriber_radius(sock, reader, radius)
     _drop_open_sessions(sock, reader)
 
 
@@ -2207,8 +2210,10 @@ def inspect_access(host, password, radius_address="", timeout=4, port=API_PORT, 
 
         servers = read(["/interface/pppoe-server/server/print"])
         filters = read(["/ip/firewall/filter/print"])
+        nats = read(["/ip/firewall/nat/print"])
         spots = read(["/ip/hotspot/print"])
         radius_rows = read(["/radius/print"])
+        incoming = read(["/radius/incoming/print"])
         try:
             avoid, _lan = _wan_ports(sock, reader)
         except RouterError:
@@ -2216,6 +2221,11 @@ def inspect_access(host, password, radius_address="", timeout=4, port=API_PORT, 
     finally:
         sock.close()
     comments = {row.get("comment") for row in filters}
+    nat_redirects = {
+        row.get("comment")
+        for row in nats
+        if row.get("chain") == "dstnat" and row.get("action") == "dst-nat" and row.get("disabled") != "true"
+    }
     pppoe_server = any(
         row.get("service-name") == PPPOE_SERVICE and row.get("disabled") != "true" and _row_id(row)
         for row in servers
@@ -2224,7 +2234,18 @@ def inspect_access(host, password, radius_address="", timeout=4, port=API_PORT, 
         row.get("address") == radius_address and "ppp" in (row.get("service") or "").split(",")
         for row in radius_rows
     )
-    pppoe = pppoe_server and PPPOE_DROP_PPP in comments and PPPOE_ALLOW in comments and radius_ok
+    # Without accept=yes on /radius/incoming the router refuses Disconnect-
+    # Requests, so paused/expired subscribers keep their subscribed session
+    # and are never moved into the portal address lists.
+    incoming_ok = any(row.get("accept") == "yes" for row in incoming)
+    pppoe = (
+        pppoe_server
+        and PPPOE_DROP_PPP in comments
+        and PPPOE_ALLOW in comments
+        and {PPPOE_PORTAL_NAT_SUS, PPPOE_PORTAL_NAT_EXP} <= nat_redirects
+        and radius_ok
+        and incoming_ok
+    )
     hotspot = any(
         _row_id(row)
         and row.get("disabled") != "true"

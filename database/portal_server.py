@@ -196,6 +196,31 @@ def identify(cursor, ip):
         """,
         (ip,),
     )
+    row = cursor.fetchone()
+    if row:
+        return row
+    # A restricted session dies every RESTRICTED_SESSION_SECONDS and the CPE
+    # redials — during that gap no open radacct row exists yet. Match the last
+    # session on this framed IP so the portal still shows their page instead
+    # of "no active subscription" while they are reconnecting.
+    cursor.execute(
+        """
+        SELECT s.id AS subscriber_id, s.client_id, s.first_name, s.last_name, s.phone,
+               s.pppoe_username, s.status, s.router_id, s.package_id,
+               p.name AS package_name, p.download_mbps, p.upload_mbps,
+               p.simultaneous_devices AS package_devices,
+               sub.price, sub.billing_cycle, sub.cycle_days, sub.grace_days
+        FROM radacct r
+        JOIN pppoe_subscribers s ON s.pppoe_username = r.username
+        JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
+        JOIN isp_packages p ON p.id = s.package_id
+        WHERE r.framedipaddress = %s
+          AND r.acctstoptime IS NOT NULL
+          AND r.acctstoptime > DATE_SUB(NOW(), INTERVAL 15 MINUTE)
+        ORDER BY r.acctstoptime DESC LIMIT 1
+        """,
+        (ip,),
+    )
     return cursor.fetchone()
 
 
@@ -326,6 +351,46 @@ def stk_query(row, checkout_id):
     return daraja_request(row, "/mpesa/stkpushquery/v1/query", payload)
 
 
+# stkpushquery is a blocking upstream call (up to ~16s with a token refresh).
+# Phones poll every 2.5s, so without sharing, every poll stacked another
+# blocking call on the limited worker pool and stalled the whole portal.
+STK_TTL = 4.0
+STK_BUSY_GRACE = 30.0
+STK = {}
+STK_LOCK = threading.Lock()
+
+
+def stk_query_shared(row, checkout_id):
+    """One live stkpushquery per checkout id at a time.
+
+    Returns (result, queried): callers only apply their expiry logic when
+    queried is True — an in-flight query owned by another poll just means
+    "still waiting", and a result fetched moments ago is reused."""
+    now = time.monotonic()
+    with STK_LOCK:
+        entry = STK.get(checkout_id)
+        if entry is not None:
+            busy, result, stamp = entry
+            if busy:
+                if now - stamp <= STK_BUSY_GRACE:
+                    return None, False
+            elif now - stamp <= STK_TTL:
+                return result, True
+        STK[checkout_id] = (True, None, now)
+        if len(STK) > 8192:
+            cutoff = now - 600
+            for key, item in list(STK.items()):
+                if not item[0] and item[2] <= cutoff:
+                    STK.pop(key, None)
+    try:
+        result = stk_query(row, checkout_id)
+    except Exception:
+        result = None
+    with STK_LOCK:
+        STK[checkout_id] = (False, result, time.monotonic())
+    return result, True
+
+
 def stk_state(result):
     """Classify an stkpushquery reply as paid, still pending, or failed."""
     code = result.get("ResultCode")
@@ -395,14 +460,28 @@ def pppoe_offers(cursor, row):
     return offers
 
 
+IMG_FALLBACK = (
+    "this.replaceWith(Object.assign(document.createElement('span'),"
+    "{className:'pi noimg',textContent:'Wi-Fi'}))"
+)
+
+
+def package_thumb(offer):
+    """Package art is served by id from /pkg-img instead of being inlined —
+    a few 60 KB+ data URLs made the captive page weigh hundreds of KB, which
+    takes tens of seconds to pull over the throttled blocked-subscriber
+    link and looked like the page never finished loading."""
+    if str(offer.get("image_data_url") or "").startswith("data:image/"):
+        return (
+            f'<img class=pi src="/pkg-img?id={esc(offer["id"])}" alt="" '
+            f'loading="lazy" onerror="{IMG_FALLBACK}">'
+        )
+    return '<span class="pi noimg">Wi-Fi</span>'
+
+
 def pppoe_pick(offer, checked):
     price = Decimal(offer["price"] or 0)
-    image = str(offer.get("image_data_url") or "")
-    thumb = (
-        f'<img class=pi src="{esc(image)}" alt="">'
-        if image.startswith("data:image/")
-        else '<span class="pi noimg">Wi-Fi</span>'
-    )
+    thumb = package_thumb(offer)
     devices = int(offer.get("simultaneous_devices") or 0)
     device_text = "Unlimited devices" if devices <= 0 else f"Up to {devices} device{'s' if devices != 1 else ''}"
     return f"""<label class="pick">
@@ -467,6 +546,8 @@ let cid=null;
 let dirty=false;
 let voucher='';
 let tries=0;
+let waits=0;
+let paying=false;
 function money(cents){{return 'KSh '+(cents%100?(cents/100).toFixed(2):String(cents/100));}}
 function sel(){{const p=document.querySelector('input[name=pkg]:checked');return p?p.value:'';}}
 function refresh(){{
@@ -487,7 +568,7 @@ function pickpkg(){{
 }}
 function stage(html){{document.querySelector('.card').innerHTML=BRAND+html;}}
 function waitPin(){{
- stage('<div class=okpage><p style="margin:8px 0 14px"><span class="spin big"></span></p><span class="badge blue">M-Pesa</span><h1>Approve on your phone</h1><p class=sub>Enter your M-Pesa PIN on the prompt sent to your phone. This page updates itself — no need to refresh.</p></div>');
+ stage('<div class=okpage><p style="margin:8px 0 14px"><span class="spin big"></span></p><span class="badge blue">M-Pesa</span><h1>Approve on your phone</h1><p class=sub>Enter your M-Pesa PIN on the prompt sent to your phone. This page updates itself — no need to refresh.</p><p class=hint id=later></p></div>');
 }}
 function connecting(){{
  stage('<div class=okpage><p style="margin:8px 0 14px"><span class="spin big g"></span></p><span class="badge ok">Paid</span><h1>Payment received</h1><p class=sub>Reconnecting you to the internet — hold on…</p><p class=hint id=later></p></div>');
@@ -509,6 +590,9 @@ async function poll(){{
   if(b.state==='paid'){{voucher=b.voucher||'';connecting();setTimeout(online,1500);return;}}
   if(b.state==='failed'){{fail(b.reason||'Payment was not completed.');return;}}
  }}catch(e){{}}
+ waits+=1;
+ if(waits===24){{const l=document.getElementById('later');if(l)l.textContent='Still waiting for M-Pesa — approval can take a couple of minutes. The page keeps checking on its own.';}}
+ if(waits>120){{cid=null;saveState();location.reload();return;}}
  setTimeout(poll,2500);
 }}
 async function online(){{
@@ -526,10 +610,21 @@ async function online(){{
 async function pay(){{
  const pkg=sel();
  if(!pkg){{document.getElementById('msg').innerHTML='<div class=err>Pick a package first.</div>';return;}}
- const r=await fetch('/pay',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{phone:document.getElementById('phone').value,packageId:pkg,amount:document.getElementById('amount').value}})}});
- const b=await r.json();
- if(b.checkoutId){{cid=b.checkoutId;waitPin();poll();}}
- else document.getElementById('msg').innerHTML='<div class=err>'+(b.error||'Could not start the payment.')+'</div>';
+ if(paying)return;
+ paying=true;
+ const btn=document.getElementById('paybtn');
+ if(btn){{btn.disabled=true;btn.textContent='Sending the M-Pesa prompt…';}}
+ try{{
+  const r=await fetch('/pay',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{phone:document.getElementById('phone').value,packageId:pkg,amount:document.getElementById('amount').value}})}});
+  const b=await r.json();
+  if(b.checkoutId){{cid=b.checkoutId;waitPin();poll();return;}}
+  document.getElementById('msg').innerHTML='<div class=err>'+(b.error||'Could not start the payment.')+'</div>';
+ }}catch(e){{
+  document.getElementById('msg').innerHTML='<div class=err>Could not reach the payment service — check your connection and try again.</div>';
+ }}
+ paying=false;
+ if(btn){{btn.disabled=false;}}
+ refresh();
 }}
 document.querySelectorAll('input[name=pkg]').forEach(function(r){{r.addEventListener('change',pickpkg);}});
 const amtbox=document.getElementById('amount');if(amtbox)amtbox.addEventListener('input',function(){{dirty=true;refresh();}});
@@ -924,12 +1019,7 @@ def hotspot_offer_detail(offer):
 
 def hotspot_pick(offer, checked, customize):
     price = Decimal(offer["price"] or 0)
-    image = str(offer.get("image_data_url") or "")
-    thumb = (
-        f'<img class=pi src="{esc(image)}" alt="">'
-        if image.startswith("data:image/")
-        else '<span class="pi noimg">Wi-Fi</span>'
-    )
+    thumb = package_thumb(offer)
     row = f"""<label class="pick">
 <input type="radio" name="pkg" value="{esc(offer['id'])}"{' checked' if checked else ''}>
 <span class=tick></span>
@@ -1074,10 +1164,12 @@ function pick_mode(m){{
 }}
 async function poll(){{
  if(!cid)return;
- const r=await fetch('/hotspot/status?id='+encodeURIComponent(cid));
- const b=await r.json();
- if(b.state==='paid'){{cid=null;paid(b);return;}}
- if(b.state==='failed'){{cid=null;err(b.reason||'Payment was not completed.');const btn=document.getElementById('paybtn');if(btn)btn.disabled=false;refresh();return;}}
+ try{{
+  const r=await fetch('/hotspot/status?id='+encodeURIComponent(cid));
+  const b=await r.json();
+  if(b.state==='paid'){{cid=null;paid(b);return;}}
+  if(b.state==='failed'){{cid=null;paying=false;err(b.reason||'Payment was not completed.');const btn=document.getElementById('paybtn');if(btn)btn.disabled=false;refresh();return;}}
+ }}catch(e){{}}
  setTimeout(poll,2500);
 }}
 let paidBody=null;
@@ -1134,17 +1226,28 @@ async function redeem(){{
  }}catch(e){{rmsg.innerHTML='<div class=err>Could not reach the router — try again.</div>';}}
  btn.disabled=false;btn.textContent='Connect';
 }}
+let paying=false;
 async function pay(){{
  const pkg=sel();
  if(!pkg){{err('Pick a package first.');return;}}
  const phone=document.getElementById('phone').value.trim();
  if(!phone){{err('Enter the M-Pesa number that should approve the payment.');return;}}
+ if(paying)return;
+ paying=true;
  const btn=document.getElementById('paybtn');
+ if(btn){{btn.disabled=true;btn.textContent='Sending the M-Pesa prompt…';}}
  const q=quote();
- const r=await fetch('/hotspot/pay',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{device:CTX.device,ip:CTX.ip,mac:CTX.mac,login:CTX.login,orig:CTX.orig,packageId:pkg,phone:phone,devices:q.devices,periods:q.periods}})}});
- const b=await r.json();
- if(b.checkoutId){{cid=b.checkoutId;btn.disabled=true;btn.textContent='Waiting for M-Pesa approval…';msg('Check the phone and approve the M-Pesa prompt…');poll();}}
- else err(b.error||'Could not start the payment.');
+ try{{
+  const r=await fetch('/hotspot/pay',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{device:CTX.device,ip:CTX.ip,mac:CTX.mac,login:CTX.login,orig:CTX.orig,packageId:pkg,phone:phone,devices:q.devices,periods:q.periods}})}});
+  const b=await r.json();
+  if(b.checkoutId){{cid=b.checkoutId;if(btn)btn.textContent='Waiting for M-Pesa approval…';msg('Check the phone and approve the M-Pesa prompt…');poll();return;}}
+  err(b.error||'Could not start the payment.');
+ }}catch(e){{
+  err('Could not reach the payment service — check your connection and try again.');
+ }}
+ paying=false;
+ if(btn){{btn.disabled=false;}}
+ refresh();
 }}
 document.querySelectorAll('input[name=pkg]').forEach(function(r){{r.addEventListener('change',refresh);}});
 document.querySelectorAll('.cust input').forEach(function(i){{i.addEventListener('input',refresh);}});
@@ -1411,6 +1514,48 @@ class PortalHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def package_image(self, package_id):
+        """Serve a package's stored data-URL image by id so the pay pages stay
+        light. The package catalog is already public to captive users, and only
+        rows whose stored value parses as a data:image/* URL ever produce a
+        body, so this cannot read arbitrary database content."""
+        package_id = str(package_id or "")
+        if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z-]{0,63}", package_id):
+            return self._send(b"not found", 404, "text/plain")
+        db = self.server.connect()
+        try:
+            with db.cursor() as cursor:
+                cursor.execute("SELECT image_data_url FROM isp_packages WHERE id = %s", (package_id,))
+                row = cursor.fetchone()
+                if row is None:
+                    cursor.execute("SELECT image_data_url FROM company_packages WHERE id = %s", (package_id,))
+                    row = cursor.fetchone()
+        finally:
+            db.close()
+        match = re.match(
+            r"^data:(image/(?:png|jpe?g|gif|webp|svg\+xml|x-icon));base64,(.*)$",
+            str((row or {}).get("image_data_url") or ""),
+            re.S,
+        )
+        if not match:
+            return self._send(b"not found", 404, "text/plain")
+        try:
+            raw = base64.b64decode(match.group(2), validate=True)
+        except ValueError:
+            return self._send(b"not found", 404, "text/plain")
+        if not raw or len(raw) > 4_000_000:
+            return self._send(b"not found", 404, "text/plain")
+        self.send_response(200)
+        self.send_header("Content-Type", match.group(1))
+        self.send_header("Content-Length", str(len(raw)))
+        # Package art changes rarely; a short cache saves refetching every
+        # image on each portal reload while the offer signature still forces
+        # a fresh page when a package is actually edited.
+        self.send_header("Cache-Control", "private, max-age=300")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(raw)
+
     def do_GET(self):
         if self.throttled("portal", 600):
             return self._send(b'{"error":"Too many requests."}', 429, "application/json")
@@ -1432,6 +1577,10 @@ class PortalHandler(BaseHTTPRequestHandler):
                     PROBE_SEEN.clear()
             if now - first >= PROBE_GRACE:
                 return self._send(b"", 204)
+        if path == "/favicon.ico":
+            return self._send(b"", 204)
+        if path == "/pkg-img":
+            return self.package_image(parse_qs(urlparse(self.path).query).get("id", [""])[0])
         if path == "/pay/offers":
             return self.pay_offers()
         if path == "/pay/status":
@@ -1661,14 +1810,13 @@ class PortalHandler(BaseHTTPRequestHandler):
                 # once Daraja says the payment actually landed.
                 settings = daraja_settings(cursor, request["client_id"])
                 result = None
+                queried = False
                 if settings:
-                    try:
-                        result = stk_query(settings, checkout_id)
-                    except Exception:
-                        result = None
+                    result, queried = stk_query_shared(settings, checkout_id)
                 stale = (datetime.now() - request["created_at"]).total_seconds() > 180
                 if result is None:
-                    if stale:
+                    # Another poll owns the live query — keep waiting on it.
+                    if stale and queried:
                         return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
                     return self._send(b'{"state":"pending"}', 200, "application/json")
                 state, reason = stk_state(result)
@@ -1967,13 +2115,12 @@ class PortalHandler(BaseHTTPRequestHandler):
                 # vouchers or authorizing a device on the router.
                 settings = daraja_settings(cursor, pending["client_id"])
                 result = None
+                queried = False
                 if settings:
-                    try:
-                        result = stk_query(settings, checkout_id)
-                    except Exception:
-                        result = None
+                    result, queried = stk_query_shared(settings, checkout_id)
                 if result is None:
-                    if stale:
+                    # Another poll owns the live query — keep waiting on it.
+                    if stale and queried:
                         with HOTSPOT_LOCK:
                             HOTSPOT_PENDING.pop(checkout_id, None)
                         return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")

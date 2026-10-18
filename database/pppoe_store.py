@@ -255,10 +255,16 @@ def ensure_schema(cursor):
           acctterminatecause VARCHAR(32) NULL,
           framedipaddress VARCHAR(15) NULL,
           KEY username (username),
-          KEY acctstoptime (acctstoptime)
+          KEY acctstoptime (acctstoptime),
+          KEY idx_radacct_framed (framedipaddress, acctstoptime)
         )
         """
     )
+    # The portal's captive-page lookup filters radacct by framedipaddress on
+    # every request; without this index each hit scans the whole table.
+    cursor.execute("SHOW INDEX FROM radacct WHERE Key_name = 'idx_radacct_framed'")
+    if cursor.fetchone() is None:
+        cursor.execute("ALTER TABLE radacct ADD KEY idx_radacct_framed (framedipaddress, acctstoptime)")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS nas (
@@ -1855,17 +1861,31 @@ def reconcile(cursor, client_id):
         can_surf = subscription_can_surf(row, today)
         try:
             apply_plan(cursor, row, can_surf)
-        except routeros_api.RouterError:
+        except routeros_api.RouterError as error:
+            print(f"event=pppoe-reconcile sub={row['id']} user={row['pppoe_username']} plan-error={error}", flush=True)
             continue
         kick = nxt is not None
         if not kick and not can_surf:
+            # A blocked subscriber's legitimate session is capped by
+            # Session-Timeout at RESTRICTED_SESSION_SECONDS — anything still
+            # open past that was authorized under the old plan and must be
+            # dropped so it redials into the suspended/expired address list.
+            # Younger sessions are already restricted; kicking them every
+            # sweep would knock devices off the portal page mid-payment.
             cursor.execute(
-                "SELECT COUNT(*) AS open_sessions FROM radacct WHERE username = %s AND acctstoptime IS NULL",
-                (row["pppoe_username"],),
+                """
+                SELECT COUNT(*) AS stale_sessions
+                FROM radacct
+                WHERE username = %s AND acctstoptime IS NULL
+                  AND acctstarttime < DATE_SUB(NOW(), INTERVAL %s SECOND)
+                """,
+                (row["pppoe_username"], pppoe_service.RESTRICTED_SESSION_SECONDS + 300),
             )
-            kick = int(cursor.fetchone()["open_sessions"] or 0) > 0
+            kick = int(cursor.fetchone()["stale_sessions"] or 0) > 0
         if kick:
-            coa_for(cursor, row, row["pppoe_username"])
+            outcome = coa_for(cursor, row, row["pppoe_username"])
+            if outcome != "sent":
+                print(f"event=pppoe-coa user={row['pppoe_username']} result={outcome}", flush=True)
 
 
 def reconcile_all(connect):
