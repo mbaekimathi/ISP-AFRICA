@@ -52,6 +52,7 @@ export type Subscriber = {
   packageName: string;
   serial: string;
   status: string;
+  startDate: string | null;
   connection: "online" | "offline" | "unknown";
   billingStatus: string;
   expiry: string | null;

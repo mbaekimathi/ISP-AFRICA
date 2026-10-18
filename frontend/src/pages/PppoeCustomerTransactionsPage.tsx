@@ -36,8 +36,8 @@ export function PppoeCustomerTransactionsPage() {
 
   function primePaymentForm(target: Subscriber) {
     const today = new Date().toISOString().slice(0, 10);
-    const expiry = target.billing.expiry;
-    setStartDate(expiry && expiry > today ? expiry : today);
+    const pending = target.status === "pending_activation" || target.billing.billingStatus === "pending";
+    setStartDate(pending && target.startDate ? target.startDate : today);
     const price = Number(target.billing.price);
     setAmount(price > 0 ? String(price) : "");
   }
@@ -81,12 +81,14 @@ export function PppoeCustomerTransactionsPage() {
   const billing = billingLabelFor(subscriber.billingStatus);
   const outstandingDue = Number(subscriber.billing.outstanding) > 0;
   const today = new Date().toISOString().slice(0, 10);
-  const subscriptionLive = Boolean(subscriber.billing.expiry && subscriber.billing.expiry > today);
+  const firstCyclePending =
+    subscriber.status === "pending_activation" || subscriber.billing.billingStatus === "pending";
+  const paidUp = Boolean(!firstCyclePending && subscriber.billing.nextDueDate && subscriber.billing.nextDueDate >= today);
   const paidAmount = Number(amount);
   const packagePrice = Number(subscriber.billing.price);
   const purchasedDays =
     packagePrice > 0 && paidAmount > 0 ? Math.max(1, Math.ceil((paidAmount * subscriber.billing.cycleDays) / packagePrice)) : 0;
-  const anchorDay = subscriptionLive ? (subscriber.billing.expiry as string) : startDate || today;
+  const anchorDay = paidUp ? (subscriber.billing.nextDueDate as string) : startDate || today;
   const dueDate = purchasedDays > 0 ? shiftDay(anchorDay, purchasedDays) : null;
   const newExpiry = dueDate ? shiftDay(dueDate, subscriber.billing.graceDays) : null;
 
@@ -195,10 +197,10 @@ export function PppoeCustomerTransactionsPage() {
               className="grid gap-3"
               onSubmit={(event) => {
                 event.preventDefault();
-                void post("renew", { amount, mpesaReference: reference, ...(!subscriptionLive && startDate ? { startDate } : {}) }).then(() => setPayOpen(false));
+                void post("renew", { amount, mpesaReference: reference, ...(!paidUp && startDate ? { startDate } : {}) }).then(() => setPayOpen(false));
               }}
             >
-              {subscriptionLive ? null : (
+              {paidUp ? null : (
                 <FormField id="payment-start" label="Start date">
                   <input id="payment-start" type="date" className="field" value={startDate} onChange={(event) => setStartDate(event.target.value)} />
                 </FormField>

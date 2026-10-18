@@ -1944,7 +1944,13 @@ def renew(cursor, client_id, subscriber_id, payload):
         if anchor is None:
             raise PppoeError(400, "Enter a valid start date.")
     if anchor is None:
-        anchor = as_day(row["expiry_date"])
+        # Stack on the paid-through date, not expiry_date — expiry already
+        # carries the grace days, so anchoring there would bill them twice.
+        anchor = as_day(row["next_due_date"]) or as_day(row["expiry_date"])
+        if row["billing_status"] == "pending" or row["status"] == "pending_activation":
+            # The first cycle was never paid — run it from the scheduled
+            # start day; next_due_date would skip that cycle entirely.
+            anchor = as_day(row["sub_start"]) or as_day(row["start_date"]) or anchor
         today = date.today()
         if anchor is None or anchor < today:
             anchor = today
