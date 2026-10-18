@@ -5,15 +5,35 @@ import * as Dialog from "@radix-ui/react-dialog";
 import {
   Activity,
   ArrowLeft,
+  ArrowRightLeft,
+  ArrowUpDown,
+  BadgeCheck,
+  CalendarClock,
   ChevronDown,
   Copy,
   Eye,
   EyeOff,
+  Gauge,
+  KeyRound,
   Loader2,
+  MapPin,
+  Pause,
+  Pencil,
+  Phone,
+  Play,
+  Power,
+  ReceiptText,
+  Router,
+  Smartphone,
+  Trash2,
+  Unplug,
+  UserRound,
+  Wallet,
 } from "lucide-react";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { FormField } from "@/components/ui/FormField";
 import { LiveLoad } from "@/components/ui/LiveLoad";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
 import { clientPage } from "@/lib/accounts";
@@ -277,13 +297,23 @@ function TrendChart({
   );
 }
 
-function Stat({
+const cardActionClass =
+  "rounded-lg bg-primary/10 px-3 py-1.5 text-xs font-semibold text-primary transition hover:bg-primary/20";
+
+const iconButtonClass =
+  "flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-muted hover:text-foreground";
+
+function StatCard({
+  icon,
+  iconClass,
   label,
   value,
   hint,
   valueClass,
   hintClass,
 }: {
+  icon: ReactNode;
+  iconClass?: string;
   label: string;
   value: ReactNode;
   hint?: ReactNode;
@@ -291,12 +321,49 @@ function Stat({
   hintClass?: string;
 }) {
   return (
-    <div className="min-w-0">
-      <p className="truncate text-[11px] font-medium uppercase tracking-wide text-primary-foreground/60">{label}</p>
-      <div className={`mt-1 flex min-w-0 items-center gap-1.5 text-sm font-semibold tracking-tight ${valueClass ?? ""}`}>{value}</div>
+    <div className="rounded-2xl border border-border bg-surface p-4 shadow-card">
+      <div className="flex items-center justify-between gap-2">
+        <p className="truncate text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
+        <span
+          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${iconClass ?? "bg-primary/10 text-primary"}`}
+          aria-hidden="true"
+        >
+          {icon}
+        </span>
+      </div>
+      <div className={`mt-2 flex min-w-0 items-center gap-1.5 text-lg font-semibold tracking-tight ${valueClass ?? ""}`}>{value}</div>
       {hint != null && hint !== "" ? (
-        <div className={`mt-0.5 truncate text-[11px] ${hintClass ?? "text-primary-foreground/60"}`}>{hint}</div>
+        <p className={`mt-0.5 truncate text-xs ${hintClass ?? "text-muted-foreground"}`}>{hint}</p>
       ) : null}
+    </div>
+  );
+}
+
+function CardHeader({
+  icon,
+  title,
+  children,
+}: {
+  icon: ReactNode;
+  title: ReactNode;
+  children?: ReactNode;
+}) {
+  return (
+    <div className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
+      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
+        {icon}
+      </span>
+      <h2 className="text-sm font-semibold">{title}</h2>
+      {children ? <div className="ml-auto flex flex-wrap items-center gap-2">{children}</div> : null}
+    </div>
+  );
+}
+
+function InfoRow({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div className="flex items-baseline justify-between gap-3 border-b border-border/60 py-2.5 last:border-b-0">
+      <dt className="shrink-0 text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</dt>
+      <dd className="min-w-0 break-words text-right text-sm font-medium">{children}</dd>
     </div>
   );
 }
@@ -312,7 +379,6 @@ export function PppoeCustomerPage() {
   const [routers, setRouters] = useState<RouterOption[]>([]);
   const [packageId, setPackageId] = useState("");
   const [routerId, setRouterId] = useState("");
-  const [profileOpen, setProfileOpen] = useState(search.get("edit") === "1");
   const [openSection, setOpenSection] = useState<string | null>(null);
   const [dialog, setDialog] = useState<DialogKind | null>(search.get("edit") === "1" ? "edit" : null);
   const [busyAction, setBusyAction] = useState(false);
@@ -414,7 +480,7 @@ export function PppoeCustomerPage() {
     const place = () => {
       const rect = menuButtonRef.current?.getBoundingClientRect();
       if (!rect) return;
-      const width = 224;
+      const width = 240;
       const estimatedHeight = Math.min(360, menuListRef.current?.offsetHeight ?? 360);
       const belowFits = rect.bottom + 6 + estimatedHeight <= window.innerHeight;
       setMenuPos({
@@ -582,287 +648,206 @@ export function PppoeCustomerPage() {
   const toggleSection = (id: string) => (next: boolean) =>
     setOpenSection((current) => (next ? id : current === id ? null : current));
 
-  const menuItems: { label: string; danger?: boolean; onClick: () => void }[] = [
-    { label: "Transactions", onClick: () => navigate(home(`/pppoe/${subscriberId}/transactions`)) },
+  const menuItems: { label: string; icon?: ReactNode; danger?: boolean; onClick: () => void }[] = [
+    { label: "Transactions", icon: <ReceiptText className="h-4 w-4" />, onClick: () => navigate(home(`/pppoe/${subscriberId}/transactions`)) },
     ...(ended
       ? []
       : [
-          { label: "Change package", onClick: () => setDialog("package") },
-          { label: "Move to another router", onClick: () => setDialog("migrate") },
+          { label: "Change package", icon: <ArrowUpDown className="h-4 w-4" />, onClick: () => setDialog("package") },
+          { label: "Move to another router", icon: <ArrowRightLeft className="h-4 w-4" />, onClick: () => setDialog("migrate") },
         ]),
-    ...(sessionOpen ? [{ label: "Disconnect current session", onClick: () => setDialog("disconnect") }] : []),
-    { label: "Reset password", onClick: () => setDialog("password") },
+    ...(sessionOpen ? [{ label: "Disconnect current session", icon: <Unplug className="h-4 w-4" />, onClick: () => setDialog("disconnect") }] : []),
+    { label: "Reset password", icon: <KeyRound className="h-4 w-4" />, onClick: () => setDialog("password") },
     {
       label: "Show password",
+      icon: <Eye className="h-4 w-4" />,
       onClick: () => {
         setDialog("password");
         void post("reveal", {});
       },
     },
-    { label: "Edit customer details", onClick: () => setDialog("edit") },
-    ...(ended ? [] : [{ label: "divider", onClick: () => undefined }, { label: "End service", danger: true, onClick: () => setDialog("terminate") }]),
+    { label: "Edit customer details", icon: <Pencil className="h-4 w-4" />, onClick: () => setDialog("edit") },
+    ...(ended ? [] : [{ label: "divider", onClick: () => undefined }, { label: "End service", icon: <Power className="h-4 w-4" />, danger: true, onClick: () => setDialog("terminate") }]),
     { label: "divider", onClick: () => undefined },
-    { label: "Delete customer", danger: true, onClick: () => setDialog("delete") },
+    { label: "Delete customer", icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => setDialog("delete") },
   ];
 
   return (
-    <div className="page-shell py-8">
-      <section className="overflow-hidden rounded-3xl bg-gradient-to-br from-primary via-primary/85 to-primary/60 text-primary-foreground shadow-card">
-        <div className="px-5 pb-6 pt-5 sm:px-7 sm:pt-6">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <Link
-              to={home("/clients")}
-              className="inline-flex items-center gap-1.5 text-sm font-medium text-primary-foreground/75 transition hover:text-primary-foreground"
-            >
-              <ArrowLeft className="h-4 w-4" />
-              PPPoE clients
-            </Link>
-            <div className="flex flex-wrap gap-2">
-              <Link
-                to={`${home(`/pppoe/${subscriberId}/transactions`)}?pay=1`}
-                className="inline-flex min-h-10 items-center justify-center rounded-xl bg-primary-foreground px-4 text-sm font-semibold text-primary shadow-sm transition hover:bg-primary-foreground/90"
-              >
-                Record payment
-              </Link>
-              {pendingApproval ? (
-                <button
-                  type="button"
-                  className="inline-flex min-h-10 items-center justify-center rounded-xl bg-primary-foreground/15 px-4 text-sm font-semibold transition hover:bg-primary-foreground/25"
-                  onClick={() => void post("activate", {})}
-                >
-                  Approve
-                </button>
-              ) : ended || subscriber.status === "expired" ? null : (
-                <button
-                  type="button"
-                  className="inline-flex min-h-10 items-center justify-center rounded-xl bg-primary-foreground/15 px-4 text-sm font-semibold transition hover:bg-primary-foreground/25"
-                  onClick={() => setDialog("suspend")}
-                >
-                  {suspended ? "Continue" : "Suspend"}
-                </button>
+    <div className="page-shell py-6 sm:py-8">
+      <div className="page-header">
+        <Link
+          to={home("/clients")}
+          className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground transition hover:text-foreground"
+        >
+          <ArrowLeft className="h-4 w-4" />
+          PPPoE clients
+        </Link>
+        <div className="page-header-actions">
+          <PrimaryButton to={`${home(`/pppoe/${subscriberId}/transactions`)}?pay=1`} className="min-h-10">
+            <Wallet className="h-4 w-4" aria-hidden="true" />
+            Record payment
+          </PrimaryButton>
+          {pendingApproval ? (
+            <SecondaryButton className="min-h-10" onClick={() => void post("activate", {})}>
+              <BadgeCheck className="h-4 w-4" aria-hidden="true" />
+              Approve
+            </SecondaryButton>
+          ) : ended || subscriber.status === "expired" ? null : (
+            <SecondaryButton className="min-h-10" onClick={() => setDialog("suspend")}>
+              {suspended ? (
+                <Play className="h-4 w-4" aria-hidden="true" />
+              ) : (
+                <Pause className="h-4 w-4" aria-hidden="true" />
               )}
-              <div>
-                <button
-                  type="button"
-                  ref={menuButtonRef}
-                  aria-haspopup="menu"
-                  aria-expanded={menuOpen}
-                  onClick={() => setMenuOpen((open) => !open)}
-                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-primary-foreground/15 px-4 text-sm font-semibold transition hover:bg-primary-foreground/25"
-                >
-                  More
-                  <ChevronDown className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
-                </button>
-                {menuOpen && menuPos
-                  ? createPortal(
-                      <div
-                        role="menu"
-                        ref={menuListRef}
-                        style={{ top: menuPos.top, left: menuPos.left }}
-                        className="fixed z-50 w-56 overflow-hidden rounded-xl border border-border bg-surface py-1 text-foreground shadow-lg"
-                      >
-                        {menuItems.map((item, index) =>
-                          item.label === "divider" ? (
-                            <div key={`divider-${index}`} className="my-1 border-t border-border" />
-                          ) : (
-                            <button
-                              key={item.label}
-                              type="button"
-                              role="menuitem"
-                              className={`block w-full px-4 py-2 text-left text-sm hover:bg-surface-muted ${item.danger ? "text-destructive" : "text-foreground"}`}
-                              onClick={() => {
-                                setMenuOpen(false);
-                                item.onClick();
-                              }}
-                            >
-                              {item.label}
-                            </button>
-                          ),
-                        )}
-                      </div>,
-                      document.body,
-                    )
-                  : null}
-              </div>
-            </div>
-          </div>
-
-          <div className="mt-5 flex flex-wrap items-center gap-x-10 gap-y-5">
-            <div className="flex min-w-0 items-center gap-4">
-              <div
-                className="relative flex h-16 w-16 shrink-0 items-center justify-center rounded-full bg-primary-foreground text-lg font-semibold text-primary shadow-sm"
-                aria-hidden="true"
-              >
-                {initials}
-                <span className={`absolute bottom-0 right-0 h-4 w-4 rounded-full border-2 border-primary-foreground ${connectionDot}`} />
-              </div>
-              <div className="min-w-0">
-                <div className="flex items-center gap-2">
-                  <h1 className="truncate text-xl font-semibold tracking-tight sm:text-2xl">
-                    {subscriber.firstName} {subscriber.lastName}
-                  </h1>
-                  <span className="shrink-0 rounded-full bg-primary-foreground/15 px-2.5 py-0.5 text-[11px] font-semibold">{status.label}</span>
-                </div>
-                <p className="mt-0.5 truncate text-sm text-primary-foreground/75">
-                  {subscriber.phone} · {subscriber.routerName} · {subscriber.packageName}
-                </p>
-                <button
-                  type="button"
-                  aria-expanded={profileOpen}
-                  onClick={() => setProfileOpen((open) => !open)}
-                  className="mt-1.5 inline-flex items-center gap-1 text-xs font-semibold text-primary-foreground/70 transition hover:text-primary-foreground"
-                >
-                  {profileOpen ? "Hide details" : "Details"}
-                  <ChevronDown
-                    className={`h-3.5 w-3.5 transition-transform ${profileOpen ? "rotate-180" : ""}`}
-                    aria-hidden="true"
-                  />
-                </button>
-              </div>
-            </div>
-
-            <div className="grid min-w-[18rem] flex-1 grid-cols-2 gap-x-6 gap-y-4 sm:grid-cols-4">
-              <Stat label="Status" value={statusLabel} valueClass={statusTone} hint={statusHint} hintClass={statusTone} />
-              <Stat
-                label="Live speed"
-                value={liveSpeed}
-                hint={`Plan ${subscriber.downloadMbps ?? "—"}↓ ${subscriber.uploadMbps ?? "—"}↑ Mbps`}
-              />
-              <Stat
-                label="Outstanding"
-                value={outstandingDue ? `KSh ${subscriber.billing.outstanding}` : "KSh 0"}
-                valueClass={outstandingDue ? "text-destructive" : "text-success"}
-                hint={`Due ${subscriber.billing.nextDueDate ?? "—"}`}
-              />
-              <Stat label="Access expires" value={subscriber.billing.expiry ?? "—"} hint={billing.label} />
-            </div>
-          </div>
-
-          {profileOpen ? (
-            <div className="mt-5 space-y-5 rounded-2xl bg-primary-foreground/10 p-4 backdrop-blur-sm">
-              <div>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h2 className="text-xs font-semibold uppercase tracking-wide text-primary-foreground/70">Access &amp; connection</h2>
-                  <button
-                    type="button"
-                    className="rounded-lg bg-primary-foreground/15 px-3 py-1.5 text-xs font-semibold transition hover:bg-primary-foreground/25"
-                    onClick={() => setDialog("password")}
+              {suspended ? "Continue" : "Suspend"}
+            </SecondaryButton>
+          )}
+          <div>
+            <SecondaryButton
+              ref={menuButtonRef}
+              aria-haspopup="menu"
+              aria-expanded={menuOpen}
+              className="min-h-10"
+              onClick={() => setMenuOpen((open) => !open)}
+            >
+              More
+              <ChevronDown className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
+            </SecondaryButton>
+            {menuOpen && menuPos
+              ? createPortal(
+                  <div
+                    role="menu"
+                    ref={menuListRef}
+                    style={{ top: menuPos.top, left: menuPos.left }}
+                    className="fixed z-50 w-60 overflow-hidden rounded-xl border border-border bg-surface py-1 text-foreground shadow-lg"
                   >
-                    Manage password
-                  </button>
-                </div>
-                <dl className="mt-2 grid gap-x-8 sm:grid-cols-2">
-                  <div className="flex items-baseline justify-between gap-3 border-b border-primary-foreground/10 py-2">
-                    <dt className="text-xs text-primary-foreground/60">Username</dt>
-                    <dd className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
-                      <code className="truncate">{subscriber.username}</code>
-                      <button
-                        type="button"
-                        aria-label="Copy username"
-                        title="Copy username"
-                        className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
-                        onClick={() => void navigator.clipboard.writeText(subscriber.username)}
-                      >
-                        <Copy className="h-3.5 w-3.5" />
-                      </button>
-                    </dd>
-                  </div>
-                  <div className="flex items-baseline justify-between gap-3 border-b border-primary-foreground/10 py-2">
-                    <dt className="text-xs text-primary-foreground/60">Password</dt>
-                    <dd className="flex min-w-0 items-center gap-1.5 text-sm font-medium">
-                      <code className="truncate">{password || "••••••••••"}</code>
-                      {password ? (
-                        <>
-                          <button
-                            type="button"
-                            aria-label="Copy password"
-                            title="Copy password"
-                            className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
-                            onClick={() => void navigator.clipboard.writeText(password)}
-                          >
-                            <Copy className="h-3.5 w-3.5" />
-                          </button>
-                          <button
-                            type="button"
-                            aria-label="Hide password"
-                            title="Hide password"
-                            className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
-                            onClick={() => setPassword("")}
-                          >
-                            <EyeOff className="h-3.5 w-3.5" />
-                          </button>
-                        </>
+                    {menuItems.map((item, index) =>
+                      item.label === "divider" ? (
+                        <div key={`divider-${index}`} className="my-1 border-t border-border" />
                       ) : (
                         <button
+                          key={item.label}
                           type="button"
-                          aria-label="Show password"
-                          title="Show password"
-                          className="shrink-0 text-primary-foreground/60 transition hover:text-primary-foreground"
-                          onClick={() => void post("reveal", {})}
+                          role="menuitem"
+                          className={`flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm hover:bg-surface-muted ${item.danger ? "text-destructive" : "text-foreground"}`}
+                          onClick={() => {
+                            setMenuOpen(false);
+                            item.onClick();
+                          }}
                         >
-                          <Eye className="h-3.5 w-3.5" />
+                          <span className={item.danger ? undefined : "text-muted-foreground"} aria-hidden="true">
+                            {item.icon}
+                          </span>
+                          {item.label}
                         </button>
-                      )}
-                    </dd>
-                  </div>
-                  {[
-                    { label: "IP", value: subscriber.live.ip || "Not connected" },
-                    { label: "MAC", value: subscriber.live.mac || "—" },
-                    { label: "Uptime", value: subscriber.live.uptime || "—" },
-                    { label: "Last seen", value: subscriber.live.lastSeen ?? "Never" },
-                  ].map((item) => (
-                    <div key={item.label} className="flex items-baseline justify-between gap-3 border-b border-primary-foreground/10 py-2">
-                      <dt className="text-xs text-primary-foreground/60">{item.label}</dt>
-                      <dd className="min-w-0 break-words text-right text-sm font-medium">{item.value}</dd>
-                    </div>
-                  ))}
-                </dl>
+                      ),
+                    )}
+                  </div>,
+                  document.body,
+                )
+              : null}
+          </div>
+        </div>
+      </div>
+
+      <section className="card mt-5 overflow-hidden">
+        <div className="h-1 bg-gradient-brand" aria-hidden="true" />
+        <div className="flex flex-wrap items-center gap-x-6 gap-y-4 px-5 py-5 sm:px-6">
+          <div className="flex min-w-0 items-center gap-4">
+            <div
+              className="relative flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-brand text-lg font-semibold text-primary-foreground shadow-sm"
+              aria-hidden="true"
+            >
+              {initials}
+              <span className={`absolute -bottom-1 -right-1 h-4 w-4 rounded-full border-2 border-surface ${connectionDot}`} />
+            </div>
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="truncate text-xl font-semibold tracking-tight sm:text-2xl">
+                  {subscriber.firstName} {subscriber.lastName}
+                </h1>
+                <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+                <StatusBadge tone={billing.tone}>{billing.label}</StatusBadge>
               </div>
-              <div>
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <h2 className="text-xs font-semibold uppercase tracking-wide text-primary-foreground/70">Client details</h2>
-                  <button
-                    type="button"
-                    className="rounded-lg bg-primary-foreground/15 px-3 py-1.5 text-xs font-semibold transition hover:bg-primary-foreground/25"
-                    onClick={() => setDialog("edit")}
-                  >
-                    Edit
-                  </button>
-                </div>
-                <dl className="mt-2 grid gap-x-8 sm:grid-cols-2">
-                  {[
-                    { label: "Phone", value: subscriber.phone || "—" },
-                    { label: "Email", value: subscriber.email || "—" },
-                    { label: "Building", value: subscriber.buildingName || "—" },
-                    { label: "House", value: subscriber.houseNumber || "—" },
-                    { label: "Device serial", value: subscriber.serial || "—" },
-                    { label: "IP assignment", value: subscriber.staticIp || "From pool" },
-                    { label: "Router", value: subscriber.routerName || "—" },
-                    { label: "Package", value: subscriber.packageName || "—" },
-                  ].map((item) => (
-                    <div key={item.label} className="flex items-baseline justify-between gap-3 border-b border-primary-foreground/10 py-2">
-                      <dt className="text-xs text-primary-foreground/60">{item.label}</dt>
-                      <dd className="min-w-0 break-words text-right text-sm font-medium">{item.value}</dd>
-                    </div>
-                  ))}
-                </dl>
+              <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5">
+                  <Phone className="h-3.5 w-3.5" aria-hidden="true" />
+                  {subscriber.phone || "—"}
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <Router className="h-3.5 w-3.5" aria-hidden="true" />
+                  {subscriber.routerName}
+                </span>
+                <span className="inline-flex items-center gap-1.5">
+                  <Gauge className="h-3.5 w-3.5" aria-hidden="true" />
+                  {subscriber.packageName}
+                </span>
+                {subscriber.buildingName || subscriber.houseNumber ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
+                    {[subscriber.buildingName, subscriber.houseNumber].filter(Boolean).join(" · ")}
+                  </span>
+                ) : null}
               </div>
             </div>
-          ) : null}
+          </div>
+          <div className="ml-auto flex items-center gap-2">
+            <div className="flex items-center gap-2 rounded-xl border border-border bg-surface-muted/50 px-3 py-2">
+              <KeyRound className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+              <code className="min-w-0 truncate text-sm font-medium">{subscriber.username}</code>
+              <button
+                type="button"
+                aria-label="Copy username"
+                title="Copy username"
+                className="shrink-0 text-muted-foreground transition hover:text-foreground"
+                onClick={() => void navigator.clipboard.writeText(subscriber.username)}
+              >
+                <Copy className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          </div>
         </div>
       </section>
 
-      <section className="mt-4 overflow-hidden rounded-2xl border border-border bg-surface shadow-card">
-        <div className="min-w-0">
-            <div className="flex flex-wrap items-center gap-2.5 px-5 pt-5 sm:px-6">
-              <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
-                <Activity className="h-4 w-4" />
-              </span>
-              <h2 className="text-sm font-semibold">Activity</h2>
-              <p className="ml-auto text-xs text-muted-foreground">
+      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
+        <StatCard
+          icon={<Activity className="h-4 w-4" />}
+          label="Connection"
+          value={statusLabel}
+          valueClass={statusTone}
+          hint={statusHint}
+          hintClass={statusTone}
+        />
+        <StatCard
+          icon={<Gauge className="h-4 w-4" />}
+          label="Live speed"
+          value={liveSpeed}
+          hint={`Plan ${subscriber.downloadMbps ?? "—"}↓ ${subscriber.uploadMbps ?? "—"}↑ Mbps`}
+        />
+        <StatCard
+          icon={<Wallet className="h-4 w-4" />}
+          iconClass={outstandingDue ? "bg-destructive-soft/70 text-destructive" : "bg-success-soft/70 text-success"}
+          label="Outstanding"
+          value={outstandingDue ? `KSh ${subscriber.billing.outstanding}` : "KSh 0"}
+          valueClass={outstandingDue ? "text-destructive" : "text-success"}
+          hint={`Due ${subscriber.billing.nextDueDate ?? "—"}`}
+        />
+        <StatCard
+          icon={<CalendarClock className="h-4 w-4" />}
+          label="Access expires"
+          value={subscriber.billing.expiry ?? "—"}
+          hint={billing.label}
+        />
+      </div>
+
+      <div className="mt-4 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
+        <div className="grid min-w-0 gap-4">
+          <section className="card overflow-hidden">
+            <CardHeader icon={<Activity className="h-4 w-4" />} title="Activity">
+              <p className="text-xs tabular-nums text-muted-foreground">
                 30 days {bytes(subscriber.usage.monthBytesIn + subscriber.usage.monthBytesOut)} ({bytes(subscriber.usage.monthBytesIn)}↓ {bytes(subscriber.usage.monthBytesOut)}↑)
               </p>
-            </div>
+            </CardHeader>
             <div className="grid sm:grid-cols-2 sm:divide-x sm:divide-border">
               <div className="p-5">
                 <div className="flex items-baseline justify-between gap-3">
@@ -897,18 +882,19 @@ export function PppoeCustomerPage() {
                 )}
               </div>
             </div>
+          </section>
 
-            <div className="border-t border-border p-5">
-              <div className="flex items-baseline justify-between gap-3">
-                <p className="text-xs font-medium text-muted-foreground">Devices</p>
-                <p className="text-xs tabular-nums text-muted-foreground">
-                  {devicesOnline > 0 ? `${devicesOnline} online` : "None online"} · {gadgets.length} gadget{gadgets.length === 1 ? "" : "s"} · {devices.length} seen
-                </p>
-              </div>
+          <section className="card overflow-hidden">
+            <CardHeader icon={<Smartphone className="h-4 w-4" />} title="Devices">
+              <p className="text-xs tabular-nums text-muted-foreground">
+                {devicesOnline > 0 ? `${devicesOnline} online` : "None online"} · {gadgets.length} gadget{gadgets.length === 1 ? "" : "s"} · {devices.length} seen
+              </p>
+            </CardHeader>
+            <div className="px-5 pb-5 pt-4">
               {devices.length === 0 ? (
-                <p className="mt-3 text-sm text-muted-foreground">No devices have connected yet.</p>
+                <p className="text-sm text-muted-foreground">No devices have connected yet.</p>
               ) : (
-                <div className="mt-3 overflow-x-auto">
+                <div className="overflow-x-auto">
                   <table className="data-table min-w-[44rem]">
                     <thead className="text-xs text-muted-foreground">
                       <tr>
@@ -961,7 +947,9 @@ export function PppoeCustomerPage() {
                 </p>
               ) : null}
             </div>
+          </section>
 
+          <section className="card overflow-hidden">
             <Section
               title="Sessions &amp; activity"
               open={openSection === "history"}
@@ -1029,8 +1017,117 @@ export function PppoeCustomerPage() {
                 </div>
               </div>
             </Section>
-          </div>
-      </section>
+          </section>
+        </div>
+
+        <div className="grid min-w-0 content-start gap-4">
+          <section className="card overflow-hidden">
+            <CardHeader icon={<KeyRound className="h-4 w-4" />} title="Access &amp; connection">
+              <button type="button" className={cardActionClass} onClick={() => setDialog("password")}>
+                Manage password
+              </button>
+            </CardHeader>
+            <dl className="px-5 py-3">
+              <InfoRow label="Username">
+                <span className="inline-flex items-center gap-1.5">
+                  <code className="truncate">{subscriber.username}</code>
+                  <button
+                    type="button"
+                    aria-label="Copy username"
+                    title="Copy username"
+                    className={iconButtonClass}
+                    onClick={() => void navigator.clipboard.writeText(subscriber.username)}
+                  >
+                    <Copy className="h-3.5 w-3.5" />
+                  </button>
+                </span>
+              </InfoRow>
+              <InfoRow label="Password">
+                <span className="inline-flex items-center gap-1.5">
+                  <code className="truncate">{password || "••••••••••"}</code>
+                  {password ? (
+                    <>
+                      <button
+                        type="button"
+                        aria-label="Copy password"
+                        title="Copy password"
+                        className={iconButtonClass}
+                        onClick={() => void navigator.clipboard.writeText(password)}
+                      >
+                        <Copy className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        aria-label="Hide password"
+                        title="Hide password"
+                        className={iconButtonClass}
+                        onClick={() => setPassword("")}
+                      >
+                        <EyeOff className="h-3.5 w-3.5" />
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      aria-label="Show password"
+                      title="Show password"
+                      className={iconButtonClass}
+                      onClick={() => void post("reveal", {})}
+                    >
+                      <Eye className="h-3.5 w-3.5" />
+                    </button>
+                  )}
+                </span>
+              </InfoRow>
+              <InfoRow label="IP">{subscriber.live.ip || "Not connected"}</InfoRow>
+              <InfoRow label="MAC">{subscriber.live.mac || "—"}</InfoRow>
+              <InfoRow label="Uptime">{subscriber.live.uptime || "—"}</InfoRow>
+              <InfoRow label="Last seen">{subscriber.live.lastSeen ?? "Never"}</InfoRow>
+            </dl>
+          </section>
+
+          <section className="card overflow-hidden">
+            <CardHeader icon={<ReceiptText className="h-4 w-4" />} title="Subscription">
+              {ended ? null : (
+                <button type="button" className={cardActionClass} onClick={() => setDialog("package")}>
+                  Change package
+                </button>
+              )}
+            </CardHeader>
+            <dl className="px-5 py-3">
+              <InfoRow label="Package">{subscriber.packageName || "—"}</InfoRow>
+              <InfoRow label="Price">
+                {subscriber.billing.price ? `KSh ${subscriber.billing.price} / ${subscriber.billing.billingCycle || "cycle"}` : "—"}
+              </InfoRow>
+              <InfoRow label="Billing">
+                <StatusBadge tone={billing.tone}>{billing.label}</StatusBadge>
+              </InfoRow>
+              <InfoRow label="Next due">{subscriber.billing.nextDueDate ?? "—"}</InfoRow>
+              <InfoRow label="Access expires">{subscriber.billing.expiry ?? "—"}</InfoRow>
+              <InfoRow label="Grace period">
+                {subscriber.billing.graceDays ? `${subscriber.billing.graceDays} day${subscriber.billing.graceDays === 1 ? "" : "s"}` : "—"}
+              </InfoRow>
+            </dl>
+          </section>
+
+          <section className="card overflow-hidden">
+            <CardHeader icon={<UserRound className="h-4 w-4" />} title="Client details">
+              <button type="button" className={cardActionClass} onClick={() => setDialog("edit")}>
+                Edit
+              </button>
+            </CardHeader>
+            <dl className="px-5 py-3">
+              <InfoRow label="Phone">{subscriber.phone || "—"}</InfoRow>
+              <InfoRow label="Email">{subscriber.email || "—"}</InfoRow>
+              <InfoRow label="Building">{subscriber.buildingName || "—"}</InfoRow>
+              <InfoRow label="House">{subscriber.houseNumber || "—"}</InfoRow>
+              <InfoRow label="Device serial">{subscriber.serial || "—"}</InfoRow>
+              <InfoRow label="IP assignment">{subscriber.staticIp || "From pool"}</InfoRow>
+              <InfoRow label="Router">{subscriber.routerName || "—"}</InfoRow>
+            </dl>
+          </section>
+        </div>
+      </div>
 
       {message ? <p className="mt-4 notice" role="alert">{message}</p> : null}
 
