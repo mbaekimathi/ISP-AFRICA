@@ -15,6 +15,7 @@ type Subscriber = {
   phone: string;
   username: string;
   routerName: string;
+  routerTunnelStatus: "up" | "down" | "unknown";
   packageName: string;
   status: string;
   connection: "online" | "offline" | "unknown";
@@ -54,9 +55,26 @@ const routerStatusTone = {
   suspended: "due",
   suspended_online: "due",
   disconnecting: "due",
-  disconnected: "paused",
+  disconnected: "critical",
   pending_activation: "neutral",
 } as const;
+
+function routerHealth(tunnel: Subscriber["routerTunnelStatus"]) {
+  if (tunnel === "up") return { dot: "bg-success", text: "Router on and healthy" };
+  if (tunnel === "down") return { dot: "bg-destructive", text: "Router disconnected" };
+  return { dot: "bg-warning", text: "Router health unknown" };
+}
+
+function RouterCell({ client }: { client: Subscriber }) {
+  if (!client.routerName) return <span className="text-muted-foreground">—</span>;
+  const health = routerHealth(client.routerTunnelStatus);
+  return (
+    <span className="inline-flex items-center gap-2" title={health.text}>
+      <span className={`h-2.5 w-2.5 shrink-0 rounded-full ${health.dot}`} aria-hidden="true" />
+      {client.routerName}
+    </span>
+  );
+}
 
 const billingLabel = {
   pending: "Pending",
@@ -154,6 +172,17 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
   useEffect(() => {
     setPage(null);
     load();
+    // Poll while the tab is visible — paused in the background and cleaned
+    // up when the page unmounts.
+    const refreshIfVisible = () => {
+      if (document.visibilityState === "visible") load();
+    };
+    const timer = window.setInterval(refreshIfVisible, 10000);
+    document.addEventListener("visibilitychange", refreshIfVisible);
+    return () => {
+      window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refreshIfVisible);
+    };
   }, [kind, router, pkg, status, billing]);
 
   const home = (path: string) => (user ? clientPage(user, path) : path);
@@ -307,7 +336,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
                   <div>{client.phone}</div>
                   <div className="text-xs text-muted-foreground">{client.username}</div>
                 </td>
-                <td className="px-4 py-3">{client.routerName}</td>
+                <td className="px-4 py-3"><RouterCell client={client} /></td>
                 <td className="px-4 py-3">
                   <StatusBadge tone={routerStatusTone[client.routerStatus]}>{routerStatusLabel[client.routerStatus]}</StatusBadge>
                 </td>
@@ -362,7 +391,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
             <dl className="mt-3 grid grid-cols-2 gap-x-4 gap-y-2 text-xs">
               <div className="flex items-baseline justify-between gap-2 border-b border-border/60 pb-1.5">
                 <dt className="text-muted-foreground">Router</dt>
-                <dd className="truncate font-medium">{client.routerName || "—"}</dd>
+                <dd className="truncate font-medium"><RouterCell client={client} /></dd>
               </div>
               <div className="flex items-baseline justify-between gap-2 border-b border-border/60 pb-1.5">
                 <dt className="text-muted-foreground">Billing / expiry</dt>

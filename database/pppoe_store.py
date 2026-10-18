@@ -876,6 +876,7 @@ def public_row(row):
         "username": row["pppoe_username"],
         "routerId": row["router_id"],
         "routerName": row.get("router_name") or "",
+        "routerTunnelStatus": row.get("tunnel_status") or "unknown",
         "packageId": row["package_id"],
         "packageName": row.get("package_name") or "",
         "serial": row.get("router_serial") or "",
@@ -2639,7 +2640,7 @@ def list_hotspot_clients(cursor, client_id, query):
     cursor.execute(
         f"""
         SELECT h.id, h.phone, h.mac, h.status, h.amount, h.paid_at, h.created_at, h.device_id,
-               d.name AS router_name, d.tunnel_ip, d.api_secret, pkg.name AS package_name,
+               d.name AS router_name, d.tunnel_ip, d.tunnel_status, d.api_secret, pkg.name AS package_name,
                (SELECT GROUP_CONCAT(v.code ORDER BY v.issued_at SEPARATOR ', ') FROM hotspot_vouchers v WHERE v.purchase_id = h.id) AS codes,
                (SELECT GROUP_CONCAT(DISTINCT v.redeemed_mac) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.redeemed_mac IS NOT NULL AND v.redeemed_mac <> '') AS device_macs,
                (SELECT MAX(LEAST(100, ROUND(TIMESTAMPDIFF(SECOND, v.used_at, NOW()) * 100 / v.seconds))) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used' AND v.used_at IS NOT NULL AND v.seconds > 0) AS used_pct,
@@ -2702,6 +2703,7 @@ def list_hotspot_clients(cursor, client_id, query):
                 "phone": item["phone"],
                 "username": item["codes"] or item["mac"],
                 "routerName": item.get("router_name") or "",
+                "routerTunnelStatus": item.get("tunnel_status") or "unknown",
                 "packageName": item.get("package_name") or "",
                 "status": "active" if item["status"] == "paid" else item["status"],
                 "connection": "online" if (router_status in {"surfing", "connected"}) else "offline",
