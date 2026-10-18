@@ -286,11 +286,22 @@ def client_id_from(cursor, token):
     row = cursor.fetchone()
     if not row:
         raise PppoeError(401, "Sign in to the ISP client account before managing PPPoE clients.")
+    cursor.execute("SELECT status FROM isp_clients WHERE id = %s", (row["account_id"],))
+    account = cursor.fetchone()
+    if not account or account["status"] != "approved":
+        raise PppoeError(403, "That account is still waiting for approval.")
     return row["account_id"]
 
 
 def allow_username_check(client_id):
     now = time.time()
+    if len(CHECKS) > 20000:
+        for key, hits in list(CHECKS.items()):
+            recent = [item for item in hits if now - item < 60]
+            if recent:
+                CHECKS[key] = recent
+            else:
+                del CHECKS[key]
     recent = [item for item in CHECKS.get(client_id, []) if now - item < 60]
     if len(recent) >= 30:
         return False
@@ -366,6 +377,7 @@ def ensure_nas(cursor, router):
             (nasname, str(router.get("name") or "")[:32], known, router["id"]),
         )
         cursor.execute("UPDATE isp_radius_nas SET nasname = %s WHERE router_id = %s", (nasname, router["id"]))
+        _drop_nas_cache()
         return None
     secret = secrets.token_urlsafe(18)
     sealed = routeros_api.seal_password(secret)
@@ -381,7 +393,18 @@ def ensure_nas(cursor, router):
         """,
         (nasname, str(router.get("name") or "")[:32], secret, router["id"]),
     )
+    _drop_nas_cache()
     return secret
+
+
+def _drop_nas_cache():
+    # Deferred import: radius_server already imports this module at top level.
+    try:
+        import radius_server
+
+        radius_server.nas_cache_clear()
+    except Exception:
+        pass
 
 
 def send_disconnect(host, secret, username, session_id="", framed=""):
@@ -613,19 +636,21 @@ def voucher_for_checkout(cursor, checkout_id):
     return cursor.fetchone()
 
 
-def voucher_detail(cursor, code):
+def voucher_detail(cursor, code, client_id=None):
     """Receipt details for the thank-you page, or None for an unknown code."""
+    scope = " AND v.client_id = %s" if client_id else ""
+    params = (str(code or "").strip().upper()[:20], client_id) if client_id else (str(code or "").strip().upper()[:20],)
     cursor.execute(
-        """
+        f"""
         SELECT v.code, v.amount, v.status, v.issued_at, v.used_at,
                COALESCE(NULLIF(v.package_name, ''), p.name, 'Subscription') AS package_name,
                s.first_name, s.last_name, s.pppoe_username
         FROM pppoe_vouchers v
         JOIN pppoe_subscribers s ON s.id = v.subscriber_id
         LEFT JOIN isp_packages p ON p.id = v.package_id
-        WHERE v.code = %s
+        WHERE v.code = %s{scope}
         """,
-        (str(code or "").strip().upper()[:20],),
+        params,
     )
     return cursor.fetchone()
 

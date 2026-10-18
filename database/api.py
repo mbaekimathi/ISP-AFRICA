@@ -4,9 +4,11 @@ import hmac
 import json
 import mimetypes
 import os
+import queue
 import re
 import secrets
 import socket
+import threading
 import time
 import traceback
 import uuid
@@ -53,6 +55,50 @@ ROLES = {
     "sales",
 }
 LOCKS = {}
+RATE_HITS = {}
+RATE_LOCK = threading.Lock()
+TRUSTED_PROXIES = {"127.0.0.1", "::1"}
+RATE_RULES = {
+    "auth": (30, 60),
+    "api": (240, 60),
+    "callback": (120, 60),
+    "router-read": (60, 60),
+}
+AUTH_PATHS = {
+    "/api/client/login",
+    "/api/employee/login",
+    "/api/client/register",
+    "/api/employee/register",
+}
+
+
+def rate_ok(key, limit, window):
+    now = time.time()
+    cutoff = now - window
+    with RATE_LOCK:
+        hits = RATE_HITS.setdefault(key, [])
+        while hits and hits[0] <= cutoff:
+            hits.pop(0)
+        if len(hits) >= limit:
+            return False
+        hits.append(now)
+        if len(RATE_HITS) > 20000:
+            for stale_key, stale_hits in list(RATE_HITS.items()):
+                if not stale_hits or stale_hits[-1] <= cutoff:
+                    del RATE_HITS[stale_key]
+        return True
+
+
+def request_ip(handler):
+    peer = handler.client_address[0]
+    if peer in TRUSTED_PROXIES:
+        forwarded = (
+            (handler.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+            or (handler.headers.get("X-Real-IP") or "").strip()
+        )
+        if forwarded:
+            return forwarded[:45]
+    return peer
 
 
 def clean_package_fields(payload):
@@ -273,6 +319,21 @@ def masked_secret(value):
     return "••••" + value[-4:]
 
 
+def seal_secret(value):
+    if not value:
+        return value
+    return routeros_api.seal_password(str(value))
+
+
+def open_secret(value):
+    if not value:
+        return value
+    try:
+        return routeros_api.open_password(str(value))
+    except routeros_api.RouterError:
+        return str(value)
+
+
 def stamp(value):
     if value is None:
         return None
@@ -434,12 +495,20 @@ def public_communication(row):
 
 
 def probe_endpoint(endpoint):
+    import ipaddress
     import urllib.error
     import urllib.request
 
     text = str(endpoint or "").strip()
     if not text:
         return {"connected": False, "reason": "Save the API endpoint first."}
+    host = urlparse(text).hostname or ""
+    try:
+        address = ipaddress.ip_address(socket.gethostbyname(host))
+    except (OSError, ValueError):
+        return {"connected": False, "reason": "The API endpoint host could not be resolved."}
+    if address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified:
+        return {"connected": False, "reason": "The API endpoint must be a public or LAN host."}
     request = urllib.request.Request(text, headers={"User-Agent": "isp-centric-connectivity-check/1.0"})
     try:
         with urllib.request.urlopen(request, timeout=8) as response:
@@ -840,14 +909,71 @@ def open_db(password, database=DB_NAME):
     )
 
 
+_DB_POOL = queue.LifoQueue(maxsize=max(2, int(os.environ.get("ISP_DB_POOL") or 16)))
+
+
+class _PooledDb:
+    """Proxy that returns its connection to the idle pool on close() instead
+    of disconnecting — every caller's existing with/close() pattern is kept.
+    Releasing also restores a clean session state (rollback + autocommit) so
+    no transaction or session flag ever leaks into the next user."""
+
+    __slots__ = ("_conn", "_closed")
+
+    def __init__(self, conn):
+        self._conn = conn
+        self._closed = False
+
+    def __getattr__(self, name):
+        return getattr(self._conn, name)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        conn = self._conn
+        try:
+            conn.rollback()
+            conn.autocommit(True)
+        except pymysql.MySQLError:
+            conn.close()
+            return
+        try:
+            _DB_POOL.put_nowait(conn)
+        except queue.Full:
+            conn.close()
+
+
+def _pool_acquire(password):
+    # Idle connections are pinged before reuse; dead ones are discarded and a
+    # fresh connection is opened instead.
+    for _ in range(4):
+        try:
+            conn = _DB_POOL.get_nowait()
+        except queue.Empty:
+            return _PooledDb(open_db(password))
+        try:
+            conn.ping(reconnect=True)
+            return _PooledDb(conn)
+        except pymysql.MySQLError:
+            conn.close()
+    return _PooledDb(open_db(password))
+
+
 def connect():
     password = os.environ.get("ISP_DB_PASSWORD", "")
     try:
-        return open_db(password)
+        return _pool_acquire(password)
     except pymysql.err.OperationalError as error:
         if password and error.args and error.args[0] == 1045:
-            print("ISP_DB_PASSWORD was rejected. Using an empty database password.", flush=True)
-            return open_db("")
+            print("ISP_DB_PASSWORD was rejected by MySQL. Fix the configured password.", flush=True)
         raise
 
 
@@ -860,9 +986,8 @@ def ensure_database():
         server = open_db(password, database=None)
     except pymysql.err.OperationalError as error:
         if password and error.args and error.args[0] == 1045:
-            server = open_db("", database=None)
-        else:
-            raise
+            print("ISP_DB_PASSWORD was rejected by MySQL. Fix the configured password.", flush=True)
+        raise
     try:
         with server.cursor() as cursor:
             cursor.execute(
@@ -1327,6 +1452,18 @@ def ensure_schema():
                 )
                 """
             )
+            # Secret columns are sealed at rest — widen them to hold the
+            # sealed (nonce + mac + ciphertext) form of the longest value.
+            for statement in (
+                "ALTER TABLE company_daraja_settings MODIFY COLUMN consumer_secret VARCHAR(512) NOT NULL",
+                "ALTER TABLE company_daraja_settings MODIFY COLUMN passkey VARCHAR(512) NOT NULL",
+                "ALTER TABLE company_other_gateway MODIFY COLUMN secret_key VARCHAR(512) NOT NULL",
+                "ALTER TABLE company_communication_settings MODIFY COLUMN api_key VARCHAR(512) NOT NULL",
+                "ALTER TABLE isp_payment_settings MODIFY COLUMN consumer_secret VARCHAR(512) NOT NULL",
+                "ALTER TABLE isp_payment_settings MODIFY COLUMN passkey VARCHAR(512) NOT NULL",
+                "ALTER TABLE isp_communication_settings MODIFY COLUMN api_key VARCHAR(512) NOT NULL",
+            ):
+                cursor.execute(statement)
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS isp_communication_preferences (
@@ -1479,6 +1616,11 @@ def assert_login_allowed(portal, code):
 
 
 def record_failure(portal, code):
+    if len(LOCKS) > 50000:
+        now = time.time()
+        for key, entry in list(LOCKS.items()):
+            if not entry["until"] or entry["until"] <= now:
+                del LOCKS[key]
     entry = LOCKS.setdefault((portal, code), {"fails": 0, "until": 0})
     if entry["until"] and entry["until"] <= time.time():
         entry["fails"] = 0
@@ -1602,43 +1744,61 @@ def clean_profile(payload, existing):
     return clean_registration(data)
 
 
+def phone_pattern(phone_digits):
+    return "^[^0-9]*" + "[^0-9]*".join(phone_digits) + "[^0-9]*$"
+
+
+def unique_taken(cursor, table, column, value, exclude_id):
+    extra = " AND id <> %s" if exclude_id else ""
+    params = (value, exclude_id) if exclude_id else (value,)
+    cursor.execute(f"SELECT id FROM {table} WHERE {column} = %s{extra} LIMIT 1", params)
+    return cursor.fetchone() is not None
+
+
+def unique_phone_taken(cursor, table, phone_digits, exclude_id):
+    extra = " AND id <> %s" if exclude_id else ""
+    params = (phone_pattern(phone_digits), exclude_id) if exclude_id else (phone_pattern(phone_digits),)
+    cursor.execute(f"SELECT id FROM {table} WHERE phone REGEXP %s{extra} LIMIT 1", params)
+    return cursor.fetchone() is not None
+
+
 def assert_unique(cursor, kind, fields, exclude_id=None):
     table = "isp_clients" if kind == "client" else "isp_employees"
-    cursor.execute(f"SELECT id, username, email, phone, login_code FROM {table}")
-    for row in cursor.fetchall():
-        if exclude_id and row["id"] == exclude_id:
-            continue
-        if row["username"].lower() == fields["username"].lower():
-            raise ApiError(409, "That username is already in use.")
-        if row["email"].lower() == fields["email"].lower():
-            raise ApiError(409, "That email is already registered.")
-        if digits(row["phone"]) == fields["phone_digits"]:
-            raise ApiError(409, "That phone number is already registered.")
-        if row["login_code"] == fields["login_code"]:
-            raise ApiError(409, "That login code is already in use.")
-
-    cursor.execute(f"SELECT username, email, phone, login_code FROM {other_table(kind)}")
     label = other_label(kind)
-    for row in cursor.fetchall():
-        if row["username"].lower() == fields["username"].lower():
-            raise ApiError(409, f"That username is already used by an {label} account.")
-        if row["email"].lower() == fields["email"].lower():
-            raise ApiError(409, f"That email is already used by an {label} account.")
-        if digits(row["phone"]) == fields["phone_digits"]:
-            raise ApiError(409, f"That phone number is already used by an {label} account.")
-        if row["login_code"] == fields["login_code"]:
-            raise ApiError(409, f"That login code is already used by an {label} account.")
+    checks = (
+        (table, "username", fields["username"], "That username is already in use."),
+        (table, "email", fields["email"], "That email is already registered."),
+        (other_table(kind), "username", fields["username"], f"That username is already used by an {label} account."),
+        (other_table(kind), "email", fields["email"], f"That email is already used by an {label} account."),
+    )
+    for target, column, value, message in checks:
+        if unique_taken(cursor, target, column, value, exclude_id):
+            raise ApiError(409, message)
+    if unique_phone_taken(cursor, table, fields["phone_digits"], exclude_id):
+        raise ApiError(409, "That phone number is already registered.")
+    if unique_phone_taken(cursor, other_table(kind), fields["phone_digits"], None):
+        raise ApiError(409, f"That phone number is already used by an {label} account.")
+    if unique_taken(cursor, table, "login_code", fields["login_code"], exclude_id) or unique_taken(
+        cursor, other_table(kind), "login_code", fields["login_code"], None
+    ):
+        raise ApiError(409, "Those sign-in details are not available.")
 
 
 def session_account_id(cursor, token, kind):
     if not token:
         return None
     cursor.execute(
-        "SELECT account_id FROM isp_sessions WHERE token = %s AND account_kind = %s",
-        (token, kind),
+        "SELECT account_id FROM isp_sessions WHERE token = %s AND account_kind = %s AND created_at >= DATE_SUB(NOW(), INTERVAL %s SECOND)",
+        (token, kind, SESSION_SECONDS),
     )
     row = cursor.fetchone()
     return row["account_id"] if row else None
+
+
+def approved_account(cursor, table, account_id):
+    cursor.execute(f"SELECT status FROM {table} WHERE id = %s", (account_id,))
+    row = cursor.fetchone()
+    return row if row and row["status"] == "approved" else None
 
 
 def reviewer_access(cursor, employee_id):
@@ -1653,6 +1813,10 @@ def reviewer_access(cursor, employee_id):
 
 def require_reviewer(cursor, employee_token):
     employee_id = session_account_id(cursor, employee_token, "employee")
+    if not employee_id:
+        raise ApiError(401, "Sign in to an employee account before reviewing accounts.")
+    if not approved_account(cursor, "isp_employees", employee_id):
+        raise ApiError(403, "An approved employee account is required to review accounts.")
     if reviewer_access(cursor, employee_id) == "denied":
         raise ApiError(403, "Only a signed-in Director can review accounts.")
 
@@ -1812,16 +1976,58 @@ class ApiServer(ThreadingHTTPServer):
     do not hit EADDRINUSE."""
 
     allow_reuse_address = os.name != "nt"
+    daemon_threads = True
+    request_queue_size = 128
+    max_workers = int(os.environ.get("ISP_HTTP_WORKERS") or 64)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(self.max_workers)
 
     def server_bind(self):
         if os.name == "nt":
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
 
+    def process_request(self, request, client_address):
+        self._slots.acquire()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
 
 class Handler(BaseHTTPRequestHandler):
+    # HTTP/1.1 keep-alive: one TCP connection + thread serves many requests,
+    # so a page load stops paying a handshake and thread spawn per asset.
+    # Idle keep-alive slots are bounded so parked browsers cannot starve the
+    # 64-worker pool.
+    protocol_version = "HTTP/1.1"
+    keepalive_seconds = max(2, int(os.environ.get("ISP_HTTP_KEEPALIVE") or 10))
+
     def log_message(self, fmt, *args):
         return
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(45)
+
+    def handle(self):
+        self.close_connection = True
+        try:
+            self.handle_one_request()
+            self.connection.settimeout(self.keepalive_seconds)
+            while not self.close_connection:
+                self.handle_one_request()
+        except OSError:
+            pass
 
     def do_GET(self):
         self.route("GET")
@@ -1837,6 +2043,9 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and not path.startswith("/api/"):
                 status = self.serve_static(path)
                 return
+            bucket = "callback" if path == "/api/daraja/callback" else ("auth" if path in AUTH_PATHS else "api")
+            if not rate_ok((bucket, request_ip(self)), *RATE_RULES[bucket]):
+                raise ApiError(429, "Too many requests. Wait a moment and try again.")
             payload = self.read_json() if method == "POST" else {}
             token = self.cookies()
             query = parse_qs(urlparse(self.path).query)
@@ -1952,6 +2161,11 @@ class Handler(BaseHTTPRequestHandler):
             require_reviewer(cursor, token.get("isp_employee_session"))
             return {"employee": self.approve_employee(cursor, str(payload.get("id", "")))}, None
         if method == "POST" and path == "/api/daraja/callback":
+            expected = os.environ.get("ISP_DARAJA_CALLBACK_TOKEN", "").strip()
+            if expected:
+                supplied = str((query.get("key") or [""])[0])
+                if not supplied or not hmac.compare_digest(supplied, expected):
+                    raise ApiError(403, "That callback was not recognised.")
             return {"callback": pppoe_store.record_daraja_callback(cursor, payload)}, None
         if method == "GET" and path == "/api/health":
             return self.health(cursor), None
@@ -2174,12 +2388,18 @@ class Handler(BaseHTTPRequestHandler):
             fields["login_code"],
             fields["photo"],
         ]
-        if str(payload.get("password", "")).strip():
+        password_changed = bool(str(payload.get("password", "")).strip())
+        if password_changed:
             salt, password_hash = hash_password(fields["password"])
             columns += ", password_salt = %s, password_hash = %s"
             values += [salt, password_hash]
         values.append(account_id)
         cursor.execute(f"UPDATE {table} SET {columns} WHERE id = %s", tuple(values))
+        if password_changed:
+            cursor.execute(
+                "DELETE FROM isp_sessions WHERE account_id = %s AND account_kind = %s AND token <> %s",
+                (account_id, kind, token or ""),
+            )
         cursor.execute(f"SELECT * FROM {table} WHERE id = %s", (account_id,))
         row = cursor.fetchone()
         if kind == "client":
@@ -2268,6 +2488,8 @@ class Handler(BaseHTTPRequestHandler):
         client_id = session_account_id(cursor, token, "client")
         if not client_id:
             raise ApiError(401, "Sign in to the ISP client account before onboarding a router.")
+        if not approved_account(cursor, "isp_clients", client_id):
+            raise ApiError(403, "That account is still waiting for approval.")
         return client_id
 
     def health(self, cursor):
@@ -2279,7 +2501,7 @@ class Handler(BaseHTTPRequestHandler):
         if not radius:
             radius = {"state": "starting"}
         if wg_host.local_server():
-            wireguard = "running" if wg_host.tunnel_running() else "stopped"
+            wireguard = "running" if wg_host.tunnel_running_cached() else "stopped"
         else:
             wireguard = "external" if os.environ.get("ISP_WG_PUBLIC_KEY", "").strip() else "pending"
         return {
@@ -2659,6 +2881,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def wan_reachability(self, cursor, device_id, token):
         saved = self.read_wan(cursor, device_id, token)
+        if not rate_ok(("router-read", device_id), *RATE_RULES["router-read"]):
+            raise ApiError(429, "That router is being polled too quickly. Wait a moment.")
         names = [item["interface"] for item in saved["uplinks"]]
         return self._uplink_health(cursor, device_id, token, names)
 
@@ -2814,6 +3038,7 @@ class Handler(BaseHTTPRequestHandler):
         if nas and nas.get("nasname"):
             cursor.execute("DELETE FROM nas WHERE nasname = %s AND description = %s", (nas["nasname"], device_id))
         cursor.execute("DELETE FROM isp_radius_nas WHERE router_id = %s", (device_id,))
+        radius_server.nas_cache_clear()
         cursor.execute(
             "DELETE FROM isp_mikrotik_health_events WHERE device_id = %s AND client_id = %s",
             (device_id, client_id),
@@ -3226,11 +3451,11 @@ class Handler(BaseHTTPRequestHandler):
 
     def preview_thank_you(self, cursor, token, query):
         """Receipt page the interactive preview lands on after a simulated payment."""
-        self.require_client(cursor, token)
+        client_id = self.require_client(cursor, token)
         purchase = str((query.get("purchase") or [""])[0])
         code = str((query.get("code") or [""])[0])
         if purchase:
-            receipt = portal_server.hotspot_receipt(cursor, purchase) or {
+            receipt = portal_server.hotspot_receipt(cursor, purchase, client_id) or {
                 "package_name": "Wi-Fi bundle",
                 "amount": "100.00",
                 "vouchers": [
@@ -3239,7 +3464,7 @@ class Handler(BaseHTTPRequestHandler):
                 ],
             }
             return PreviewPage(portal_server.thankyou_hotspot_page(receipt).decode("utf-8"))
-        voucher = (pppoe_store.voucher_detail(cursor, code) if code else None) or {
+        voucher = (pppoe_store.voucher_detail(cursor, code, client_id) if code else None) or {
             "first_name": "Amina",
             "last_name": "Wanjiku",
             "status": "issued",
@@ -3468,6 +3693,8 @@ class Handler(BaseHTTPRequestHandler):
         row = cursor.fetchone()
         if not row:
             raise ApiError(404, "That router was not found.")
+        if not rate_ok(("router-read", device_id), *RATE_RULES["router-read"]):
+            raise ApiError(429, "That router is being polled too quickly. Wait a moment.")
         checked_at = datetime.now().isoformat(sep=" ", timespec="seconds")
         if not row.get("api_secret"):
             return {
@@ -3551,6 +3778,8 @@ class Handler(BaseHTTPRequestHandler):
         row = cursor.fetchone()
         if not row:
             raise ApiError(404, "That router was not found.")
+        if not rate_ok(("router-read", device_id), *RATE_RULES["router-read"]):
+            raise ApiError(429, "That router is being polled too quickly. Wait a moment.")
         checked_at = datetime.now().isoformat(sep=" ", timespec="seconds")
         empty = {
             "reachable": False,
@@ -3683,6 +3912,8 @@ class Handler(BaseHTTPRequestHandler):
         client_id = session_account_id(cursor, token, "client")
         if not client_id:
             raise ApiError(401, "Sign in to the ISP client account before managing communication settings.")
+        if not approved_account(cursor, "isp_clients", client_id):
+            raise ApiError(403, "That account is still waiting for approval.")
         return client_id
 
     def communication_rows(self, cursor, client_id):
@@ -3737,7 +3968,7 @@ class Handler(BaseHTTPRequestHandler):
                   sender = VALUES(sender),
                   api_key = VALUES(api_key)
                 """,
-                (client_id, fields["channel"], fields["endpoint"], fields["sender"], fields["api_key"]),
+                (client_id, fields["channel"], fields["endpoint"], fields["sender"], seal_secret(open_secret(fields["api_key"]))),
             )
         cursor.execute(
             """
@@ -3761,14 +3992,16 @@ class Handler(BaseHTTPRequestHandler):
             row = self.company_communication_rows(cursor).get(channel)
         else:
             row = self.communication_rows(cursor, client_id).get(channel)
-        submitted = payload.get("settings") or {}
-        endpoint = str(submitted.get("endpoint") or "").strip() or (row or {}).get("endpoint", "")
-        return probe_endpoint(endpoint)
+        # Probe the saved endpoint only — an arbitrary URL here would make the
+        # server an unauthenticated network-reachability oracle.
+        return probe_endpoint((row or {}).get("endpoint", ""))
 
     def require_notification_client(self, cursor, token):
         client_id = session_account_id(cursor, token, "client")
         if not client_id:
             raise ApiError(401, "Sign in to the ISP client account before managing notification settings.")
+        if not approved_account(cursor, "isp_clients", client_id):
+            raise ApiError(403, "That account is still waiting for approval.")
         return client_id
 
     def isp_notification_row(self, cursor, client_id):
@@ -3878,6 +4111,8 @@ class Handler(BaseHTTPRequestHandler):
         client_id = session_account_id(cursor, token, "client")
         if not client_id:
             raise ApiError(401, "Sign in to the ISP client account before managing company details.")
+        if not approved_account(cursor, "isp_clients", client_id):
+            raise ApiError(403, "That account is still waiting for approval.")
         return client_id
 
     def read_company(self, cursor, token):
@@ -3923,6 +4158,8 @@ class Handler(BaseHTTPRequestHandler):
         client_id = session_account_id(cursor, token, "client")
         if not client_id:
             raise ApiError(401, "Sign in to the ISP client account before managing payment settings.")
+        if not approved_account(cursor, "isp_clients", client_id):
+            raise ApiError(403, "That account is still waiting for approval.")
         return client_id
 
     def payment_rows(self, cursor, client_id):
@@ -3981,13 +4218,13 @@ class Handler(BaseHTTPRequestHandler):
                 fields["account_type"],
                 fields["short_code"],
                 fields["consumer_key"],
-                fields["consumer_secret"],
-                fields["passkey"],
+                seal_secret(open_secret(fields["consumer_secret"])),
+                seal_secret(open_secret(fields["passkey"])),
                 fields["callback_url"],
                 fields["confirmation_url"],
                 fields["validation_url"],
                 fields["initiator_name"],
-                fields["security_credential"],
+                seal_secret(open_secret(fields["security_credential"])),
             ),
         )
         cursor.execute(
@@ -4023,7 +4260,7 @@ class Handler(BaseHTTPRequestHandler):
         if environment not in {"sandbox", "live"}:
             return {"connected": False, "reason": "Choose whether these are sandbox or live credentials."}
         key = field("consumerKey", "consumer_key")
-        secret = field("consumerSecret", "consumer_secret")
+        secret = open_secret(field("consumerSecret", "consumer_secret"))
         if not key or not secret:
             return {"connected": False, "reason": "Enter the consumer key and secret, or save the Daraja details first."}
         host = "https://api.safaricom.co.ke" if environment == "live" else "https://sandbox.safaricom.co.ke"
@@ -4054,6 +4291,8 @@ class Handler(BaseHTTPRequestHandler):
         client_id = session_account_id(cursor, token, "client")
         if not client_id:
             raise ApiError(401, "Sign in to the ISP client account before managing packages.")
+        if not approved_account(cursor, "isp_clients", client_id):
+            raise ApiError(403, "That account is still waiting for approval.")
         return client_id
 
     def public_package_routers(self, cursor, client_id):
@@ -4291,14 +4530,16 @@ class Handler(BaseHTTPRequestHandler):
             return {"ok": True}, None
         raise ApiError(404, "That account request was not found.")
 
-    def require_company_employee(self, cursor, token, subject="company packages"):
+    def require_company_employee(self, cursor, token, subject="company packages", write=False):
         employee_id = session_account_id(cursor, token, "employee")
         if not employee_id:
             raise ApiError(401, f"Sign in to the employee account before managing {subject}.")
-        cursor.execute("SELECT status FROM isp_employees WHERE id = %s", (employee_id,))
+        cursor.execute("SELECT status, role FROM isp_employees WHERE id = %s", (employee_id,))
         employee = cursor.fetchone()
         if not employee or employee["status"] != "approved":
             raise ApiError(403, f"An approved employee account is required to manage {subject}.")
+        if write and (employee["role"] or "") not in ("director", "supervisor", "it-support"):
+            raise ApiError(403, f"A director, supervisor or IT-support role is required to change {subject}.")
         return employee_id
 
     def company_daraja_row(self, cursor):
@@ -4329,7 +4570,7 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def save_company_payments(self, cursor, payload, token):
-        self.require_company_employee(cursor, token, "company payments")
+        self.require_company_employee(cursor, token, "company payments", write=True)
         gateway = str(payload.get("gateway", "")).strip()
         if gateway == "daraja":
             fields = clean_daraja(payload.get("daraja") or {}, self.company_daraja_row(cursor))
@@ -4351,8 +4592,8 @@ class Handler(BaseHTTPRequestHandler):
                     fields["account_type"],
                     fields["short_code"],
                     fields["consumer_key"],
-                    fields["consumer_secret"],
-                    fields["passkey"],
+                    seal_secret(open_secret(fields["consumer_secret"])),
+                    seal_secret(open_secret(fields["passkey"])),
                 ),
             )
             return self.read_company_payments(cursor, token)
@@ -4375,7 +4616,7 @@ class Handler(BaseHTTPRequestHandler):
                     fields["environment"],
                     fields["endpoint"],
                     fields["public_key"],
-                    fields["secret_key"],
+                    seal_secret(open_secret(fields["secret_key"])),
                 ),
             )
             return self.read_company_payments(cursor, token)
@@ -4395,7 +4636,7 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def save_company_communication(self, cursor, payload, token):
-        self.require_company_employee(cursor, token, "company communications")
+        self.require_company_employee(cursor, token, "company communications", write=True)
         channel = str(payload.get("channel", "")).strip()
         rows = self.company_communication_rows(cursor)
         fields = clean_communication(payload, rows.get(channel) if channel in rows else None)
@@ -4408,7 +4649,7 @@ class Handler(BaseHTTPRequestHandler):
               sender = VALUES(sender),
               api_key = VALUES(api_key)
             """,
-            (fields["channel"], fields["endpoint"], fields["sender"], fields["api_key"]),
+            (fields["channel"], fields["endpoint"], fields["sender"], seal_secret(open_secret(fields["api_key"]))),
         )
         return self.read_company_communications(cursor, token)
 
@@ -4418,8 +4659,7 @@ class Handler(BaseHTTPRequestHandler):
         if channel not in {"sms", "whatsapp", "email"}:
             raise ApiError(400, "Choose the SMS, WhatsApp, or email API.")
         row = self.company_communication_rows(cursor).get(channel)
-        endpoint = str(payload.get("endpoint") or "").strip() or (row or {}).get("endpoint", "")
-        return probe_endpoint(endpoint)
+        return probe_endpoint((row or {}).get("endpoint", ""))
 
     def company_profile_row(self, cursor):
         cursor.execute(
@@ -4436,7 +4676,7 @@ class Handler(BaseHTTPRequestHandler):
         return {"company": public_company(self.company_profile_row(cursor))}
 
     def save_company_profile(self, cursor, payload, token):
-        self.require_company_employee(cursor, token, "company profile")
+        self.require_company_employee(cursor, token, "company profile", write=True)
         fields = clean_company(payload)
         cursor.execute(
             """
@@ -4470,7 +4710,7 @@ class Handler(BaseHTTPRequestHandler):
         return {"notifications": public_notification_settings(self.company_notification_row(cursor), NOTIFICATION_TOGGLES)}
 
     def save_company_notifications(self, cursor, payload, token):
-        self.require_company_employee(cursor, token, "company notifications")
+        self.require_company_employee(cursor, token, "company notifications", write=True)
         current = public_notification_settings(self.company_notification_row(cursor), NOTIFICATION_TOGGLES)
         submitted = payload.get("notifications") or {}
         fields = {key: 1 if bool(submitted.get(key, current[key])) else 0 for key in NOTIFICATION_TOGGLES}
@@ -4811,7 +5051,7 @@ class Handler(BaseHTTPRequestHandler):
         return [public_company_package(row) for row in cursor.fetchall()]
 
     def create_company_package(self, cursor, payload, token):
-        self.require_company_employee(cursor, token)
+        self.require_company_employee(cursor, token, "company packages", write=True)
         allowed_clients = {item["id"] for item in self.public_package_clients(cursor)}
         fields = clean_company_package(payload, allowed_clients)
         if fields["status"] == "suspended":
@@ -4886,7 +5126,7 @@ class Handler(BaseHTTPRequestHandler):
         return public_company_package(self.company_package_row(cursor, package_id))
 
     def change_company_package(self, cursor, package_path, payload, token):
-        self.require_company_employee(cursor, token)
+        self.require_company_employee(cursor, token, "company packages", write=True)
         package_id, _, action = package_path.partition("/")
         row = self.company_package_row(cursor, package_id)
         if action == "edit":
@@ -4983,7 +5223,10 @@ class Handler(BaseHTTPRequestHandler):
         return jar
 
     def read_json(self):
-        length = int(self.headers.get("Content-Length", "0") or "0")
+        try:
+            length = int(self.headers.get("Content-Length", "0") or "0")
+        except ValueError:
+            raise ApiError(400, "The account request could not be read.") from None
         if length > MAX_BODY:
             raise ApiError(413, "That request is too large.")
         if length <= 0:
@@ -4993,17 +5236,32 @@ class Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError as error:
             raise ApiError(400, "The account request could not be read.") from error
 
+    def security_headers(self):
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("Referrer-Policy", "no-referrer")
+
+    def secure_transport(self):
+        # Cookies are only marked Secure when the request really arrived over
+        # HTTPS through the local reverse proxy — never from a spoofable header
+        # on a direct connection.
+        if self.client_address[0] not in TRUSTED_PROXIES:
+            return False
+        return (self.headers.get("X-Forwarded-Proto") or "").strip().lower() == "https"
+
     def send_json(self, status, body, cookie=None):
         encoded = json.dumps(body).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
         self.send_header("Cache-Control", "no-store")
+        self.security_headers()
         if cookie:
             name, value, max_age = cookie
+            secure = "; Secure" if self.secure_transport() else ""
             self.send_header(
                 "Set-Cookie",
-                f"{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}",
+                f"{name}={value}; Path=/; HttpOnly; SameSite=Lax; Max-Age={max_age}{secure}",
             )
         self.end_headers()
         self.wfile.write(encoded)
@@ -5013,6 +5271,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.security_headers()
         self.end_headers()
         self.wfile.write(body)
 
@@ -5039,9 +5298,8 @@ class Handler(BaseHTTPRequestHandler):
             if not candidate.is_file():
                 self.send_json(404, {"error": "The web app is not built on this server."})
                 return 404
-        try:
-            body = candidate.read_bytes()
-        except OSError:
+        body = cached_static(candidate)
+        if body is None:
             self.send_json(404, {"error": "That page was not found."})
             return 404
         content_type = STATIC_TYPES.get(candidate.suffix.lower()) or mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
@@ -5054,9 +5312,43 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Cache-Control", "public, max-age=31536000, immutable")
         else:
             self.send_header("Cache-Control", "no-cache")
+        self.security_headers()
         self.end_headers()
         self.wfile.write(body)
         return 200
+
+
+STATIC_CACHE = {}
+STATIC_CACHE_LOCK = threading.Lock()
+STATIC_CACHE_BYTES = 12 * 1024 * 1024
+
+
+def cached_static(candidate):
+    """Serve built assets from memory; the cache is keyed on mtime+size so a
+    fresh frontend build always wins and dev edits are picked up at once."""
+    try:
+        stat = candidate.stat()
+    except OSError:
+        return None
+    key = str(candidate)
+    with STATIC_CACHE_LOCK:
+        entry = STATIC_CACHE.get(key)
+        if entry and entry[0] == stat.st_mtime_ns and entry[1] == stat.st_size:
+            return entry[2]
+    try:
+        body = candidate.read_bytes()
+    except OSError:
+        return None
+    if len(body) <= STATIC_CACHE_BYTES // 4:
+        with STATIC_CACHE_LOCK:
+            STATIC_CACHE[key] = (stat.st_mtime_ns, stat.st_size, body)
+            total = sum(item[1] for item in STATIC_CACHE.values())
+            while total > STATIC_CACHE_BYTES and len(STATIC_CACHE) > 1:
+                victim = next((name for name in STATIC_CACHE if name != key), None)
+                if victim is None:
+                    break
+                total -= STATIC_CACHE.pop(victim)[1]
+    return body
 
 
 def publish_tunnel_peers_later():
@@ -5200,6 +5492,14 @@ def reconcile_device(connect, device):
 
 
 def main():
+    if os.environ.get("ISP_ENV") == "production" and not (
+        os.environ.get("ISP_ROUTER_SECRET") or os.environ.get("ISP_ACCOUNT_CODE_SECRET")
+    ):
+        print(
+            "WARNING: no sealing secret is set — router and payment credentials are "
+            "sealed with the built-in fallback key. Set ISP_ROUTER_SECRET in .env.",
+            flush=True,
+        )
     ensure_schema()
     import threading
     import wg_host

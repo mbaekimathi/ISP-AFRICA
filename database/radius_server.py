@@ -14,6 +14,7 @@ import secrets
 import socket
 import struct
 import threading
+import time
 
 import pymysql
 
@@ -228,7 +229,7 @@ def parse_packet(data):
         else:
             attributes.setdefault(attr_type, []).append(value)
         position += attr_len
-    return {"code": code, "id": ident, "auth": authenticator, "attrs": attributes, "vendor": vendor}
+    return {"code": code, "id": ident, "auth": authenticator, "raw": data[:length], "attrs": attributes, "vendor": vendor}
 
 
 def attr_text(attributes, number):
@@ -331,29 +332,45 @@ def verify_password(packet, secret, cleartext):
     return False, b""
 
 
-def nas_names(source_ip, packet):
-    """Every name a NAS can be known by: peer IP, NAS-IP-Address, NAS-Identifier."""
-    names = [source_ip]
-    nas_ip = packet["attrs"].get(4)
-    if nas_ip and len(nas_ip[0]) == 4:
-        names.append(socket.inet_ntoa(nas_ip[0]))
-    ident = attr_text(packet["attrs"], 32)
-    if ident:
-        names.append(ident)
-    return names
+_NAS_CACHE = {}
+_NAS_LOCK = threading.Lock()
+NAS_HIT_TTL = 60
+NAS_MISS_TTL = 10
+NAS_CACHE_MAX = 4096
+
+
+def nas_cache_clear():
+    """Drop cached secrets — called wherever nas rows are written so a new or
+    rotated router secret is honored on the very next packet."""
+    with _NAS_LOCK:
+        _NAS_CACHE.clear()
 
 
 def nas_secret(cursor, source_ip, packet):
-    names = nas_names(source_ip, packet)
-    placeholders = ", ".join(["%s"] * len(names))
-    cursor.execute(f"SELECT secret FROM nas WHERE nasname IN ({placeholders}) LIMIT 1", names)
+    # The shared secret belongs to the peer that actually sent the packet.
+    # NAS-IP-Address and NAS-Identifier are attacker-controlled fields inside
+    # the packet and must never select a different router's secret.
+    now = time.time()
+    with _NAS_LOCK:
+        cached = _NAS_CACHE.get(source_ip)
+        if cached and cached[1] > now:
+            return cached[0]
+    cursor.execute("SELECT secret FROM nas WHERE nasname = %s LIMIT 1", (source_ip,))
     row = cursor.fetchone()
-    return row["secret"] if row else None
+    secret = row["secret"] if row else None
+    with _NAS_LOCK:
+        if len(_NAS_CACHE) >= NAS_CACHE_MAX:
+            for key, entry in list(_NAS_CACHE.items()):
+                if entry[1] <= now:
+                    del _NAS_CACHE[key]
+        if len(_NAS_CACHE) < NAS_CACHE_MAX:
+            _NAS_CACHE[source_ip] = (secret, now + (NAS_HIT_TTL if secret else NAS_MISS_TTL))
+    return secret
 
 
 def nas_routers(cursor, source_ip, packet):
     """Router ids the calling NAS belongs to — nas.description and isp_radius_nas both hold router ids."""
-    names = nas_names(source_ip, packet)
+    names = [source_ip]
     marks = ", ".join(["%s"] * len(names))
     cursor.execute(
         f"""
@@ -559,6 +576,15 @@ def accounting(cursor, packet, source_ip):
     secret = nas_secret(cursor, source_ip, packet)
     if not secret:
         print(f"event=radius-acct result=no-nas source={source_ip}", flush=True)
+        return None
+    # RFC 2866: the Accounting-Request authenticator is MD5(code + id + length
+    # + 16 zeroes + attributes + secret). Verify it before trusting anything —
+    # accounting writes session rows and spends vouchers, so unsigned packets
+    # must not reach the database.
+    raw = packet.get("raw")
+    expected = hashlib.md5((raw or b"")[:4] + bytes(16) + (raw or b"")[20:] + secret.encode()).digest()
+    if not raw or not hmac.compare_digest(expected, packet["auth"]):
+        print(f"event=radius-acct result=bad-auth source={source_ip}", flush=True)
         return None
     attrs = packet["attrs"]
     status = attr_int(attrs, 40)

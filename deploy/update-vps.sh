@@ -56,17 +56,21 @@ fi
 
 echo "==> Restarting isp-centric"
 
-# A manual/orphaned `python api.py` outside systemd can hold :8765 and make
-# every restart fail with EADDRINUSE. Kill anything bound there that is not
-# the service's MainPID before restarting.
+# A manual/orphaned `python api.py` outside systemd can hold any of our ports
+# and make the restart start bind-failed — /api/health still answers 200, so
+# RADIUS/portal would be silently dead. Kill strays on every port we own.
 api_port=8765
 main_pid=$(systemctl show -p MainPID --value isp-centric 2>/dev/null || echo 0)
-for pid in $(ss -tlnp 2>/dev/null | grep ":${api_port}" | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do
-    if [ "$pid" != "$main_pid" ]; then
-        echo "!! port ${api_port} held by stray pid ${pid} — killing it"
-        kill "$pid" 2>/dev/null || true
-        sleep 1
-    fi
+for spec in "tlnp ${api_port}" "tlnp 8790" "ulnp 1812" "ulnp 1813"; do
+    mode="${spec%% *}"
+    port="${spec##* }"
+    for pid in $(ss -${mode} 2>/dev/null | grep ":${port} " | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u); do
+        if [ "$pid" != "$main_pid" ]; then
+            echo "!! port ${port} held by stray pid ${pid} — killing it"
+            kill "$pid" 2>/dev/null || true
+            sleep 1
+        fi
+    done
 done
 
 systemctl restart isp-centric
@@ -85,7 +89,7 @@ for _ in $(seq 1 30); do
     if ! systemctl is-active --quiet isp-centric; then
         break
     fi
-    if curl -sf "http://127.0.0.1:${api_port}/api/health" >/dev/null 2>&1; then
+    if curl -sf "http://127.0.0.1:${api_port}/api/health" 2>/dev/null | grep -qv 'bind-failed'; then
         healthy=1
         break
     fi

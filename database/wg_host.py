@@ -10,6 +10,7 @@ import os
 import shutil
 import socket
 import subprocess
+import time
 from pathlib import Path
 
 HOST_ADDRESS = "10.88.0.1/24"
@@ -66,6 +67,9 @@ def load_or_create_keypair():
             return private_key, public_key
     private_key, public_key = wireguard_keypair()
     KEY_FILE.write_text(f"{private_key}\n{public_key}\n", encoding="utf-8")
+    # A fresh key means every router peer must be re-onboarded — loud event so
+    # a forgotten wg/server.key on a new host is spotted immediately.
+    print("event=wireguard status=new-keypair detail=no-server-key-file", flush=True)
     return private_key, public_key
 
 
@@ -283,8 +287,34 @@ def _allow_posix_port():
             pass
 
 
+def wg_executable():
+    wireguard = wireguard_executable()
+    if wireguard is None:
+        return None
+    candidate = wireguard.with_name("wg.exe")
+    return candidate if candidate.exists() else None
+
+
 def sync_config(wireguard, service_config, sync_target):
-    return False
+    """Apply only the peer diffs to the live tunnel so connected routers keep
+    their sessions. Returns False when wg.exe cannot drive the interface (it
+    is missing, the tunnel is down, or the process lacks elevation) — the
+    caller then falls back to a service reinstall."""
+    if not tunnel_service_running():
+        return False
+    wg = wg_executable()
+    if wg is None:
+        return False
+    try:
+        result = subprocess.run(
+            [str(wg), "syncconf", TUNNEL_NAME, str(sync_target)],
+            check=False,
+            capture_output=True,
+            timeout=15,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return False
+    return result.returncode == 0
 
 
 def elevate_apply(wireguard, service_config, sync_target):
@@ -329,6 +359,20 @@ def wireguard_executable():
     if candidate.exists():
         return candidate
     return None
+
+
+_TUNNEL_STATE = {"at": 0.0, "running": False}
+
+
+def tunnel_running_cached(ttl=5):
+    """Health-check view of the tunnel. The real check spawns `sc query`/
+    inspects sysfs every call — too costly to run on each /api/health poll."""
+    now = time.time()
+    if now - _TUNNEL_STATE["at"] < ttl:
+        return _TUNNEL_STATE["running"]
+    _TUNNEL_STATE["at"] = now
+    _TUNNEL_STATE["running"] = tunnel_running()
+    return _TUNNEL_STATE["running"]
 
 
 def tunnel_running():

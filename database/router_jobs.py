@@ -54,6 +54,13 @@ def allow_job(client_id, now=None):
     now = time.monotonic() if now is None else now
     limit = max(1, int(os.environ.get("ISP_JOB_RATE_PER_MINUTE", "30")))
     with RATE_LOCK:
+        if len(RATE_HITS) > 20000:
+            for key, hits in list(RATE_HITS.items()):
+                recent = [stamp for stamp in hits if now - stamp < 60]
+                if recent:
+                    RATE_HITS[key] = recent
+                else:
+                    del RATE_HITS[key]
         recent = [stamp for stamp in RATE_HITS.get(client_id, []) if now - stamp < 60]
         if len(recent) >= limit:
             RATE_HITS[client_id] = recent
@@ -387,7 +394,34 @@ def worker_loop(connect, stop):
             stop.wait(poll_seconds())
 
 
+def release_stale_running(connect):
+    """A restart strands jobs that were 'running' when the process died; the
+    worker only claims 'queued' rows so they would sit forever. Close them as
+    timed_out instead of re-running — re-executing a half-applied change such
+    as an uplink switch could flap a live router."""
+    db = connect()
+    try:
+        with db.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE isp_router_jobs
+                SET status = 'timed_out',
+                    error_message = 'The service restarted while this job was running.',
+                    finished_at = CURRENT_TIMESTAMP
+                WHERE status = 'running'
+                """
+            )
+            if cursor.rowcount:
+                print(f"event=router-jobs stale-running={cursor.rowcount} status=timed_out", flush=True)
+        db.commit()
+    except Exception as error:
+        print(f"event=router-jobs stale-running error={error}", flush=True)
+    finally:
+        db.close()
+
+
 def start_worker(connect):
+    release_stale_running(connect)
     stop = threading.Event()
     for index in range(concurrency()):
         thread = threading.Thread(

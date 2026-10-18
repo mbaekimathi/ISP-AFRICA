@@ -38,8 +38,8 @@ deploy\setup.ps1               # installs Python deps, builds frontend, creates 
 - `pip install -r database\requirements.txt`
 - `npm ci && npm run build` in `frontend\` (skipped if npm is absent and `dist` exists)
 - `python database\seed.py` — creates `ISP-DB` and the base tables, and prints
-  the seeded login codes (`ispclient` / `ispemployee`, password `000000` —
-  change them after first sign-in).
+  the seeded login codes (`ispclient` / `ispemployee`) plus a one-time random
+  password for both accounts — sign in once and change it.
 
 `api.py` also creates the database and any missing tables itself on every
 start, so re-running seed is only needed for the demo accounts.

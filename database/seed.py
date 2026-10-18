@@ -1,5 +1,6 @@
 import hashlib
 import os
+import secrets
 import sys
 import uuid
 
@@ -9,8 +10,8 @@ import envfile
 
 envfile.load()
 
-PASSWORD = "000000"
-SALT = bytes.fromhex("00112233445566778899aabbccddeeff")
+PASSWORD = "".join(secrets.choice("0123456789") for _ in range(6))
+SALT = secrets.token_bytes(16)
 ITERATIONS = 210_000
 PASSWORD_HASH = "pbkdf2$%d$%s" % (
     ITERATIONS,
@@ -94,33 +95,29 @@ def main():
             sql = statement.strip()
             if sql:
                 cursor.execute(sql)
+        # INSERT IGNORE: on an existing install the demo accounts must keep the
+        # password the operator set — never reset them to a new random one.
+        fresh = False
         cursor.execute(
             """
-            INSERT INTO isp_clients (
+            INSERT IGNORE INTO isp_clients (
               id, first_name, last_name, username, email, phone, login_code,
               password_salt, password_hash, status, client_code
             ) VALUES (%s, 'ISP', 'Client', 'ispclient', 'isp.client@localhost', '0700000000', '000000', %s, %s, 'approved', 'IC-00000001')
-            ON DUPLICATE KEY UPDATE
-              password_salt = VALUES(password_salt),
-              password_hash = VALUES(password_hash),
-              status = 'approved'
             """,
             (str(uuid.uuid5(uuid.NAMESPACE_DNS, "isp-client-000000")), SALT_HEX, PASSWORD_HASH),
         )
+        fresh = fresh or cursor.rowcount > 0
         cursor.execute(
             """
-            INSERT INTO isp_employees (
+            INSERT IGNORE INTO isp_employees (
               id, first_name, last_name, username, email, phone, login_code,
               password_salt, password_hash, status, employee_code, role
             ) VALUES (%s, 'ISP', 'Employee', 'ispemployee', 'isp.employee@localhost', '0700000001', '000000', %s, %s, 'approved', 'EM-00000001', 'director')
-            ON DUPLICATE KEY UPDATE
-              password_salt = VALUES(password_salt),
-              password_hash = VALUES(password_hash),
-              status = 'approved',
-              role = 'director'
             """,
             (str(uuid.uuid5(uuid.NAMESPACE_DNS, "isp-employee-000000")), SALT_HEX, PASSWORD_HASH),
         )
+        fresh = fresh or cursor.rowcount > 0
         cursor.execute(
             """
             SELECT 'client' AS account_type, login_code, status, client_code AS code FROM isp_clients
@@ -132,6 +129,10 @@ def main():
     db.close()
     for row in rows:
         print("\t".join(str(part) for part in row))
+    if fresh:
+        print(f"seeded password for both accounts: {PASSWORD} (sign in once, then change it)")
+    else:
+        print("demo accounts already exist — existing passwords were left unchanged")
 
 
 if __name__ == "__main__":

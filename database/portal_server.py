@@ -31,7 +31,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
@@ -45,12 +45,31 @@ STATUS = {"portal": "pending"}
 DARAJA_TIMEOUT = 8
 HOTSPOT_PENDING = {}
 HOTSPOT_LOCK = threading.Lock()
+RATE = {}
+RATE_LOCK = threading.Lock()
 VALIDITY_SECONDS = {"hours": 3600, "days": 86400, "weeks": 604800, "months": 2592000}
 ANDROID_PROBES = {"/generate_204", "/generate204", "/gen_204"}
 PROBE_GRACE = int(os.environ.get("ISP_PROBE_GRACE") or 180)
 PROBE_RESTART = int(os.environ.get("ISP_PROBE_RESTART") or 900)
 PROBE_SEEN = {}
 PROBE_LOCK = threading.Lock()
+
+def rate_ok(key, limit, window=60):
+    now = time.time()
+    cutoff = now - window
+    with RATE_LOCK:
+        hits = RATE.setdefault(key, [])
+        while hits and hits[0] <= cutoff:
+            hits.pop(0)
+        if len(hits) >= limit:
+            return False
+        hits.append(now)
+        if len(RATE) > 20000:
+            for stale_key, stale_hits in list(RATE.items()):
+                if not stale_hits or stale_hits[-1] <= cutoff:
+                    del RATE[stale_key]
+        return True
+
 
 PAGE_CSS = """
 *{box-sizing:border-box;margin:0;padding:0}
@@ -189,6 +208,16 @@ def normalize_phone(value):
     return ""
 
 
+def open_secret(value):
+    """Secrets are sealed at rest; older plaintext rows still work."""
+    if not value:
+        return value
+    try:
+        return routeros_api.open_password(str(value))
+    except routeros_api.RouterError:
+        return str(value)
+
+
 def daraja_settings(cursor, client_id):
     cursor.execute(
         "SELECT scope, environment, account_type, short_code, consumer_key, consumer_secret, passkey, callback_url FROM isp_payment_settings WHERE client_id = %s",
@@ -198,6 +227,8 @@ def daraja_settings(cursor, client_id):
     for scope in ("own", "company"):
         row = rows.get(scope)
         if row and row["consumer_key"] and row["consumer_secret"]:
+            row["consumer_secret"] = open_secret(row["consumer_secret"])
+            row["passkey"] = open_secret(row["passkey"])
             return row
     return None
 
@@ -1278,18 +1309,20 @@ def hotspot_voucher_list(cursor, purchase_id):
     return cursor.fetchall()
 
 
-def hotspot_receipt(cursor, purchase_id):
+def hotspot_receipt(cursor, purchase_id, client_id=None):
     """Thank-you receipt for a hotspot purchase with all of its vouchers."""
+    scope = " AND pu.client_id = %s" if client_id else ""
+    params = (str(purchase_id or "")[:36], client_id) if client_id else (str(purchase_id or "")[:36],)
     cursor.execute(
-        """
+        f"""
         SELECT pu.id, pu.amount, pu.devices,
                COALESCE(p.name, c.name, 'Wi-Fi bundle') AS package_name
         FROM hotspot_purchases pu
         LEFT JOIN isp_packages p ON p.id = pu.package_id
         LEFT JOIN company_packages c ON c.id = p.company_package_id
-        WHERE pu.id = %s
+        WHERE pu.id = %s{scope}
         """,
-        (str(purchase_id or "")[:36],),
+        params,
     )
     row = cursor.fetchone()
     if not row:
@@ -1334,8 +1367,30 @@ def hotspot_paid_result(cursor, row):
 class PortalHandler(BaseHTTPRequestHandler):
     server_version = "ISPCentricPortal/1.0"
 
+    # HTTP/1.1 keep-alive: captive phones poll the pay/status endpoints every
+    # few seconds — reusing one connection stops a thread+handshake per poll.
+    protocol_version = "HTTP/1.1"
+    keepalive_seconds = max(2, int(os.environ.get("ISP_HTTP_KEEPALIVE") or 15))
+
     def log_message(self, *args):
         pass
+
+    def setup(self):
+        super().setup()
+        self.connection.settimeout(30)
+
+    def handle(self):
+        self.close_connection = True
+        try:
+            self.handle_one_request()
+            self.connection.settimeout(self.keepalive_seconds)
+            while not self.close_connection:
+                self.handle_one_request()
+        except OSError:
+            pass
+
+    def throttled(self, bucket, limit):
+        return not rate_ok((bucket, self.client_address[0]), limit)
 
     def _subscriber(self):
         db = self.server.connect()
@@ -1350,10 +1405,15 @@ class PortalHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", f"{kind}; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "SAMEORIGIN")
+        self.send_header("Referrer-Policy", "no-referrer")
         self.end_headers()
         self.wfile.write(body)
 
     def do_GET(self):
+        if self.throttled("portal", 600):
+            return self._send(b'{"error":"Too many requests."}', 429, "application/json")
         path = urlparse(self.path).path
         if path in ANDROID_PROBES:
             # Android's connectivity check expects a bare 204. Serving the
@@ -1433,6 +1493,8 @@ class PortalHandler(BaseHTTPRequestHandler):
         self._send(hotspot_page(device, offers, ctx, payment))
 
     def do_POST(self):
+        if self.throttled("portal-pay", 20):
+            return self._send(b'{"error":"Too many requests."}', 429, "application/json")
         if urlparse(self.path).path == "/hotspot/redeem":
             return self.hotspot_redeem()
         if urlparse(self.path).path == "/hotspot/pay":
@@ -1593,36 +1655,36 @@ class PortalHandler(BaseHTTPRequestHandler):
                 if request["status"] == "failed" and not confirmed:
                     reason = request["last_error"] or "Payment was declined."
                     return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
-                # A Daraja callback that already wrote the M-Pesa receipt confirms
-                # the payment without another stkpushquery round-trip — even when an
-                # earlier poll marked the request failed before the PIN was entered.
-                if not confirmed:
-                    settings = daraja_settings(cursor, request["client_id"])
-                    result = None
-                    if settings:
-                        try:
-                            result = stk_query(settings, checkout_id)
-                        except Exception:
-                            result = None
-                    stale = (datetime.now() - request["created_at"]).total_seconds() > 180
-                    if result is None:
-                        if stale:
-                            return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
-                        return self._send(b'{"state":"pending"}', 200, "application/json")
-                    state, reason = stk_state(result)
-                    if state != "paid":
-                        # stkpushquery reports interim codes like 1037 while the
-                        # prompt is still open — only the callback (or the expiry
-                        # window) may fail the request, never the query alone.
-                        if stale:
-                            reason = reason or "The prompt expired. Try again."
-                            cursor.execute(
-                                "UPDATE pppoe_stk_requests SET status = 'failed', last_error = %s WHERE checkout_id = %s AND status = 'pending'",
-                                (reason[:255], checkout_id),
-                            )
-                            db.commit()
-                            return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
-                        return self._send(b'{"state":"pending"}', 200, "application/json")
+                # The callback is unauthenticated, so its receipt is never proof of
+                # payment: always confirm with stkpushquery before crediting. The
+                # stored mpesa_code only lets a callback-failed row be re-claimed
+                # once Daraja says the payment actually landed.
+                settings = daraja_settings(cursor, request["client_id"])
+                result = None
+                if settings:
+                    try:
+                        result = stk_query(settings, checkout_id)
+                    except Exception:
+                        result = None
+                stale = (datetime.now() - request["created_at"]).total_seconds() > 180
+                if result is None:
+                    if stale:
+                        return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
+                    return self._send(b'{"state":"pending"}', 200, "application/json")
+                state, reason = stk_state(result)
+                if state != "paid":
+                    # stkpushquery reports interim codes like 1037 while the
+                    # prompt is still open — only the callback (or the expiry
+                    # window) may fail the request, never the query alone.
+                    if stale:
+                        reason = reason or "The prompt expired. Try again."
+                        cursor.execute(
+                            "UPDATE pppoe_stk_requests SET status = 'failed', last_error = %s WHERE checkout_id = %s AND status = 'pending'",
+                            (reason[:255], checkout_id),
+                        )
+                        db.commit()
+                        return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
+                    return self._send(b'{"state":"pending"}', 200, "application/json")
                 cursor.execute(
                     "UPDATE pppoe_stk_requests SET status = 'processing' WHERE checkout_id = %s AND (status = 'pending' OR (status = 'failed' AND mpesa_code <> ''))",
                     (checkout_id,),
@@ -1806,6 +1868,14 @@ class PortalHandler(BaseHTTPRequestHandler):
         finally:
             db.close()
         with HOTSPOT_LOCK:
+            if len(HOTSPOT_PENDING) >= 8192:
+                cutoff = datetime.now() - timedelta(seconds=180)
+                for key, item in list(HOTSPOT_PENDING.items()):
+                    if item.get("at") and item["at"] < cutoff:
+                        HOTSPOT_PENDING.pop(key, None)
+                if len(HOTSPOT_PENDING) >= 8192:
+                    oldest = min(HOTSPOT_PENDING, key=lambda key: HOTSPOT_PENDING[key].get("at") or datetime.min)
+                    HOTSPOT_PENDING.pop(oldest, None)
             HOTSPOT_PENDING[checkout] = {
                 "purchase_id": purchase_id,
                 "client_id": device["client_id"],
@@ -1891,28 +1961,32 @@ class PortalHandler(BaseHTTPRequestHandler):
                     pending = hotspot_pending_from_row(row)
                     with HOTSPOT_LOCK:
                         HOTSPOT_PENDING[checkout_id] = pending
-                if not confirmed and (datetime.now() - pending["at"]).total_seconds() > 180:
-                    with HOTSPOT_LOCK:
-                        HOTSPOT_PENDING.pop(checkout_id, None)
-                    return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
-                if confirmed:
-                    # The Daraja callback already confirmed this purchase.
-                    state, reason = "paid", ""
-                else:
-                    settings = daraja_settings(cursor, pending["client_id"])
-                    if not settings:
-                        return self._send(b'{"state":"pending"}', 200, "application/json")
+                stale = (datetime.now() - pending["at"]).total_seconds() > 180
+                # The callback is unauthenticated, so its receipt is never proof
+                # of payment: always confirm with stkpushquery before issuing
+                # vouchers or authorizing a device on the router.
+                settings = daraja_settings(cursor, pending["client_id"])
+                result = None
+                if settings:
                     try:
                         result = stk_query(settings, checkout_id)
                     except Exception:
-                        return self._send(b'{"state":"pending"}', 200, "application/json")
-                    state, reason = stk_state(result)
-                if state == "pending":
+                        result = None
+                if result is None:
+                    if stale:
+                        with HOTSPOT_LOCK:
+                            HOTSPOT_PENDING.pop(checkout_id, None)
+                        return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
                     return self._send(b'{"state":"pending"}', 200, "application/json")
-                if state == "failed":
+                state, reason = stk_state(result)
+                if state != "paid":
                     # Interim query results (premature 1037 etc.) are not final —
                     # the Daraja callback decides failure. Keep waiting until the
                     # prompt expires rather than stranding a still-open prompt.
+                    if stale:
+                        with HOTSPOT_LOCK:
+                            HOTSPOT_PENDING.pop(checkout_id, None)
+                        return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
                     return self._send(b'{"state":"pending"}', 200, "application/json")
                 cursor.execute(
                     "UPDATE hotspot_purchases SET status = 'paid', paid_at = NOW() WHERE checkout_id = %s AND (status = 'pending' OR (status = 'failed' AND mpesa_code <> ''))",
@@ -2064,11 +2138,32 @@ class PortalServer(ThreadingHTTPServer):
     never a second live listener, so restarts do not hit EADDRINUSE."""
 
     allow_reuse_address = os.name != "nt"
+    daemon_threads = True
+    request_queue_size = 128
+    max_workers = int(os.environ.get("ISP_PORTAL_WORKERS") or 32)
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._slots = threading.BoundedSemaphore(self.max_workers)
 
     def server_bind(self):
         if os.name == "nt":
             self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
         super().server_bind()
+
+    def process_request(self, request, client_address):
+        self._slots.acquire()
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request, client_address):
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
 
 
 def start(connect):

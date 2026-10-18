@@ -301,6 +301,8 @@ def seal_key():
 def seal_password(password):
     if not isinstance(password, str) or not password:
         raise RouterError("Enter the API password from the WinBox script.")
+    if password == DEV_PASSWORD and os.environ.get("ISP_ENV") == "production":
+        raise RouterError("That example password cannot be used in production. Run the onboarding script to set a unique one.")
     nonce = os.urandom(16)
     raw = password.encode()
     body = bytes(left ^ right for left, right in zip(raw, keystream(seal_key(), nonce, len(raw))))

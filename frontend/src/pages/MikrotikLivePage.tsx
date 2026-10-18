@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { Cpu, MemoryStick, Network, Wifi } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
-import { PageHeader } from "@/components/ui/DetailGrid";
 import { FormField } from "@/components/ui/FormField";
 import { TunnelNotification } from "@/components/ui/TunnelNotification";
 import { usePageMeta } from "@/hooks/usePageMeta";
@@ -150,21 +150,28 @@ function usedPercent(free?: string | null, total?: string | null) {
   return Math.max(0, Math.min(100, Math.round(((totalAmount - freeAmount) / totalAmount) * 100)));
 }
 
-function StatCard({ label, value, detail, meter }: { label: string; value: string; detail: string; meter?: number }) {
+function HeroStat({ label, value, icon, meter }: { label: string; value: string; icon: ReactNode; meter?: number }) {
   return (
-    <article className="px-5 py-4">
-      <p className="text-xs font-medium text-muted-foreground">{label}</p>
-      <p className="mt-1.5 text-xl font-semibold tracking-tight tabular-nums sm:text-2xl">{value}</p>
-      <p className="mt-1 text-xs leading-5 text-muted-foreground">{detail}</p>
-      {meter != null ? (
-        <div
-          className="live-meter mt-3"
-          data-tone={meter >= 90 ? "crit" : meter >= 70 ? "warn" : "ok"}
-        >
-          <span style={{ ["--meter" as string]: `${meter}%` }} />
-        </div>
-      ) : null}
-    </article>
+    <div className="flex items-center gap-3">
+      <span
+        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary-foreground/15"
+        aria-hidden="true"
+      >
+        {icon}
+      </span>
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-xl font-semibold tracking-tight tabular-nums">{value}</p>
+        <p className="text-xs text-primary-foreground/70">{label}</p>
+        {meter != null ? (
+          <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-primary-foreground/20">
+            <div
+              className="h-full rounded-full bg-primary-foreground/90 transition-[width] duration-500"
+              style={{ width: `${Math.min(100, Math.max(0, meter))}%` }}
+            />
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -316,14 +323,62 @@ export function MikrotikLivePage() {
   const needsPassword = apiReady === false || /could not be read|Save the API password/i.test(live?.message || "");
   const cpu = Math.max(0, Math.min(100, Number(live?.cpuLoad) || 0));
   const memory = usedPercent(live?.freeMemory, live?.totalMemory);
-  const statusLabel = live?.sample ? "Sample" : live?.reachable ? "Running" : apiReady ? "Not answering" : "Access not saved";
-  const statusTone = live?.sample ? "bg-warning" : live?.reachable ? "bg-success" : "bg-muted-foreground";
+  const statusLabel = live?.sample
+    ? "Sample"
+    : live?.reachable
+      ? "Running"
+      : apiReady === null
+        ? "Checking…"
+        : apiReady
+          ? "Not answering"
+          : "Access not saved";
+  const statusTone = live?.sample
+    ? "bg-warning"
+    : live?.reachable
+      ? "bg-success shadow-[0_0_8px_rgb(var(--success-rgb))]"
+      : apiReady
+        ? "bg-destructive"
+        : "bg-primary-foreground/50";
 
   const notice = live?.message && !/development sample/i.test(live.message) ? live.message : "";
 
   return (
     <div className="page-shell py-8">
-      <PageHeader title={title} description="Live running state read from the router." />
+      <section className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-primary via-primary/85 to-primary/60 text-primary-foreground shadow-card">
+        <div className="network-grid absolute inset-0 opacity-30" aria-hidden="true" />
+        <div className="relative flex flex-wrap items-center justify-between gap-4 px-5 pb-5 pt-6 sm:px-7">
+          <div className="min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-primary-foreground/70">MikroTik live</p>
+            <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight sm:text-3xl">{title}</h1>
+            <p className="mt-1 text-sm text-primary-foreground/75">
+              {live?.site ? `${live.site} — live running state.` : "Live running state read from the router."}
+            </p>
+          </div>
+          <span className="inline-flex items-center gap-2 rounded-full bg-primary-foreground/15 px-3.5 py-2 text-sm font-semibold backdrop-blur-sm">
+            <span className={`h-2 w-2 rounded-full ${statusTone}`} aria-hidden="true" />
+            {statusLabel}
+          </span>
+        </div>
+        <div className="relative grid grid-cols-2 gap-x-6 gap-y-4 border-t border-primary-foreground/15 px-5 py-4 sm:grid-cols-4 sm:px-7">
+          <HeroStat label="CPU load" value={live ? `${cpu}%` : "—"} icon={<Cpu className="h-4 w-4" />} meter={live ? cpu : undefined} />
+          <HeroStat
+            label="Memory used"
+            value={live ? `${memory}%` : "—"}
+            icon={<MemoryStick className="h-4 w-4" />}
+            meter={live ? memory : undefined}
+          />
+          <HeroStat
+            label="Hotspot sessions"
+            value={live?.hotspotActive == null ? "—" : String(live.hotspotActive)}
+            icon={<Wifi className="h-4 w-4" />}
+          />
+          <HeroStat
+            label="Interfaces"
+            value={live ? String(live.interfaceCount ?? live.interfaces.length) : "—"}
+            icon={<Network className="h-4 w-4" />}
+          />
+        </div>
+      </section>
       {tunnelStatus !== "unknown" ? (
         <TunnelNotification
           tunnelStatus={tunnelStatus}
@@ -374,12 +429,6 @@ export function MikrotikLivePage() {
       {live?.reachable ? (
         <div className="mt-6 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
           <div className="order-2 grid min-w-0 gap-4 lg:order-1">
-          <section className="live-panel grid divide-y divide-border sm:grid-cols-2 sm:divide-x sm:divide-y-0 xl:grid-cols-4">
-            <StatCard label="CPU" value={`${cpu}%`} detail={live.cpu || "Processor load"} meter={cpu} />
-            <StatCard label="Memory free" value={live.freeMemory || "Unknown"} detail={live.totalMemory ? `${memory}% used of ${live.totalMemory}` : "Memory in use"} meter={memory} />
-            <StatCard label="Hotspot" value={live.hotspotActive == null ? "—" : String(live.hotspotActive)} detail={live.hotspotActive == null ? "Not installed" : "Active sessions"} />
-            <StatCard label="PPPoE" value={live.pppoeActive == null ? "—" : String(live.pppoeActive)} detail={live.pppoeActive == null ? "Not installed" : "Active sessions"} />
-          </section>
           <section className="live-panel overflow-x-auto">
             <div className="live-panel-header">
               <h2>
@@ -473,10 +522,6 @@ export function MikrotikLivePage() {
           <aside className="live-panel order-1 h-fit p-5 lg:sticky lg:top-24 lg:order-2">
             <p className="text-xs font-medium text-muted-foreground">MikroTik profile</p>
             <h2 className="mt-1 text-lg font-semibold tracking-tight">{title}</h2>
-            <p className="mt-2 inline-flex items-center gap-2 text-sm font-medium">
-              <span className={`h-2 w-2 rounded-full ${statusTone}`} />
-              {statusLabel}
-            </p>
             <dl className="mt-5 grid gap-3 text-sm">
               {[
                 ["Site", live.site || ""],

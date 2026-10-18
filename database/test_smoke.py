@@ -5,6 +5,7 @@ connected router, and a development sample must not be treated as success.
 """
 
 import json
+import os
 import sys
 import unittest
 import urllib.error
@@ -77,7 +78,8 @@ class AccountSmokeTests(unittest.TestCase):
         self.assertIn("error", body)
 
     def test_router_pages_round_trip(self):
-        status, body = self.call("POST", "/api/client/login", {"loginCode": "000000", "password": "000000"})
+        password = os.environ.get("ISP_SEED_PASSWORD", "000000")
+        status, body = self.call("POST", "/api/client/login", {"loginCode": "000000", "password": password})
         self.assertEqual(status, 200, body)
         self.assertIn("account", body)
 
