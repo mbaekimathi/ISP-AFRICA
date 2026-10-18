@@ -695,7 +695,7 @@ def _listener(port, handler, connect, stop):
     sock.settimeout(1.0)
     db = connect()
     try:
-        db.ping(reconnect=True)
+        db.ping(reconnect=False)
     except Exception:
         pass
     STATUS[port] = "listening"
@@ -714,8 +714,11 @@ def _listener(port, handler, connect, stop):
             with db.cursor() as cursor:
                 response = handler(cursor, packet, source[0])
         except (pymysql.err.OperationalError, pymysql.err.InterfaceError):
+            # Dead connection — hand it back for disposal and take a fresh one
+            # from the pool rather than reconnecting in place.
             try:
-                db.ping(reconnect=True)
+                db.close()
+                db = connect()
                 with db.cursor() as cursor:
                     response = handler(cursor, packet, source[0])
             except Exception as error:

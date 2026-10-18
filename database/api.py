@@ -960,7 +960,7 @@ def _pool_acquire(password):
         except queue.Empty:
             return _PooledDb(open_db(password))
         try:
-            conn.ping(reconnect=True)
+            conn.ping(reconnect=False)
             return _PooledDb(conn)
         except pymysql.MySQLError:
             conn.close()
