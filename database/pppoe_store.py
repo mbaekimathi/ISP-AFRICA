@@ -2105,7 +2105,11 @@ def transfer_subscribers(cursor, client_id, payload):
     if not router or router["status"] != "active":
         raise PppoeError(400, "Choose an active router.")
     raw_ids = payload.get("subscriberIds")
-    ids = [str(item) for item in raw_ids if str(item).strip()][:200] if isinstance(raw_ids, list) else []
+    ids = (
+        list(dict.fromkeys(str(item).strip() for item in raw_ids if str(item).strip()))[:200]
+        if isinstance(raw_ids, list)
+        else []
+    )
     if not ids:
         raise PppoeError(400, "Choose at least one client.")
     linked_packages = set()
