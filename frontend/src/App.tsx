@@ -5,6 +5,8 @@ import { PublicLayout } from "@/components/layout/PublicLayout";
 import { CompanyCommunicationsPage } from "@/pages/employee/CompanyCommunicationsPage";
 import { CompanyNotificationsPage } from "@/pages/employee/CompanyNotificationsPage";
 import { CompanyNotificationSettingsPage } from "@/pages/employee/CompanyNotificationSettingsPage";
+import { CompanyChargesPage } from "@/pages/employee/CompanyChargesPage";
+import { CompanyGatewayPage } from "@/pages/employee/CompanyGatewayPage";
 import { CompanyPackagesPage } from "@/pages/employee/CompanyPackagesPage";
 import { CompanyProfilePage } from "@/pages/employee/CompanyProfilePage";
 import { CompanyPaymentsPage } from "@/pages/employee/CompanyPaymentsPage";
@@ -16,6 +18,7 @@ import { EmployeeReviewsPage } from "@/pages/employee/EmployeeReviewsPage";
 import { EmployeeSignUpPage } from "@/pages/employee/EmployeeSignUpPage";
 import { AccountPage } from "@/pages/AccountPage";
 import { BillingsPage } from "@/pages/BillingsPage";
+import { GatewayLedgerPage } from "@/pages/GatewayLedgerPage";
 import { ClientsPage } from "@/pages/ClientsPage";
 import { ClientUsagePage } from "@/pages/ClientUsagePage";
 import { WifiPaymentPage } from "@/pages/WifiPaymentPage";
@@ -115,6 +118,8 @@ export function App() {
             <Route path="/:code/hotspot/:purchaseId" element={<HotspotClientPage />} />
             <Route path="/billings" element={<BillingsPage />} />
             <Route path="/:code/billings" element={<BillingsPage />} />
+            <Route path="/billings/gateway" element={<GatewayLedgerPage />} />
+            <Route path="/:code/billings/gateway" element={<GatewayLedgerPage />} />
             <Route path="/account" element={<AccountPage />} />
             <Route path="/:code/account" element={<AccountPage />} />
             <Route path="/account/settings" element={<SectionPage title="Account settings" />} />
@@ -151,7 +156,8 @@ export function App() {
             <Route path="/:role/:code/company-settings/packages" element={<CompanyPackagesPage />} />
             <Route path="/:role/:code/company-settings/payments" element={<CompanyPaymentsPage />} />
             <Route path="/:role/:code/company-settings/billings" element={<SectionPage title="COMPANY BILLINGS" />} />
-            <Route path="/:role/:code/company-settings/billings/gateway" element={<SectionPage title="COMPANY GATEWAY BILLINGS" />} />
+            <Route path="/:role/:code/company-settings/billings/gateway" element={<CompanyGatewayPage />} />
+            <Route path="/:role/:code/company-settings/billings/gateway/charges" element={<CompanyChargesPage />} />
             <Route path="/:role/:code/company-settings/communications" element={<CompanyCommunicationsPage />} />
             <Route path="/:role/:code/company-settings/notifications" element={<CompanyNotificationsPage />} />
             <Route path="/:role/:code/company-settings/notifications/settings" element={<CompanyNotificationSettingsPage />} />
@@ -173,7 +179,8 @@ export function App() {
             <Route path="company-settings/packages" element={<CompanyPackagesPage />} />
             <Route path="company-settings/payments" element={<CompanyPaymentsPage />} />
             <Route path="company-settings/billings" element={<SectionPage title="COMPANY BILLINGS" />} />
-            <Route path="company-settings/billings/gateway" element={<SectionPage title="COMPANY GATEWAY BILLINGS" />} />
+            <Route path="company-settings/billings/gateway" element={<CompanyGatewayPage />} />
+            <Route path="company-settings/billings/gateway/charges" element={<CompanyChargesPage />} />
             <Route path="company-settings/communications" element={<CompanyCommunicationsPage />} />
             <Route path="company-settings/notifications" element={<CompanyNotificationsPage />} />
             <Route path="company-settings/notifications/settings" element={<CompanyNotificationSettingsPage />} />

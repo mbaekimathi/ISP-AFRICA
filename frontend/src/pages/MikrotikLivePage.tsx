@@ -53,6 +53,23 @@ type LiveState = {
   };
 };
 
+type WanUplink = {
+  interface: string;
+  provider: string;
+  method: string;
+  gateway: string;
+  downloadMbps: number;
+  uploadMbps: number;
+  active: boolean;
+  accountNumber: string;
+  eligible?: boolean;
+};
+
+type WanState = {
+  mode: string;
+  uplinks: WanUplink[];
+};
+
 type HealthRange = "live" | "days" | "weeks" | "month" | "year";
 
 type TrendPoint = { label: string; date: string; minutes: number; drops: number };
@@ -189,6 +206,11 @@ export function MikrotikLivePage() {
   const [restarting, setRestarting] = useState(false);
   const [restartNote, setRestartNote] = useState("");
   const [grantCopied, setGrantCopied] = useState(false);
+  const [wan, setWan] = useState<WanState | null>(null);
+  const [editingAccount, setEditingAccount] = useState(false);
+  const [accountDraft, setAccountDraft] = useState("");
+  const [savingAccount, setSavingAccount] = useState(false);
+  const [accountNote, setAccountNote] = useState("");
   usePageMeta("MikroTik live — ISP CENTRIC", "Live running state read from the router.");
 
   useEffect(() => {
@@ -205,6 +227,21 @@ export function MikrotikLivePage() {
         if (stopped || (cause instanceof DOMException && cause.name === "AbortError")) return;
         setError(cause instanceof Error ? cause.message : "That router could not be opened.");
       });
+    return () => {
+      stopped = true;
+      controller.abort();
+    };
+  }, [deviceId]);
+
+  useEffect(() => {
+    if (!deviceId) return;
+    let stopped = false;
+    const controller = new AbortController();
+    apiRequest<WanState>(`/api/mikrotiks/${deviceId}/wan`, { signal: controller.signal })
+      .then((body) => {
+        if (!stopped) setWan(body);
+      })
+      .catch(() => undefined);
     return () => {
       stopped = true;
       controller.abort();
@@ -304,6 +341,31 @@ export function MikrotikLivePage() {
     }
   }
 
+  async function saveAccount() {
+    if (!wan) return;
+    setSavingAccount(true);
+    setError("");
+    setAccountNote("");
+    try {
+      const body = await apiRequest<WanState>(`/api/mikrotiks/${deviceId}/wan`, {
+        method: "POST",
+        body: JSON.stringify({
+          ...wan,
+          uplinks: wan.uplinks.map((item) =>
+            item === sourceUplink ? { ...item, accountNumber: accountDraft.trim() } : item,
+          ),
+        }),
+      });
+      setWan(body);
+      setEditingAccount(false);
+      setAccountNote("Internet account saved.");
+    } catch (cause) {
+      setAccountNote(cause instanceof Error ? cause.message : "The internet account could not be saved.");
+    } finally {
+      setSavingAccount(false);
+    }
+  }
+
   async function retryConnection() {
     setSaving(true);
     setError("");
@@ -341,6 +403,7 @@ export function MikrotikLivePage() {
         : "bg-primary-foreground/50";
 
   const notice = live?.message && !/development sample/i.test(live.message) ? live.message : "";
+  const sourceUplink = wan?.uplinks.find((item) => item.active) ?? wan?.uplinks[0];
 
   return (
     <div className="page-shell py-8">
@@ -426,6 +489,69 @@ export function MikrotikLivePage() {
         </form>
       ) : null}
       {notice ? <p className="mt-4 text-sm text-muted-foreground">{notice}</p> : null}
+      {wan ? (
+        <section className="mt-6 max-w-md rounded-xl border border-border bg-surface p-5">
+          <h2 className="text-sm font-semibold">Internet account</h2>
+          {sourceUplink ? (
+            <>
+              <p className="mt-1 text-sm text-muted-foreground">
+                {sourceUplink.provider || "Provider not set"} on {sourceUplink.interface}
+                {sourceUplink.active ? " supplies this router's internet." : " is the only saved uplink."}
+              </p>
+              {editingAccount ? (
+                <form
+                  className="mt-3 grid gap-3"
+                  onSubmit={(event) => {
+                    event.preventDefault();
+                    void saveAccount();
+                  }}
+                >
+                  <FormField
+                    id="internet-account"
+                    label="Account number"
+                    hint="Optional — the account this uplink buys internet on."
+                  >
+                    <input
+                      id="internet-account"
+                      className="field"
+                      value={accountDraft}
+                      maxLength={64}
+                      onChange={(event) => setAccountDraft(event.target.value)}
+                    />
+                  </FormField>
+                  <div className="flex flex-wrap gap-2">
+                    <PrimaryButton type="submit" disabled={savingAccount}>
+                      {savingAccount ? "Saving…" : "Save account"}
+                    </PrimaryButton>
+                    <SecondaryButton type="button" disabled={savingAccount} onClick={() => setEditingAccount(false)}>
+                      Cancel
+                    </SecondaryButton>
+                  </div>
+                </form>
+              ) : (
+                <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
+                  <p className="text-sm font-medium tabular-nums">{sourceUplink.accountNumber || "Not registered"}</p>
+                  <SecondaryButton
+                    type="button"
+                    onClick={() => {
+                      setAccountDraft(sourceUplink.accountNumber);
+                      setAccountNote("");
+                      setEditingAccount(true);
+                    }}
+                  >
+                    {sourceUplink.accountNumber ? "Change" : "Register"}
+                  </SecondaryButton>
+                </div>
+              )}
+              {accountNote ? <p className="mt-2 text-xs text-muted-foreground">{accountNote}</p> : null}
+            </>
+          ) : (
+            <p className="mt-1 text-sm text-muted-foreground">
+              Save a WAN uplink on the ports page to register the account this router buys internet on.
+            </p>
+          )}
+        </section>
+      ) : null}
       {live?.reachable ? (
         <div className="mt-6 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
           <div className="order-2 grid min-w-0 gap-4 lg:order-1">

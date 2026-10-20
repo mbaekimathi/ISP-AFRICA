@@ -1909,6 +1909,7 @@ def reconcile_all(connect):
 
 def set_status(cursor, client_id, subscriber_id, status, billing, reason, active):
     row = require_owned(cursor, client_id, subscriber_id)
+    was_surfing = subscription_can_surf(row, date.today())
     begin(cursor)
     try:
         apply_plan(cursor, row, active)
@@ -1923,7 +1924,9 @@ def set_status(cursor, client_id, subscriber_id, status, billing, reason, active
     except Exception as error:
         abort(cursor)
         raise PppoeError(400, "The RADIUS update failed, so the client was left unchanged.") from error
-    coa = coa_for(cursor, row, row["pppoe_username"])
+    # A session that was already surfing keeps surfing — only disconnect when
+    # access was just granted (re-auth into subscribed) or just revoked.
+    coa = "unchanged" if was_surfing and active else coa_for(cursor, row, row["pppoe_username"])
     body = subscriber_detail(cursor, client_id, subscriber_id)
     body["coa"] = coa
     return body
@@ -1931,6 +1934,9 @@ def set_status(cursor, client_id, subscriber_id, status, billing, reason, active
 
 def renew(cursor, client_id, subscriber_id, payload):
     row = require_owned(cursor, client_id, subscriber_id)
+    # Renewing a session that was already authorized to surf must not drop it —
+    # the kick is only needed to lift a restricted session back into subscribed.
+    was_surfing = subscription_can_surf(row, date.today())
     amount = pppoe_service.money(payload.get("amount") or "0", "amount")
     if amount is None or amount <= 0:
         raise PppoeError(400, "Enter the verified payment amount before renewal.")
@@ -1983,7 +1989,7 @@ def renew(cursor, client_id, subscriber_id, payload):
         abort(cursor)
         raise PppoeError(400, "Renewal was not saved.") from error
     body = subscriber_detail(cursor, client_id, subscriber_id)
-    body["coa"] = coa_for(cursor, row, row["pppoe_username"])
+    body["coa"] = "unchanged" if was_surfing else coa_for(cursor, row, row["pppoe_username"])
     body["daysPurchased"] = days
     return body
 
@@ -2591,6 +2597,54 @@ def list_transactions(cursor, client_id, query):
                     "createdAt": stamp(item["created_at"]),
                 }
             )
+
+    # Pooled collections through the company gateway: a confirmed gateway
+    # payment that fulfilled a paid STK request or hotspot purchase already
+    # shows up as its payment/sale row, so only collections with no billing
+    # record of their own (direct C2B, assigned suspense) are listed here.
+    clause, args = window("g.created_at")
+    gateway_scope = (
+        "" if service == "all"
+        else " AND COALESCE(s.service, IF(g.source = 'hotspot', 'hotspot', 'pppoe')) = %s"
+    )
+    cursor.execute(
+        f"""
+        SELECT g.id, g.amount, g.mpesa_receipt, g.checkout_id, g.channel,
+               g.source, g.account_reference, g.created_at,
+               s.first_name, s.last_name, s.phone, s.pppoe_username, s.service
+        FROM gateway_payments g
+        LEFT JOIN pppoe_subscribers s ON s.id = g.subscriber_id
+        WHERE g.client_id = %s AND g.status = 'confirmed'{clause}{gateway_scope}
+          AND NOT EXISTS (
+            SELECT 1 FROM pppoe_stk_requests st
+            WHERE st.checkout_id = g.checkout_id AND st.status = 'paid'
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM hotspot_purchases h
+            WHERE h.checkout_id = g.checkout_id AND h.status = 'paid'
+          )
+        """,
+        [client_id, *args, *([] if service == "all" else [service])],
+    )
+    for item in cursor.fetchall():
+        collected += Decimal(item["amount"])
+        detail = "Company gateway collection"
+        if item.get("account_reference"):
+            detail += f" · ref {item['account_reference']}"
+        rows.append(
+            {
+                "id": f"gw-{item['id']}",
+                "kind": "gateway",
+                "customer": f"{item.get('first_name') or ''} {item.get('last_name') or ''}".strip() or "M-Pesa payer",
+                "contact": item.get("phone") or item.get("pppoe_username") or "",
+                "service": item.get("service") or ("hotspot" if item["source"] == "hotspot" else "pppoe"),
+                "detail": detail,
+                "reference": item.get("mpesa_receipt") or item.get("checkout_id") or "",
+                "amount": format(Decimal(item["amount"]), ".2f"),
+                "status": "paid",
+                "createdAt": stamp(item["created_at"]),
+            }
+        )
 
     rows.sort(key=lambda item: item["createdAt"] or "", reverse=True)
     return {

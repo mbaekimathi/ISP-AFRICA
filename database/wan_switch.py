@@ -17,6 +17,7 @@ MODES = (
 
 IFACE = re.compile(r"^[A-Za-z0-9_.:-]{1,32}$")
 PROVIDER = re.compile(r"^[A-Za-z0-9 ._-]{1,40}$")
+ACCOUNT = re.compile(r"^[A-Za-z0-9 ._/@:#+\-]{0,64}$")
 GATEWAY = re.compile(r"^(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)$")
 METHODS = {"dhcp", "pppoe", "static"}
 OVERRIDE_ROLES = {"director", "supervisor", "it-support"}
@@ -33,10 +34,13 @@ def clean_uplink(raw):
     provider = str(raw.get("provider", "")).strip()
     method = str(raw.get("method", "")).strip()
     gateway = str(raw.get("gateway", "")).strip()
+    account = str(raw.get("accountNumber") or "").strip()
     if not IFACE.match(interface) or interface == "isp-centric":
         raise SwitchError("Choose an uplink interface that belongs to this router.")
     if not PROVIDER.match(provider):
         raise SwitchError("Enter a provider name using letters, numbers, spaces, or dashes.")
+    if not ACCOUNT.match(account):
+        raise SwitchError("Enter the uplink account number using letters, numbers, spaces, or dashes.")
     if method not in METHODS:
         raise SwitchError("Choose DHCP, PPPoE, or a static address for each uplink.")
     if gateway and not GATEWAY.match(gateway):
@@ -56,6 +60,7 @@ def clean_uplink(raw):
         "provider": provider,
         "method": method,
         "gateway": gateway,
+        "accountNumber": account,
         "downloadMbps": download,
         "uploadMbps": upload,
         "health": health,

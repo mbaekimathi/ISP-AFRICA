@@ -12,7 +12,7 @@ type PeriodMode = "all" | "day" | "month" | "year" | "period";
 
 type Transaction = {
   id: string;
-  kind: "payment" | "invoice" | "stk" | "purchase";
+  kind: "payment" | "invoice" | "stk" | "purchase" | "gateway";
   service: "pppoe" | "hotspot";
   customer: string;
   contact: string;
@@ -35,6 +35,7 @@ const kindLabel: Record<Transaction["kind"], string> = {
   invoice: "Invoice",
   stk: "STK push",
   purchase: "Hotspot sale",
+  gateway: "Gateway payment",
 };
 
 const statusTone: Record<string, "active" | "due" | "critical" | "paused" | "neutral"> = {

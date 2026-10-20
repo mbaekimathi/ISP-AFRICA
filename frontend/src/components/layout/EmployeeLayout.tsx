@@ -46,12 +46,19 @@ const dashboardLinks = [
 const billingsLinks = [
   { label: "Billings", to: "/employee/company-settings/billings" },
   { label: "Gateway billings", to: "/employee/company-settings/billings/gateway" },
+  { label: "Transaction charges", to: "/employee/company-settings/billings/gateway/charges" },
+];
+
+const companyPaymentsLinks = [
+  { label: "Payments", to: "/employee/company-settings/payments" },
+  { label: "Transaction charges", to: "/employee/company-settings/billings/gateway/charges" },
 ];
 
 function employeeSidebarItems(pathname: string, director: boolean) {
   const path = pathname.replace(/^\/employee/, "").replace(/^\/[a-z-]+\/[A-Z0-9]+/, "");
   if (path === "/dashboard") return director ? dashboardLinks : [];
   if (path.startsWith("/company-settings/billings")) return billingsLinks;
+  if (path === "/company-settings/payments") return companyPaymentsLinks;
   if (path.startsWith("/company-settings/notifications")) return companyNotificationLinks;
   if (path === "/company-settings/communications") return companyCommunicationsLinks;
   if (path === "/company-settings") return companyLinks;

@@ -111,8 +111,12 @@ function linksForPage(pathname: string) {
       { label: "PPPoE-clients", to: "/clients" },
     ];
   }
-  if (pathname === "/billings" || pathname.endsWith("/billings")) {
-    return [{ label: "Packages", to: "/account/settings/isp-package" }];
+  if (pathname === "/billings" || pathname.endsWith("/billings") || pathname.endsWith("/billings/gateway")) {
+    return [
+      { label: "Transactions", to: "/billings" },
+      { label: "Gateway billings", to: "/billings/gateway" },
+      { label: "Packages", to: "/account/settings/isp-package" },
+    ];
   }
   if (pathname.startsWith("/account/settings/isp-notifications")) return notificationLinks;
   if (pathname.endsWith("/account/settings/isp-communications")) return communicationsLinks;

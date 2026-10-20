@@ -27,6 +27,7 @@ type Uplink = {
   downloadMbps: number;
   uploadMbps: number;
   active: boolean;
+  accountNumber: string;
 };
 
 type AuditRow = {
@@ -59,7 +60,7 @@ function healthOf(port: WanPort | undefined, sample: boolean, reported?: string)
 }
 
 function blank(name: string): Uplink {
-  return { interface: name, provider: "", method: "dhcp", gateway: "", downloadMbps: 100, uploadMbps: 100, active: false };
+  return { interface: name, provider: "", method: "dhcp", gateway: "", downloadMbps: 100, uploadMbps: 100, active: false, accountNumber: "" };
 }
 
 export function WanUplinkPanel({ deviceId, version, ports, sample = false }: { deviceId: string; version: string; ports: WanPort[]; sample?: boolean }) {
@@ -235,6 +236,7 @@ export function WanUplinkPanel({ deviceId, version, ports, sample = false }: { d
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <p className="font-medium">
                   {uplink.provider || "Provider not set"} · {uplink.interface}
+                  {uplink.accountNumber ? <span className="text-muted-foreground"> · acct {uplink.accountNumber}</span> : null}
                 </p>
                 <p className="text-xs text-muted-foreground">
                   {uplink.active ? "Active uplink" : "Standby uplink"} · {health} · {uplink.downloadMbps}/{uplink.uploadMbps} Mbps
@@ -253,6 +255,9 @@ export function WanUplinkPanel({ deviceId, version, ports, sample = false }: { d
                 </FormField>
                 <FormField id={`wan-gateway-${uplink.interface}`} label="Gateway">
                   <input id={`wan-gateway-${uplink.interface}`} className="field" value={uplink.gateway} onChange={(event) => update(uplink.interface, { gateway: event.target.value })} />
+                </FormField>
+                <FormField id={`wan-account-${uplink.interface}`} label="Account number" hint="Optional — the account this uplink buys internet on.">
+                  <input id={`wan-account-${uplink.interface}`} className="field" value={uplink.accountNumber} maxLength={64} onChange={(event) => update(uplink.interface, { accountNumber: event.target.value })} />
                 </FormField>
                 <FormField id={`wan-down-${uplink.interface}`} label="Download Mbps">
                   <input id={`wan-down-${uplink.interface}`} className="field" type="number" min={1} value={uplink.downloadMbps} onChange={(event) => update(uplink.interface, { downloadMbps: Number(event.target.value) })} />

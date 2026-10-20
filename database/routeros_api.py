@@ -2203,12 +2203,17 @@ def inspect_access(host, password, radius_address="", timeout=4, port=API_PORT, 
         if any(row.get("ret") for row in login):
             raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
         # Past this point the tunnel is proven up — a failed /print (device-mode
-        # gating, a mid-boot router, a transient API drop) means "feature absent",
-        # not "router unreachable", so callers must not mark the tunnel down.
+        # gating, a mid-boot router, a transient API drop) must not mark the
+        # tunnel down. But it also cannot be read as "feature absent": acting on
+        # a misread would re-apply enforcement and kill every live PPP session.
+        # Callers must check read_failed before pushing anything.
+        failed_reads = [0]
+
         def read(words):
             try:
                 return talk(sock, reader, words)
             except RouterError:
+                failed_reads[0] += 1
                 return []
 
         servers = read(["/interface/pppoe-server/server/print"])
@@ -2220,6 +2225,7 @@ def inspect_access(host, password, radius_address="", timeout=4, port=API_PORT, 
         try:
             avoid, _lan = _wan_ports(sock, reader)
         except RouterError:
+            failed_reads[0] += 1
             avoid = set()
     finally:
         sock.close()
@@ -2255,7 +2261,7 @@ def inspect_access(host, password, radius_address="", timeout=4, port=API_PORT, 
         and (row.get("interface") or "") not in avoid
         for row in spots
     )
-    return {"pppoe": pppoe, "hotspot": hotspot}
+    return {"pppoe": pppoe, "hotspot": hotspot, "read_failed": bool(failed_reads[0])}
 
 
 def authorize_hotspot_client(host, password, ip, mac, username, secret, profile, rate_limit, shared_users, uptime, timeout=12, port=API_PORT, opener=None):

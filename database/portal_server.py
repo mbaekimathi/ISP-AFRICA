@@ -36,6 +36,7 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
+import gateway_store
 import pppoe_store
 import routeros_api
 
@@ -234,9 +235,17 @@ def normalize_phone(value):
 
 
 def open_secret(value):
-    """Secrets are sealed at rest; older plaintext rows still work."""
+    """Secrets are sealed at rest — gcm1 envelope → legacy seal → raw.
+    A gcm1 blob that fails integrity returns "" rather than the ciphertext."""
+    import gateway_crypto
+
     if not value:
         return value
+    if gateway_crypto.is_sealed(value):
+        try:
+            return gateway_crypto.open_secret(str(value))
+        except gateway_crypto.GatewayCryptoError:
+            return ""
     try:
         return routeros_api.open_password(str(value))
     except routeros_api.RouterError:
@@ -244,6 +253,30 @@ def open_secret(value):
 
 
 def daraja_settings(cursor, client_id):
+    cursor.execute(
+        "SELECT gateway_mode FROM isp_payout_settings WHERE client_id = %s",
+        (client_id,),
+    )
+    mode = ((cursor.fetchone() or {}).get("gateway_mode") or "").strip()
+    if mode == "company_gateway":
+        # Pooled collection: the company's own credentials, kept server-side —
+        # never the ISP's company-scoped copy in isp_payment_settings.
+        cursor.execute(
+            "SELECT environment, account_type, short_code, consumer_key, consumer_secret, passkey FROM company_daraja_settings WHERE id = 1"
+        )
+        row = cursor.fetchone()
+        if row and row["consumer_key"] and row["consumer_secret"]:
+            row["consumer_secret"] = open_secret(row["consumer_secret"])
+            row["passkey"] = open_secret(row["passkey"])
+            row["scope"] = "company"
+            row["gateway_pool"] = True
+            row["callback_url"] = gateway_callback_url(cursor)
+            return row
+        return None
+    if mode == "none":
+        return None
+    # own_daraja — and NULL before a row exists — keep the legacy selection so
+    # saved credentials behave exactly as they did before the gateway switch.
     cursor.execute(
         "SELECT scope, environment, account_type, short_code, consumer_key, consumer_secret, passkey, callback_url FROM isp_payment_settings WHERE client_id = %s",
         (client_id,),
@@ -256,6 +289,17 @@ def daraja_settings(cursor, client_id):
             row["passkey"] = open_secret(row["passkey"])
             return row
     return None
+
+
+def gateway_callback_url(cursor):
+    """Public STK callback for pooled pushes — the URL Safaricom must reach
+    the API server on, with the company's callback secret in the path.
+    Empty when the public base or the secret is not configured yet."""
+    base = (os.environ.get("ISP_GATEWAY_PUBLIC_URL") or "").strip().rstrip("/")
+    if not base:
+        return ""
+    secret = gateway_store.callback_secret(cursor)
+    return f"{base}/api/daraja/{secret}/stk" if secret else ""
 
 
 def daraja_host(row):
@@ -1404,6 +1448,32 @@ def issue_hotspot_vouchers(cursor, pending):
     return rows
 
 
+def authorize_hotspot_grant(pending, voucher=None):
+    """Create the router login for a paid hotspot purchase. Runs outside the
+    payment transaction — the portal poll, the gateway callback processor,
+    and the sweep all call the same grant."""
+    if not pending.get("api_secret"):
+        raise RuntimeError("the router has no saved API access")
+    password = routeros_api.open_password(pending["api_secret"])
+    username = (voucher or {}).get("username") or f"hs-{secrets.token_hex(4)}"
+    secret = (voucher or {}).get("password") or secrets.token_hex(4)
+    profile = f"hs-{pending['package_id'][:8]}"
+    rate = f"{pending['upload']}M/{pending['download']}M"
+    report = routeros_api.authorize_hotspot_client(
+        pending["tunnel_ip"],
+        password,
+        pending["ip"],
+        pending["mac"],
+        username,
+        secret,
+        profile,
+        rate,
+        1,
+        f"{pending['seconds']}s",
+    )
+    return {"username": username, "password": secret, "authorized": True, "online": bool(report.get("online"))}
+
+
 def hotspot_voucher_list(cursor, purchase_id):
     cursor.execute(
         "SELECT code, status FROM hotspot_vouchers WHERE purchase_id = %s ORDER BY issued_at, id",
@@ -1715,6 +1785,16 @@ class PortalHandler(BaseHTTPRequestHandler):
                         checkout,
                     ),
                 )
+                if settings.get("gateway_pool"):
+                    gateway_store.record_stk_initiated(
+                        cursor,
+                        checkout,
+                        row["client_id"],
+                        "pppoe",
+                        format(Decimal(amount), ".2f"),
+                        phone,
+                        subscriber_id=row["subscriber_id"],
+                    )
             db.commit()
         except Exception:
             db.rollback()
@@ -1859,18 +1939,35 @@ class PortalHandler(BaseHTTPRequestHandler):
                             "UPDATE pppoe_subscriptions SET package_id = %s, price = %s WHERE subscriber_id = %s",
                             (request["package_id"], request["package_price"], request["subscriber_id"]),
                         )
+                    # Pooled collection: the ledger entry and the renewal live
+                    # in this one transaction — whoever confirms first (poll,
+                    # callback, sweep) wins, and the unique keys make a second
+                    # attempt a no-op instead of a double credit.
+                    gateway_store.confirm_collection(
+                        cursor, checkout_id, receipt=request.get("mpesa_code")
+                    )
+                    cursor.execute(
+                        "SELECT mpesa_receipt FROM gateway_payments WHERE checkout_id = %s",
+                        (checkout_id,),
+                    )
+                    receipt = ((cursor.fetchone() or {}).get("mpesa_receipt")
+                               or request.get("mpesa_code"))
                     pppoe_store.renew(
                         cursor,
                         request["client_id"],
                         request["subscriber_id"],
                         {
                             "amount": format(request["amount"], ".2f"),
-                            "mpesaReference": (request.get("mpesa_code") or checkout_id)[:40],
+                            "mpesaReference": (receipt or checkout_id)[:40],
                         },
                     )
                     cursor.execute(
-                        "UPDATE pppoe_stk_requests SET status = 'paid', paid_at = NOW() WHERE checkout_id = %s",
-                        (checkout_id,),
+                        """
+                        UPDATE pppoe_stk_requests
+                        SET status = 'paid', paid_at = NOW(), mpesa_code = COALESCE(%s, mpesa_code)
+                        WHERE checkout_id = %s
+                        """,
+                        (receipt, checkout_id),
                     )
                     db.commit()
                 except pppoe_store.PppoeError as error:
@@ -2012,6 +2109,16 @@ class PortalHandler(BaseHTTPRequestHandler):
                         str(payload.get("orig") or "")[:255],
                     ),
                 )
+                if settings.get("gateway_pool"):
+                    gateway_store.record_stk_initiated(
+                        cursor,
+                        checkout,
+                        device["client_id"],
+                        "hotspot",
+                        format(Decimal(charged), ".2f"),
+                        phone,
+                        hotspot_purchase_id=purchase_id,
+                    )
             db.commit()
         finally:
             db.close()
@@ -2044,26 +2151,7 @@ class PortalHandler(BaseHTTPRequestHandler):
         self._send(json.dumps({"checkoutId": checkout}).encode(), 200, "application/json")
 
     def hotspot_authorize(self, pending, voucher=None):
-        if not pending.get("api_secret"):
-            raise RuntimeError("the router has no saved API access")
-        password = routeros_api.open_password(pending["api_secret"])
-        username = (voucher or {}).get("username") or f"hs-{secrets.token_hex(4)}"
-        secret = (voucher or {}).get("password") or secrets.token_hex(4)
-        profile = f"hs-{pending['package_id'][:8]}"
-        rate = f"{pending['upload']}M/{pending['download']}M"
-        report = routeros_api.authorize_hotspot_client(
-            pending["tunnel_ip"],
-            password,
-            pending["ip"],
-            pending["mac"],
-            username,
-            secret,
-            profile,
-            rate,
-            1,
-            f"{pending['seconds']}s",
-        )
-        return {"username": username, "password": secret, "authorized": True, "online": bool(report.get("online"))}
+        return authorize_hotspot_grant(pending, voucher)
 
     def hotspot_offers(self, query):
         db = self.server.connect()
@@ -2136,8 +2224,13 @@ class PortalHandler(BaseHTTPRequestHandler):
                         return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
                     return self._send(b'{"state":"pending"}', 200, "application/json")
                 cursor.execute(
-                    "UPDATE hotspot_purchases SET status = 'paid', paid_at = NOW() WHERE checkout_id = %s AND (status = 'pending' OR (status = 'failed' AND mpesa_code <> ''))",
+                    "SELECT mpesa_receipt FROM gateway_payments WHERE checkout_id = %s",
                     (checkout_id,),
+                )
+                receipt = (cursor.fetchone() or {}).get("mpesa_receipt")
+                cursor.execute(
+                    "UPDATE hotspot_purchases SET status = 'paid', paid_at = NOW(), mpesa_code = COALESCE(%s, mpesa_code) WHERE checkout_id = %s AND (status = 'pending' OR (status = 'failed' AND mpesa_code <> ''))",
+                    (receipt, checkout_id),
                 )
                 db.commit()
                 if cursor.rowcount == 0:
@@ -2148,6 +2241,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 vouchers = []
                 try:
                     vouchers = issue_hotspot_vouchers(cursor, pending)
+                    gateway_store.confirm_collection(cursor, checkout_id)
                     db.commit()
                 except Exception:
                     db.rollback()

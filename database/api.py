@@ -22,6 +22,12 @@ import envfile
 
 envfile.load()
 
+import gateway_api
+import gateway_callbacks
+import gateway_crypto
+import gateway_notify
+import gateway_settle
+import gateway_store
 import pppoe_service
 import pppoe_store
 import portal_server
@@ -319,15 +325,30 @@ def masked_secret(value):
     return "••••" + value[-4:]
 
 
+def saved_flag(value):
+    """Write-only secrets are never returned — only a truthy "Saved" marker."""
+    return "••••" if value else ""
+
+
 def seal_secret(value):
+    """New writes use the versioned AES-GCM envelope; older legacy-sealed
+    rows keep reading through open_secret below."""
     if not value:
         return value
-    return routeros_api.seal_password(str(value))
+    return gateway_crypto.seal(str(value))
 
 
 def open_secret(value):
+    """Dual-read for stored secrets: gcm1 envelope → legacy seal → raw.
+    A gcm1 blob that fails its integrity check returns "" — never the
+    ciphertext — so a tampered value fails loudly instead of authenticating."""
     if not value:
         return value
+    if gateway_crypto.is_sealed(value):
+        try:
+            return gateway_crypto.open_secret(str(value))
+        except gateway_crypto.GatewayCryptoError:
+            return ""
     try:
         return routeros_api.open_password(str(value))
     except routeros_api.RouterError:
@@ -446,6 +467,101 @@ def clean_endpoint(value):
     ):
         raise ApiError(400, "Enter an API endpoint that starts with http:// or https://.")
     return text
+
+
+def daraja_oauth_probe(environment, consumer_key, consumer_secret):
+    """Cheapest proof Daraja credentials work — one OAuth round-trip."""
+    import urllib.request
+    import urllib.error
+    import base64
+
+    host = "https://api.safaricom.co.ke" if environment == "live" else "https://sandbox.safaricom.co.ke"
+    request = urllib.request.Request(
+        f"{host}/oauth/v1/generate?grant_type=client_credentials",
+        headers={"Authorization": "Basic " + base64.b64encode(f"{consumer_key}:{consumer_secret}".encode()).decode()},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=8) as response:
+            body = json.loads(response.read().decode() or "{}")
+    except urllib.error.HTTPError as error:
+        detail = ""
+        try:
+            detail = str(json.loads(error.read().decode() or "{}").get("errorMessage") or "").strip()
+        except (ValueError, OSError):
+            detail = ""
+        suffix = f": {detail}" if detail else ""
+        if error.code in (400, 401, 403):
+            return {"connected": False, "reason": f"Daraja rejected the credentials ({error.code}{suffix}). Check the consumer key, secret, and environment."}
+        return {"connected": False, "reason": f"Daraja answered with an error ({error.code}{suffix}). Try again shortly."}
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        return {"connected": False, "reason": f"Daraja could not be reached: {getattr(error, 'reason', error)}."}
+    if body.get("access_token"):
+        return {"connected": True, "reason": ""}
+    return {"connected": False, "reason": "Daraja answered but returned no access token."}
+
+
+def gateway_precheck(cursor):
+    """Client-facing preflight before opting into the company gateway —
+    booleans and plain-language reasons only, never secrets."""
+    cursor.execute(
+        """
+        SELECT environment, consumer_key, consumer_secret, passkey,
+               initiator_name, initiator_password_enc, kill_switch
+        FROM company_daraja_settings WHERE id = 1
+        """
+    )
+    row = cursor.fetchone() or {}
+    checks = []
+
+    configured = bool(row.get("consumer_key") and row.get("consumer_secret"))
+    checks.append({
+        "key": "credentials",
+        "ok": configured,
+        "detail": "Company M-Pesa credentials are saved."
+        if configured else "The company has not saved its M-Pesa credentials yet.",
+    })
+
+    if configured:
+        probe = daraja_oauth_probe(
+            row.get("environment") or "sandbox",
+            row["consumer_key"],
+            open_secret(row["consumer_secret"]),
+        )
+        checks.append({
+            "key": "daraja",
+            "ok": probe["connected"],
+            "detail": "Daraja accepts the company credentials." if probe["connected"] else probe["reason"],
+        })
+    else:
+        checks.append({"key": "daraja", "ok": False, "detail": "Skipped — no credentials to test."})
+
+    callbacks_ready = bool(
+        (os.environ.get("ISP_GATEWAY_PUBLIC_URL") or "").strip()
+        and gateway_store.callback_secret(cursor)
+    )
+    checks.append({
+        "key": "callbacks",
+        "ok": callbacks_ready,
+        "detail": "Payment callbacks are registered."
+        if callbacks_ready else "The callback address is not configured on the server yet.",
+    })
+
+    payouts_ready = bool(row.get("initiator_name") and row.get("initiator_password_enc"))
+    checks.append({
+        "key": "payouts",
+        "ok": payouts_ready,
+        "detail": "Payout credentials are set — money can be disbursed to you."
+        if payouts_ready else "The company has not set up payout credentials (initiator) yet.",
+    })
+
+    checks.append({
+        "key": "gateway",
+        "ok": not row.get("kill_switch"),
+        "detail": "The gateway is accepting payments."
+        if not row.get("kill_switch") else "The company gateway is paused — try again later.",
+    })
+
+    return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
 
 def clean_communication_sender(channel, value):
@@ -637,14 +753,16 @@ def public_payment(row):
         "environment": row["environment"],
         "accountType": row["account_type"],
         "shortCode": row["short_code"],
-        "consumerKey": masked_secret(row["consumer_key"]),
-        "consumerSecret": masked_secret(row["consumer_secret"]),
-        "passkey": masked_secret(row["passkey"]),
+        "consumerKey": saved_flag(row["consumer_key"]),
+        "consumerSecret": saved_flag(row["consumer_secret"]),
+        "passkey": saved_flag(row["passkey"]),
         "callbackUrl": row.get("callback_url") or "",
         "confirmationUrl": row.get("confirmation_url") or "",
         "validationUrl": row.get("validation_url") or "",
         "initiatorName": row.get("initiator_name") or "",
-        "securityCredential": masked_secret(row.get("security_credential") or ""),
+        "securityCredential": saved_flag(row.get("security_credential") or ""),
+        "initiatorPassword": saved_flag(row.get("initiator_password_enc") or ""),
+        "payoutShortcode": row.get("payout_shortcode") or "",
         "updatedAt": stamp(row["updated_at"]) or str(row["updated_at"]),
     }
 
@@ -1113,10 +1231,16 @@ def ensure_schema():
                   download_mbps INT NOT NULL,
                   upload_mbps INT NOT NULL,
                   active TINYINT NOT NULL DEFAULT 0,
+                  account_number VARCHAR(64) NOT NULL DEFAULT '',
                   UNIQUE KEY uq_wan_uplink (device_id, interface_name)
                 )
                 """
             )
+            cursor.execute("SHOW COLUMNS FROM isp_wan_uplinks LIKE 'account_number'")
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    "ALTER TABLE isp_wan_uplinks ADD COLUMN account_number VARCHAR(64) NOT NULL DEFAULT ''"
+                )
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS isp_wan_audit (
@@ -1506,6 +1630,8 @@ def ensure_schema():
             )
             router_jobs.ensure_tables(cursor)
             pppoe_store.ensure_schema(cursor)
+            gateway_store.ensure_schema(cursor)
+            gateway_store.backfill_gateway_modes(cursor)
     finally:
         db.close()
 
@@ -1821,6 +1947,47 @@ def require_reviewer(cursor, employee_token):
         raise ApiError(403, "Only a signed-in Director can review accounts.")
 
 
+def require_director(cursor, employee_token, subject="the company gateway"):
+    """Director-only gate for the pooled-collection gateway. Other company
+    settings may be read by any approved employee; money movement may not."""
+    employee_id = session_account_id(cursor, employee_token, "employee")
+    if not employee_id:
+        raise ApiError(401, f"Sign in to the employee account before managing {subject}.")
+    cursor.execute("SELECT status, role FROM isp_employees WHERE id = %s", (employee_id,))
+    employee = cursor.fetchone()
+    if not employee or employee["status"] != "approved":
+        raise ApiError(403, f"An approved employee account is required to manage {subject}.")
+    if (employee["role"] or "") != "director":
+        raise ApiError(403, f"Only a signed-in Director can manage {subject}.")
+    return employee_id
+
+
+def session_opened_by(cursor, token):
+    """Employee id when this client session was opened by staff via the
+    director's "enter client portal" action — such sessions are read-only."""
+    if not token:
+        return None
+    cursor.execute(
+        "SELECT opened_by FROM isp_sessions WHERE token = %s AND account_kind = 'client'",
+        (token,),
+    )
+    row = cursor.fetchone()
+    return (row or {}).get("opened_by")
+
+
+def require_owner_client(cursor, token, subject="payment settings"):
+    """The ISP owner's own session — staff-opened sessions may read but
+    never change destination, timing, or gateway mode."""
+    client_id = session_account_id(cursor, token, "client")
+    if not client_id:
+        raise ApiError(401, f"Sign in to the ISP client account before managing {subject}.")
+    if not approved_account(cursor, "isp_clients", client_id):
+        raise ApiError(403, "That account is still waiting for approval.")
+    if session_opened_by(cursor, token):
+        raise ApiError(403, f"Only the account owner can change {subject}.")
+    return client_id
+
+
 HOTSPOT_PREVIEW_TOKENS = {
     "ip": "10.5.50.23",
     "mac": "8A:4F:7D:2C:91:B6",
@@ -2049,7 +2216,7 @@ class Handler(BaseHTTPRequestHandler):
             if method == "GET" and not path.startswith("/api/"):
                 status = self.serve_static(path)
                 return
-            bucket = "callback" if path == "/api/daraja/callback" else ("auth" if path in AUTH_PATHS else "api")
+            bucket = "callback" if path.startswith("/api/daraja/") else ("auth" if path in AUTH_PATHS else "api")
             if not rate_ok((bucket, request_ip(self)), *RATE_RULES[bucket]):
                 raise ApiError(429, "Too many requests. Wait a moment and try again.")
             payload = self.read_json() if method == "POST" else {}
@@ -2140,6 +2307,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.read_company_payments(cursor, token.get("isp_employee_session")), None
         if method == "POST" and path == "/api/employee/company/payments":
             return self.save_company_payments(cursor, payload, token.get("isp_employee_session")), None
+        if method == "POST" and path == "/api/employee/company/payments/test":
+            return {"test": self.test_company_payments(cursor, payload, token.get("isp_employee_session"))}, None
+        if path.startswith("/api/employee/company/gateway"):
+            return self.company_gateway(cursor, method, path, payload, query, token), None
         if method == "GET" and path == "/api/employee/company/communications":
             return self.read_company_communications(cursor, token.get("isp_employee_session")), None
         if method == "POST" and path == "/api/employee/company/communications":
@@ -2173,6 +2344,17 @@ class Handler(BaseHTTPRequestHandler):
                 if not supplied or not hmac.compare_digest(supplied, expected):
                     raise ApiError(403, "That callback was not recognised.")
             return {"callback": pppoe_store.record_daraja_callback(cursor, payload)}, None
+        routed = gateway_callbacks.route(path) if method == "POST" else None
+        if routed:
+            # /api/daraja/<callback_secret>/<endpoint> — an unknown secret or
+            # endpoint is indistinguishable from a nonexistent path.
+            secret, endpoint = routed
+            if not gateway_callbacks.secret_ok(cursor, secret):
+                raise ApiError(404, "Not found.")
+            event_id = gateway_callbacks.handle(cursor, endpoint, payload)
+            if event_id:
+                gateway_callbacks.enqueue(connect, endpoint, payload, event_id)
+            return gateway_callbacks.ACK, None
         if method == "GET" and path == "/api/health":
             return self.health(cursor), None
         if method == "GET" and path == "/api/dashboard/summary":
@@ -2282,6 +2464,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.save_payments(cursor, payload, token.get("isp_client_session")), None
         if method == "POST" and path == "/api/payments/test":
             return {"test": self.test_payments(cursor, payload, token.get("isp_client_session"))}, None
+        if path.startswith("/api/gateway"):
+            return self.isp_gateway(cursor, method, path, payload, query, token), None
         if method == "GET" and path == "/api/communications":
             return self.read_communications(cursor, token.get("isp_client_session")), None
         if method == "POST" and path == "/api/communications":
@@ -2600,6 +2784,57 @@ class Handler(BaseHTTPRequestHandler):
         for item in cursor.fetchall():
             service = item["service"] if item["service"] in usage else "pppoe"
             usage[service] = {"bytesIn": int(item["bytes_in"] or 0), "bytesOut": int(item["bytes_out"] or 0)}
+        cursor.execute(
+            """
+            SELECT d.id, d.name, d.site, d.tunnel_status, s.service,
+                   COUNT(DISTINCT s.id) AS subscribers,
+                   COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
+                   COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
+            FROM isp_mikrotik_devices d
+            LEFT JOIN pppoe_subscribers s ON s.router_id = d.id AND s.client_id = d.client_id
+            LEFT JOIN radacct a ON a.username = s.pppoe_username AND a.acctstarttime >= CURDATE()
+            WHERE d.client_id = %s
+            GROUP BY d.id, d.name, d.site, d.tunnel_status, s.service
+            """,
+            (client_id,),
+        )
+        usage_by_router = {}
+        for item in cursor.fetchall():
+            entry = usage_by_router.setdefault(
+                item["id"],
+                {
+                    "id": item["id"],
+                    "name": item["name"],
+                    "site": item["site"] or "",
+                    "tunnelStatus": item["tunnel_status"] or "unknown",
+                    "subscribers": 0,
+                    "openSessions": 0,
+                    "pppoe": {"bytesIn": 0, "bytesOut": 0},
+                    "hotspot": {"bytesIn": 0, "bytesOut": 0},
+                },
+            )
+            entry["subscribers"] += int(item["subscribers"] or 0)
+            service = item["service"] if item["service"] in usage else "pppoe"
+            entry[service] = {"bytesIn": int(item["bytes_in"] or 0), "bytesOut": int(item["bytes_out"] or 0)}
+        cursor.execute(
+            """
+            SELECT s.router_id, COUNT(*) AS open_sessions
+            FROM pppoe_subscribers s
+            JOIN radacct a ON a.username = s.pppoe_username AND a.acctstoptime IS NULL
+            WHERE s.client_id = %s
+            GROUP BY s.router_id
+            """,
+            (client_id,),
+        )
+        for item in cursor.fetchall():
+            entry = usage_by_router.get(item["router_id"])
+            if entry is not None:
+                entry["openSessions"] = int(item["open_sessions"] or 0)
+        routers_usage = list(usage_by_router.values())
+        for entry in routers_usage:
+            entry["bytesIn"] = entry["pppoe"]["bytesIn"] + entry["hotspot"]["bytesIn"]
+            entry["bytesOut"] = entry["pppoe"]["bytesOut"] + entry["hotspot"]["bytesOut"]
+        routers_usage.sort(key=lambda item: item["bytesIn"] + item["bytesOut"], reverse=True)
         return {
             "generatedAt": datetime.now().isoformat(sep=" ", timespec="seconds"),
             "source": "database",
@@ -2618,6 +2853,7 @@ class Handler(BaseHTTPRequestHandler):
             },
             "clients": pppoe_service.tally_client_analysis(clients, datetime.now().date()),
             "usageToday": usage,
+            "usageByRouter": routers_usage,
         }
 
     def list_mikrotiks(self, cursor, token, query):
@@ -2693,7 +2929,7 @@ class Handler(BaseHTTPRequestHandler):
         settings = cursor.fetchone()
         cursor.execute(
             """
-            SELECT interface_name, provider, method, gateway, download_mbps, upload_mbps, active
+            SELECT interface_name, provider, method, gateway, download_mbps, upload_mbps, active, account_number
             FROM isp_wan_uplinks
             WHERE device_id = %s AND client_id = %s
             ORDER BY interface_name
@@ -2709,6 +2945,7 @@ class Handler(BaseHTTPRequestHandler):
                 "downloadMbps": row["download_mbps"],
                 "uploadMbps": row["upload_mbps"],
                 "active": bool(row["active"]),
+                "accountNumber": row["account_number"] or "",
                 "eligible": True,
             }
             for row in cursor.fetchall()
@@ -2773,8 +3010,9 @@ class Handler(BaseHTTPRequestHandler):
                 cursor.execute(
                     """
                     INSERT INTO isp_wan_uplinks (
-                      id, client_id, device_id, interface_name, provider, method, gateway, download_mbps, upload_mbps, active
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      id, client_id, device_id, interface_name, provider, method, gateway,
+                      download_mbps, upload_mbps, active, account_number
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         str(uuid.uuid4()),
@@ -2787,6 +3025,7 @@ class Handler(BaseHTTPRequestHandler):
                         item["downloadMbps"],
                         item["uploadMbps"],
                         1 if item["active"] else 0,
+                        item["accountNumber"],
                     ),
                 )
             saved = self.read_wan(cursor, device_id, token)
@@ -4117,8 +4356,25 @@ class Handler(BaseHTTPRequestHandler):
                         "open": not ended,
                     }
                 )
+        items += self._gateway_feed_items(cursor, "client", client_id=client_id)
         items.sort(key=lambda item: item["at"] or "", reverse=True)
         return {"notifications": items[:50]}
+
+    def _gateway_feed_items(self, cursor, audience, client_id=None):
+        """Gateway notices merged into the existing feeds — same item shape."""
+        items = []
+        for row in gateway_notify.feed_items(cursor, audience, client_id=client_id, limit=50):
+            items.append(
+                {
+                    "id": f"gateway-{row['id']}",
+                    "kind": "gateway",
+                    "subject": row["subject"],
+                    "detail": row["detail"],
+                    "at": stamp(row["created_at"]),
+                    "open": False,
+                }
+            )
+        return items
 
     def require_company_client(self, cursor, token):
         client_id = session_account_id(cursor, token, "client")
@@ -4199,7 +4455,7 @@ class Handler(BaseHTTPRequestHandler):
         }
 
     def save_payments(self, cursor, payload, token):
-        client_id = self.require_payment_client(cursor, token)
+        client_id = require_owner_client(cursor, token, "payment settings")
         mode = str(payload.get("mode", "")).strip()
         if mode not in {"own", "company"}:
             raise ApiError(400, "Choose your Daraja API or the company payment settings.")
@@ -4247,13 +4503,21 @@ class Handler(BaseHTTPRequestHandler):
             """,
             (client_id, mode),
         )
+        # Credentials saved through this page are the ISP's own stored rows —
+        # keep gateway_mode on own_daraja so the portal keeps collecting with
+        # them exactly as before. A company_gateway opt-in is never downgraded
+        # here; it changes only through the payout settings flow.
+        cursor.execute(
+            """
+            INSERT INTO isp_payout_settings (client_id, gateway_mode) VALUES (%s, 'own_daraja')
+            ON DUPLICATE KEY UPDATE
+              gateway_mode = IF(gateway_mode = 'company_gateway', gateway_mode, 'own_daraja')
+            """,
+            (client_id,),
+        )
         return self.read_payments(cursor, token)
 
     def test_payments(self, cursor, payload, token):
-        import urllib.request
-        import urllib.error
-        import base64
-
         client_id = self.require_payment_client(cursor, token)
         mode = str(payload.get("mode", "")).strip()
         if mode not in {"own", "company"}:
@@ -4276,29 +4540,7 @@ class Handler(BaseHTTPRequestHandler):
         secret = open_secret(field("consumerSecret", "consumer_secret"))
         if not key or not secret:
             return {"connected": False, "reason": "Enter the consumer key and secret, or save the Daraja details first."}
-        host = "https://api.safaricom.co.ke" if environment == "live" else "https://sandbox.safaricom.co.ke"
-        request = urllib.request.Request(
-            f"{host}/oauth/v1/generate?grant_type=client_credentials",
-            headers={"Authorization": "Basic " + base64.b64encode(f"{key}:{secret}".encode()).decode()},
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=8) as response:
-                body = json.loads(response.read().decode() or "{}")
-        except urllib.error.HTTPError as error:
-            detail = ""
-            try:
-                detail = str(json.loads(error.read().decode() or "{}").get("errorMessage") or "").strip()
-            except (ValueError, OSError):
-                detail = ""
-            suffix = f": {detail}" if detail else ""
-            if error.code in (400, 401, 403):
-                return {"connected": False, "reason": f"Daraja rejected the credentials ({error.code}{suffix}). Check the consumer key, secret, and environment."}
-            return {"connected": False, "reason": f"Daraja answered with an error ({error.code}{suffix}). Try again shortly."}
-        except (urllib.error.URLError, OSError, ValueError) as error:
-            return {"connected": False, "reason": f"Daraja could not be reached: {getattr(error, 'reason', error)}."}
-        if body.get("access_token"):
-            return {"connected": True, "reason": ""}
-        return {"connected": False, "reason": "Daraja answered but returned no access token."}
+        return daraja_oauth_probe(environment, key, secret)
 
     def require_package_client(self, cursor, token):
         client_id = session_account_id(cursor, token, "client")
@@ -4558,7 +4800,8 @@ class Handler(BaseHTTPRequestHandler):
     def company_daraja_row(self, cursor):
         cursor.execute(
             """
-            SELECT environment, account_type, short_code, consumer_key, consumer_secret, passkey
+            SELECT environment, account_type, short_code, consumer_key, consumer_secret, passkey,
+                   initiator_name, initiator_password_enc, payout_shortcode, updated_at
             FROM company_daraja_settings
             WHERE id = 1
             """
@@ -4576,29 +4819,77 @@ class Handler(BaseHTTPRequestHandler):
         return cursor.fetchone()
 
     def read_company_payments(self, cursor, token):
-        self.require_company_employee(cursor, token, "company payments")
+        require_director(cursor, token, "company payments")
+        daraja = public_payment(self.company_daraja_row(cursor))
+        if daraja is not None:
+            # The callback secret is shown only here — the only endpoint a
+            # director can reach — never on any other settings read.
+            secret = gateway_store.ensure_callback_secret(cursor)
+            base = (os.environ.get("ISP_GATEWAY_PUBLIC_URL") or "").strip().rstrip("/")
+            prefix = f"{base}/api/daraja/{secret}" if base else ""
+            daraja["callbackSecret"] = secret
+            daraja["callbackBase"] = base
+            daraja["callbackUrls"] = {
+                name: f"{prefix}/{path}" if prefix else ""
+                for name, path in (
+                    ("stk", "stk"),
+                    ("c2bValidation", "c2b/validation"),
+                    ("c2bConfirmation", "c2b/confirmation"),
+                    ("b2cResult", "b2c/result"),
+                    ("b2cTimeout", "b2c/timeout"),
+                    ("b2bResult", "b2b/result"),
+                    ("b2bTimeout", "b2b/timeout"),
+                    ("accountBalance", "account-balance"),
+                )
+            }
         return {
-            "daraja": public_payment(self.company_daraja_row(cursor)),
+            "daraja": daraja,
             "other": public_other_gateway(self.company_other_gateway_row(cursor)),
         }
 
     def save_company_payments(self, cursor, payload, token):
-        self.require_company_employee(cursor, token, "company payments", write=True)
+        require_director(cursor, token, "company payments")
         gateway = str(payload.get("gateway", "")).strip()
         if gateway == "daraja":
-            fields = clean_daraja(payload.get("daraja") or {}, self.company_daraja_row(cursor))
+            import daraja_client
+
+            previous = self.company_daraja_row(cursor)
+            fields = clean_daraja(payload.get("daraja") or {}, previous)
+            daraja = payload.get("daraja") or {}
+            initiator_name = optional_text(
+                daraja.get("initiatorName"), "Enter the Daraja initiator name.", 60
+            )
+            initiator_password = keep_optional_secret(
+                daraja.get("initiatorPassword"),
+                (previous or {}).get("initiator_password_enc"),
+                "Enter the Daraja initiator password.",
+                8,
+                255,
+            )
+            payout_shortcode = str(daraja.get("payoutShortcode") or "").strip()
+            if payout_shortcode:
+                try:
+                    payout_shortcode = daraja_client.validate_shortcode(
+                        payout_shortcode, "payout shortcode"
+                    )
+                except daraja_client.DarajaError as error:
+                    raise ApiError(400, str(error))
             cursor.execute(
                 """
                 INSERT INTO company_daraja_settings (
-                  id, environment, account_type, short_code, consumer_key, consumer_secret, passkey
-                ) VALUES (1, %s, %s, %s, %s, %s, %s)
+                  id, environment, account_type, short_code, consumer_key, consumer_secret, passkey,
+                  initiator_name, initiator_password_enc, payout_shortcode
+                ) VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                   environment = VALUES(environment),
                   account_type = VALUES(account_type),
                   short_code = VALUES(short_code),
                   consumer_key = VALUES(consumer_key),
                   consumer_secret = VALUES(consumer_secret),
-                  passkey = VALUES(passkey)
+                  passkey = VALUES(passkey),
+                  initiator_name = VALUES(initiator_name),
+                  initiator_password_enc = VALUES(initiator_password_enc),
+                  payout_shortcode = VALUES(payout_shortcode)
                 """,
                 (
                     fields["environment"],
@@ -4607,6 +4898,9 @@ class Handler(BaseHTTPRequestHandler):
                     fields["consumer_key"],
                     seal_secret(open_secret(fields["consumer_secret"])),
                     seal_secret(open_secret(fields["passkey"])),
+                    initiator_name,
+                    seal_secret(open_secret(initiator_password)),
+                    payout_shortcode,
                 ),
             )
             return self.read_company_payments(cursor, token)
@@ -4634,6 +4928,158 @@ class Handler(BaseHTTPRequestHandler):
             )
             return self.read_company_payments(cursor, token)
         raise ApiError(400, "Choose the company Daraja API or the other payment gateway.")
+
+    def test_company_payments(self, cursor, payload, token):
+        require_director(cursor, token, "company payments")
+        row = self.company_daraja_row(cursor) or {}
+        submitted = payload.get("daraja") or {}
+
+        def field(name, column):
+            text = str(submitted.get(name) or "").strip()
+            if text and not text.startswith("••••"):
+                return text
+            return str(row.get(column) or "")
+
+        environment = str(submitted.get("environment") or "").strip()
+        if environment not in {"sandbox", "live"}:
+            environment = str(row.get("environment") or "")
+        if environment not in {"sandbox", "live"}:
+            return {"connected": False, "reason": "Choose whether these are sandbox or live credentials."}
+        key = field("consumerKey", "consumer_key")
+        secret = open_secret(field("consumerSecret", "consumer_secret"))
+        if not key or not secret:
+            return {"connected": False, "reason": "Enter the consumer key and secret, or save the Daraja details first."}
+        return daraja_oauth_probe(environment, key, secret)
+
+    # --- Company gateway (director-only custody & ops) ---------------------------
+
+    def company_gateway(self, cursor, method, path, payload, query, token):
+        """/api/employee/company/gateway/* — every route needs a director
+        session; there is no employee-readable variant of pooled money."""
+        employee_id = require_director(cursor, token.get("isp_employee_session"))
+        leaf = path.removeprefix("/api/employee/company/gateway").strip("/")
+        if method == "GET":
+            handlers = {
+                "overview": lambda: gateway_api.overview(cursor),
+                "clients": lambda: gateway_api.clients(cursor),
+                "payments": lambda: gateway_api.payments(cursor, query),
+                "payouts": lambda: gateway_api.payouts(cursor, query),
+                "batches": lambda: gateway_api.batches(cursor, query),
+                "ledger": lambda: gateway_api.ledger(cursor, query),
+                "suspense": lambda: gateway_api.suspense(cursor),
+                "pending-changes": lambda: gateway_api.pending_changes(cursor),
+                "audit": lambda: gateway_api.audit(cursor, query),
+                "notifications": lambda: gateway_api.notifications(cursor, query),
+                "settings": lambda: gateway_api.settings_view(cursor),
+                "charges": lambda: gateway_api.charges_view(cursor),
+            }
+            if leaf == "export":
+                kind = (query.get("kind") or [""])[0]
+                result, error = gateway_api.export_csv(cursor, kind, query)
+                if error:
+                    raise ApiError(400, error)
+                return result
+            handler = handlers.get(leaf)
+            if handler:
+                return handler()
+        if method == "POST" and leaf == "suspense/assign":
+            # Attribute an unmatched payment — multi-statement, so one
+            # transaction wraps the claim + ledger + audit.
+            connection = cursor.connection
+            connection.autocommit(False)
+            try:
+                payment_id = str(payload.get("paymentId") or "")
+                result, error = gateway_api.assign_suspense(
+                    cursor, payment_id, payload, employee_id)
+                if error:
+                    raise ApiError(400, error)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.autocommit(True)
+            return result
+        if method == "POST" and leaf in ("settings", "payouts/check", "payouts/mark-failed", "charges"):
+            # Gateway ops writes — one transaction wraps the update + audit.
+            connection = cursor.connection
+            connection.autocommit(False)
+            try:
+                if leaf == "settings":
+                    result, error = gateway_api.save_company_gateway(
+                        cursor, payload, employee_id)
+                elif leaf == "charges":
+                    result, error = gateway_api.save_charges(
+                        cursor, payload, employee_id)
+                elif leaf == "payouts/check":
+                    result, error = gateway_api.check_payout(
+                        cursor, str(payload.get("payoutId") or ""), employee_id)
+                else:
+                    result, error = gateway_api.mark_payout_failed(
+                        cursor, str(payload.get("payoutId") or ""), employee_id)
+                if error:
+                    raise ApiError(400, error)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.autocommit(True)
+            return result
+        raise ApiError(404, "Not found.")
+
+    # --- ISP gateway (own ledger portal) --------------------------------------------
+
+    def isp_gateway(self, cursor, method, path, payload, query, token):
+        """/api/gateway/* — the ISP's own custody view. Reads need any
+        approved client session; the settings write is owner-only and needs
+        the account password again."""
+        client_id = self.require_payment_client(cursor, token.get("isp_client_session"))
+        leaf = path.removeprefix("/api/gateway").strip("/")
+        if method == "GET":
+            handlers = {
+                "summary": lambda: gateway_api.isp_summary(cursor, client_id),
+                "settings": lambda: {
+                    **gateway_api.isp_settings(cursor, client_id),
+                    "readOnly": bool(session_opened_by(cursor, token.get("isp_client_session"))),
+                },
+                "settings/check": lambda: gateway_precheck(cursor),
+                "payments": lambda: gateway_api.isp_payments(cursor, client_id, query),
+                "payouts": lambda: gateway_api.isp_payouts(cursor, client_id, query),
+                "ledger": lambda: gateway_api.isp_ledger(cursor, client_id, query),
+                "notifications": lambda: gateway_api.isp_notifications(cursor, client_id, query),
+            }
+            handler = handlers.get(leaf)
+            if handler:
+                return handler()
+        if method == "POST" and leaf == "settings":
+            require_owner_client(cursor, token.get("isp_client_session"), "payout settings")
+            password = str(payload.get("password") or "")
+            cursor.execute(
+                "SELECT password_salt, password_hash FROM isp_clients WHERE id = %s",
+                (client_id,),
+            )
+            account = cursor.fetchone() or {}
+            if not password or not verify_password(
+                password, account.get("password_salt") or "0" * 32,
+                account.get("password_hash") or "",
+            ):
+                raise ApiError(403, "Re-enter the account password to change payout settings.")
+            connection = cursor.connection
+            connection.autocommit(False)
+            try:
+                result, error = gateway_api.save_isp_settings(
+                    cursor, client_id, payload, actor_id=client_id)
+                if error:
+                    raise ApiError(400, error)
+                connection.commit()
+            except Exception:
+                connection.rollback()
+                raise
+            finally:
+                connection.autocommit(True)
+            return result
+        raise ApiError(404, "Not found.")
 
     def company_communication_rows(self, cursor):
         cursor.execute("SELECT channel, endpoint, sender, api_key FROM company_communication_settings")
@@ -4824,6 +5270,7 @@ class Handler(BaseHTTPRequestHandler):
                         "open": not ended,
                     }
                 )
+        items += self._gateway_feed_items(cursor, "company")
         items.sort(key=lambda item: item["at"] or "", reverse=True)
         return {"notifications": items[:50]}
 
@@ -5393,6 +5840,44 @@ def reconcile_loop():
             print(f"event=reconcile error={error}", flush=True)
 
 
+def radius_sweep_loop():
+    """Retire radacct rows whose NAS stopped accounting — a powered-off router
+    never sends Stop, and without a sweep stale rows pin subscribers 'surfing'."""
+    interval = max(15, int(os.environ.get("ISP_RADIUS_SWEEP_SECONDS", "60")))
+    while True:
+        time.sleep(interval)
+        try:
+            radius_server.sweep_stale_sessions(connect)
+        except Exception as error:
+            print(f"event=radius-sweep error={error}", flush=True)
+
+
+def gateway_sweep_loop():
+    """Resolve pooled STK payments whose phones stopped polling — verify with
+    Daraja, credit the confirmed ones, expire the abandoned ones."""
+    interval = max(30, int(os.environ.get("ISP_GATEWAY_SWEEP_SECONDS", "60")))
+    while True:
+        time.sleep(interval)
+        try:
+            gateway_callbacks.sweep(connect)
+        except Exception as error:
+            print(f"event=gateway-sweep error={error}", flush=True)
+
+
+def gateway_settlement_loop():
+    """Turn confirmed pooled collections into queued settlement payouts —
+    one run per minute, one instance at a time via a MySQL GET_LOCK."""
+    interval = max(15, int(os.environ.get("ISP_GATEWAY_SETTLE_SECONDS", "60")))
+    while True:
+        time.sleep(interval)
+        try:
+            gateway_settle.settlement_tick(
+                connect, client_factory=gateway_settle.company_client
+            )
+        except Exception as error:
+            print(f"event=gateway-settle error={error}", flush=True)
+
+
 def reconcile_all(connect):
     with connect() as db:
         with db.cursor() as cursor:
@@ -5424,11 +5909,16 @@ def _mark_tunnel(connect, device, status):
                 )
 
 
+_PROBE_FAILURES = {}
+
+
 def reconcile_device(connect, device):
     """Re-assert enabled features after a deploy, reboot, or tunnel outage.
 
     Reads the router first and only pushes what is missing, so a healthy
     router is never touched and live PPP sessions are not kicked needlessly.
+    tunnel_status only flips to 'down' after two consecutive failed loops —
+    one congested interval must not reap radacct rows or mark clients offline.
     """
     try:
         password = routeros_api.open_password(device["api_secret"])
@@ -5450,9 +5940,17 @@ def reconcile_device(connect, device):
                 print(f"event=reconcile device={device['name']} api-error={error}", flush=True)
                 return
     if state is None:
-        _mark_tunnel(connect, device, "down")
+        _PROBE_FAILURES[device["id"]] = _PROBE_FAILURES.get(device["id"], 0) + 1
+        if _PROBE_FAILURES[device["id"]] >= 2:
+            _mark_tunnel(connect, device, "down")
         return
+    _PROBE_FAILURES.pop(device["id"], None)
     _mark_tunnel(connect, device, "up")
+    if state.get("read_failed"):
+        # /login answered but a /print did not — the "missing" features cannot
+        # be trusted, and re-applying enforcement would flush every live PPP
+        # session. Leave the state for the next loop instead.
+        return
     changes = []
     if device.get("pppoe_enforced") and not state["pppoe"]:
         try:
@@ -5514,6 +6012,13 @@ def main():
             flush=True,
         )
     ensure_schema()
+    try:
+        resealed = gateway_store.reseal_stored_secrets(connect)
+        if resealed:
+            print(f"event=gateway-reseal updated={resealed}", flush=True)
+    except Exception as error:
+        # Non-fatal — readers open both formats; the next start retries.
+        print(f"event=gateway-reseal error={type(error).__name__} {error}", flush=True)
     import threading
     import wg_host
 
@@ -5521,6 +6026,9 @@ def main():
     threading.Thread(target=publish_tunnel_peers_later, daemon=True).start()
     threading.Thread(target=pppoe_sweep_loop, daemon=True, name="pppoe-sweep").start()
     threading.Thread(target=reconcile_loop, daemon=True, name="reconcile").start()
+    threading.Thread(target=radius_sweep_loop, daemon=True, name="radius-sweep").start()
+    threading.Thread(target=gateway_sweep_loop, daemon=True, name="gateway-sweep").start()
+    threading.Thread(target=gateway_settlement_loop, daemon=True, name="gateway-settle").start()
     router_jobs.start_worker(connect)
     radius_server.start(connect)
     try:

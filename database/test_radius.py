@@ -145,30 +145,24 @@ class AuthenticateTests(unittest.TestCase):
         self.assertTrue(cursor.updated)
         self.assertEqual(response[0], radius_server.ACCESS_ACCEPT)
 
-    def test_busy_account_disconnects_the_dead_session_instead_of_rejecting(self):
-        sent = []
-        original = radius_server.disconnect_session
-        radius_server.disconnect_session = lambda *args: sent.append(args)
-        try:
-            cursor = FakeCursor(
-                open_count=1,
-                sessions=[
-                    {
-                        "radacctid": 7,
-                        "username": USERNAME,
-                        "nasipaddress": "10.88.0.2",
-                        "acctsessionid": "session-1",
-                        "framedipaddress": "10.10.0.5",
-                    }
-                ],
-            )
-            response = radius_server.authenticate(cursor, pap_packet(PASSWORD), "10.88.0.2")
-            self.assertEqual(response[0], radius_server.ACCESS_ACCEPT)
-            self.assertEqual(len(sent), 1)
-            self.assertEqual(sent[0][:3], ("10.88.0.2", SECRET, USERNAME))
-            self.assertTrue(cursor.updated)
-        finally:
-            radius_server.disconnect_session = original
+    def test_busy_account_closes_the_dead_session_without_a_disconnect_request(self):
+        # The auth path never PoDs — a radacct row is only a guess, and a stale
+        # Acct-Session-Id can collide with a live session after a NAS reboot.
+        cursor = FakeCursor(
+            open_count=1,
+            sessions=[
+                {
+                    "radacctid": 7,
+                    "username": USERNAME,
+                    "nasipaddress": "10.88.0.2",
+                    "acctsessionid": "session-1",
+                    "framedipaddress": "10.10.0.5",
+                }
+            ],
+        )
+        response = radius_server.authenticate(cursor, pap_packet(PASSWORD), "10.88.0.2")
+        self.assertEqual(response[0], radius_server.ACCESS_ACCEPT)
+        self.assertTrue(cursor.updated)
 
     def test_realm_suffix_matches_the_base_username(self):
         packet = pap_packet(PASSWORD)
@@ -193,30 +187,24 @@ class AuthenticateTests(unittest.TestCase):
         response = radius_server.authenticate(cursor, pap_packet(PASSWORD), "10.88.0.2")
         self.assertEqual(response[0], radius_server.ACCESS_ACCEPT)
 
-    def test_wrong_router_attempt_does_not_kick_the_live_session(self):
-        sent = []
-        original = radius_server.disconnect_session
-        radius_server.disconnect_session = lambda *args: sent.append(args)
-        try:
-            cursor = FakeCursor(
-                open_count=1,
-                sessions=[
-                    {
-                        "radacctid": 7,
-                        "username": USERNAME,
-                        "nasipaddress": "10.88.0.2",
-                        "acctsessionid": "session-1",
-                        "framedipaddress": "10.10.0.5",
-                    }
-                ],
-            )
-            cursor.subscriber_router = "router-a"
-            cursor.nas_router = "router-b"
-            response = radius_server.authenticate(cursor, pap_packet(PASSWORD), "10.88.0.9")
-            self.assertEqual(response[0], radius_server.ACCESS_REJECT)
-            self.assertEqual(sent, [])
-        finally:
-            radius_server.disconnect_session = original
+    def test_wrong_router_attempt_does_not_touch_the_live_session(self):
+        cursor = FakeCursor(
+            open_count=1,
+            sessions=[
+                {
+                    "radacctid": 7,
+                    "username": USERNAME,
+                    "nasipaddress": "10.88.0.2",
+                    "acctsessionid": "session-1",
+                    "framedipaddress": "10.10.0.5",
+                }
+            ],
+        )
+        cursor.subscriber_router = "router-a"
+        cursor.nas_router = "router-b"
+        response = radius_server.authenticate(cursor, pap_packet(PASSWORD), "10.88.0.9")
+        self.assertEqual(response[0], radius_server.ACCESS_REJECT)
+        self.assertFalse(cursor.updated)
 
     def test_radius_user_without_a_subscriber_row_still_authenticates(self):
         cursor = FakeCursor()

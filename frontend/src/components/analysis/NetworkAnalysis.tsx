@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import { Activity, CheckCircle2, CircleAlert, CircleMinus } from "lucide-react";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 import { useSavedQuery } from "@/hooks/useSavedQuery";
 import { clientPage } from "@/lib/accounts";
 import { cn } from "@/lib/cn";
@@ -14,6 +15,19 @@ type ClientCounts = {
 };
 
 type Usage = {
+  bytesIn: number;
+  bytesOut: number;
+};
+
+type RouterUsage = {
+  id: string;
+  name: string;
+  site: string;
+  tunnelStatus: string;
+  subscribers: number;
+  openSessions: number;
+  pppoe: Usage;
+  hotspot: Usage;
   bytesIn: number;
   bytesOut: number;
 };
@@ -38,6 +52,7 @@ type Summary = {
       pppoe: Usage;
       hotspot: Usage;
     };
+    usageByRouter?: RouterUsage[];
   };
 };
 
@@ -239,6 +254,87 @@ export function NetworkAnalysis() {
           />
         </div>
       </section>
+      <section>
+        <div className="flex flex-wrap items-end justify-between gap-2">
+          <h2 className="text-sm font-semibold">Usage per MikroTik</h2>
+          <p className="text-xs text-muted-foreground">Sessions that started today, grouped by router</p>
+        </div>
+        <RouterUsageList routers={summary?.usageByRouter} loading={loading && !summary} home={home} />
+      </section>
     </div>
+  );
+}
+
+function RouterUsageList({
+  routers,
+  loading,
+  home,
+}: {
+  routers: RouterUsage[] | undefined;
+  loading: boolean;
+  home: (path: string) => string;
+}) {
+  if (loading) {
+    return (
+      <div className="panel mt-3 px-4 py-6" aria-hidden="true">
+        <div className="grid gap-3">
+          <div className="skeleton h-4 w-1/3" />
+          <div className="skeleton h-4 w-2/5" />
+          <div className="skeleton h-4 w-1/4" />
+        </div>
+      </div>
+    );
+  }
+  if (!routers) return null;
+  if (routers.length === 0) {
+    return (
+      <div className="panel mt-3 px-4 py-10 text-center text-sm text-muted-foreground">No routers are saved yet.</div>
+    );
+  }
+  const peak = Math.max(1, ...routers.map((router) => router.bytesIn + router.bytesOut));
+  return (
+    <ol className="panel mt-3 divide-y divide-border overflow-hidden">
+      {routers.map((router) => {
+        const total = router.bytesIn + router.bytesOut;
+        const online = router.tunnelStatus === "up";
+        return (
+          <li key={router.id}>
+            <Link
+              to={home(`/mikrotiks/${router.id}`)}
+              className="block px-4 py-3.5 outline-none transition-colors duration-fast ease-out hover:bg-surface-muted/50 focus-visible:bg-surface-muted/50"
+            >
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <p className="truncate text-sm font-semibold">{router.name}</p>
+                    <StatusBadge tone={online ? "online" : "offline"}>{online ? "Online" : "Offline"}</StatusBadge>
+                  </div>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {router.site ? `${router.site} · ` : ""}
+                    {router.subscribers} {router.subscribers === 1 ? "client" : "clients"} · {router.openSessions} surfing
+                  </p>
+                </div>
+                <div className="text-right">
+                  <p className="text-sm font-semibold tabular">{bytes(total)}</p>
+                  <p className="mt-0.5 text-xs text-muted-foreground tabular">
+                    ↓ {bytes(router.bytesIn)} · ↑ {bytes(router.bytesOut)}
+                  </p>
+                </div>
+              </div>
+              <div
+                className="mt-2 h-1.5 rounded-full bg-surface-muted"
+                role="img"
+                aria-label={`${bytes(total)} of ${bytes(peak)}`}
+              >
+                <div
+                  className="h-full rounded-full bg-gradient-brand"
+                  style={{ width: `${Math.max(total > 0 ? 2 : 0, (total / peak) * 100)}%` }}
+                />
+              </div>
+            </Link>
+          </li>
+        );
+      })}
+    </ol>
   );
 }

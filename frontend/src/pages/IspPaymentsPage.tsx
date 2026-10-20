@@ -1,3 +1,4 @@
+import { Check, Landmark, Loader2, LockKeyhole, Send, Smartphone, XCircle } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
@@ -9,7 +10,24 @@ import { ApiRequestError, apiRequest } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useAuth } from "@/providers/AuthProvider";
 
-type PaymentMode = "own" | "company";
+type GatewayMode = "none" | "own_daraja" | "company_gateway";
+
+type SettlementMode = "immediate" | "delayed" | "transactions" | "scheduled";
+
+type PayoutSettings = {
+  gateway_mode: GatewayMode;
+  settlement_mode: SettlementMode;
+  hold_hours: number;
+  settle_every_n_tx: number | null;
+  settle_schedule: { day: string; time: string }[] | null;
+  last_settled_at: string | null;
+  destination_type: "phone" | "paybill" | "till" | null;
+  destination_value: string;
+  account_reference: string;
+  min_payout_override: string | null;
+  pending_change: string | null;
+  pending_change_effective_at: string | null;
+};
 
 type PaymentDraft = {
   environment: "" | "sandbox" | "live";
@@ -43,7 +61,7 @@ type PaymentRecord = {
 type ConnectionCheck = { state: "idle" | "checking" | "ok" | "failed"; reason: string };
 
 type PaymentSettings = {
-  mode: PaymentMode | null;
+  mode: "own" | "company" | null;
   own: PaymentRecord | null;
   company: PaymentRecord | null;
 };
@@ -79,86 +97,64 @@ function draftFrom(record: PaymentRecord | null): PaymentDraft {
   };
 }
 
-const choices: { mode: PaymentMode; title: string; detail: string }[] = [
-  {
-    mode: "own",
-    title: "My Daraja API",
-    detail: "Collect with the consumer key, secret, short code, and passkey for this account.",
-  },
-  {
-    mode: "company",
-    title: "Company payment settings",
-    detail: "Collect with the company Paybill or Till instead of this account’s own Daraja app.",
-  },
-];
-
 export function IspPaymentsPage() {
   const { user, ready } = useAuth();
-  usePageMeta("ISP PAYMENTS SETTINGS — ISP CENTRIC", "Use your Daraja API or the company payment settings.");
-  const [mode, setMode] = useState<PaymentMode>("own");
-  const [drafts, setDrafts] = useState<Record<PaymentMode, PaymentDraft>>({ own: emptyDraft, company: emptyDraft });
-  const [saved, setSaved] = useState<Record<PaymentMode, PaymentRecord | null>>({ own: null, company: null });
-  const [checks, setChecks] = useState<Record<PaymentMode, ConnectionCheck>>({
-    own: { state: "idle", reason: "" },
-    company: { state: "idle", reason: "" },
-  });
-  const [, setSavedMode] = useState<PaymentMode | null>(null);
+  usePageMeta("ISP PAYMENTS SETTINGS — ISP CENTRIC", "Use your Daraja API or let the company collect for you.");
+  const [draft, setDraft] = useState<PaymentDraft>(emptyDraft);
+  const [record, setRecord] = useState<PaymentRecord | null>(null);
+  const [check, setCheck] = useState<ConnectionCheck>({ state: "idle", reason: "" });
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [pending, setPending] = useState(false);
   const [loaded, setLoaded] = useState(false);
+  const [view, setView] = useState<"own" | "company">("own");
+  const [gatewayMode, setGatewayMode] = useState<GatewayMode>("none");
 
-  const testConnection = useCallback((tested: PaymentMode, form?: PaymentDraft) => {
-    setChecks((current) => ({ ...current, [tested]: { state: "checking", reason: "" } }));
+  const testConnection = useCallback((form?: PaymentDraft) => {
+    setCheck({ state: "checking", reason: "" });
     apiRequest<{ test: { connected: boolean; reason: string } }>("/api/payments/test", {
       method: "POST",
       body: JSON.stringify(
         form
           ? {
-              mode: tested,
-              [tested]: {
+              mode: "own",
+              own: {
                 environment: form.environment,
                 consumerKey: form.consumerKey,
                 consumerSecret: form.consumerSecret,
               },
             }
-          : { mode: tested },
+          : { mode: "own" },
       ),
     })
       .then((body) => {
-        setChecks((current) => ({
-          ...current,
-          [tested]: body.test.connected
+        setCheck(
+          body.test.connected
             ? { state: "ok", reason: "" }
             : { state: "failed", reason: body.test.reason },
-        }));
+        );
       })
       .catch((cause: unknown) => {
-        setChecks((current) => ({
-          ...current,
-          [tested]: {
-            state: "failed",
-            reason: cause instanceof ApiRequestError ? cause.message : "The connection test could not be completed.",
-          },
-        }));
+        setCheck({
+          state: "failed",
+          reason: cause instanceof ApiRequestError ? cause.message : "The connection test could not be completed.",
+        });
       });
   }, []);
 
   const apply = useCallback(
     (body: PaymentSettings) => {
-      setSavedMode(body.mode);
-      if (body.mode) setMode(body.mode);
-      setSaved({ own: body.own, company: body.company });
-      setDrafts({ own: draftFrom(body.own), company: draftFrom(body.company) });
+      setRecord(body.own);
+      setDraft(draftFrom(body.own));
       setLoaded(true);
-      if (body.own) testConnection("own");
-      if (body.company) testConnection("company");
+      if (body.own) testConnection();
     },
     [testConnection],
   );
 
+  const userId = user?.id;
   useEffect(() => {
-    if (!user || user.status !== "approved") return;
+    if (!userId) return;
     let stopped = false;
     apiRequest<PaymentSettings>("/api/payments")
       .then((body) => {
@@ -170,13 +166,20 @@ export function IspPaymentsPage() {
           setError(cause instanceof Error ? cause.message : "Payment settings could not be loaded.");
         }
       });
+    apiRequest<{ settings: PayoutSettings }>("/api/gateway/settings")
+      .then((body) => {
+        if (stopped) return;
+        setGatewayMode(body.settings.gateway_mode);
+        if (body.settings.gateway_mode === "company_gateway") setView("company");
+      })
+      .catch(() => undefined);
     return () => {
       stopped = true;
     };
-  }, [apply, user]);
+  }, [apply, userId]);
 
   function update(field: keyof PaymentDraft, value: string) {
-    setDrafts((current) => ({ ...current, [mode]: { ...current[mode], [field]: value } }));
+    setDraft((current) => ({ ...current, [field]: value }));
   }
 
   if (!ready) {
@@ -191,9 +194,6 @@ export function IspPaymentsPage() {
     return <Navigate to="/account" replace />;
   }
 
-  const draft = drafts[mode];
-  const record = saved[mode];
-  const check = checks[mode];
   const statusDot =
     check.state === "ok" ? "bg-success" : check.state === "failed" ? "bg-destructive" : "bg-muted-foreground";
   const statusText =
@@ -211,11 +211,14 @@ export function IspPaymentsPage() {
     return value ? `Saved: ${value} — type to replace` : undefined;
   }
 
+  const pooled = gatewayMode === "company_gateway";
+  const activeView = pooled ? "company" : "own";
+
   return (
     <div className="page-shell py-8">
       <PageHeader
         title="Payments"
-        description="Set up this account’s Daraja API, or use the company payment settings. Saved secrets stay hidden and are kept when you leave those fields unchanged."
+        description="Collect payments with this account's own Daraja API, or opt in to the company gateway below. Saved secrets stay hidden and are kept when you leave those fields unchanged."
       />
       {error ? (
         <p className="mt-4 notice" role="alert">
@@ -227,6 +230,67 @@ export function IspPaymentsPage() {
           {notice}
         </p>
       ) : null}
+      <fieldset className="mt-6 grid max-w-2xl gap-3">
+        <legend className="text-sm font-medium text-foreground">How do you want to collect payments?</legend>
+        <div className="grid gap-3 sm:grid-cols-2">
+          {([
+            {
+              id: "own",
+              title: "My Daraja API",
+              detail: "Collect directly to your own paybill or till.",
+              icon: <Smartphone className="h-5 w-5" aria-hidden="true" />,
+            },
+            {
+              id: "company",
+              title: "Company gateway",
+              detail: "The company collects for you and pays out to your destination.",
+              icon: <Landmark className="h-5 w-5" aria-hidden="true" />,
+            },
+          ] as const).map((option) => {
+            const selected = view === option.id;
+            return (
+              <button
+                key={option.id}
+                type="button"
+                onClick={() => setView(option.id)}
+                aria-pressed={selected}
+                className={cn(
+                  "relative grid gap-2 rounded-2xl border p-4 text-left transition-all duration-fast ease-out",
+                  selected
+                    ? "border-primary bg-primary/5 shadow-glow-sm ring-1 ring-primary/30"
+                    : "border-border bg-surface hover:-translate-y-0.5 hover:border-input hover:shadow-card",
+                )}
+              >
+                <span className="flex items-center justify-between gap-2">
+                  <span
+                    className={cn(
+                      "flex h-9 w-9 items-center justify-center rounded-xl transition-colors",
+                      selected ? "bg-primary text-primary-foreground" : "bg-primary/10 text-primary",
+                    )}
+                  >
+                    {option.icon}
+                  </span>
+                  {selected ? (
+                    <span className="flex h-5 w-5 items-center justify-center rounded-full bg-primary text-primary-foreground">
+                      <Check className="h-3 w-3" aria-hidden="true" />
+                    </span>
+                  ) : null}
+                </span>
+                <span className="flex items-center gap-2 font-semibold">
+                  {option.title}
+                  {activeView === option.id ? (
+                    <span className="rounded-full border border-success-border/60 bg-success-soft/70 px-2 py-0.5 text-caption font-semibold text-success">
+                      Active
+                    </span>
+                  ) : null}
+                </span>
+                <span className="text-sm text-muted-foreground">{option.detail}</span>
+              </button>
+            );
+          })}
+        </div>
+      </fieldset>
+      {view === "own" ? (
       <form
         className="form-card mt-6 max-w-2xl"
         onSubmit={(event) => {
@@ -236,15 +300,12 @@ export function IspPaymentsPage() {
           setPending(true);
           apiRequest<PaymentSettings>("/api/payments", {
             method: "POST",
-            body: JSON.stringify({ mode, [mode]: draft }),
+            body: JSON.stringify({ mode: "own", own: draft }),
           })
             .then((body) => {
               apply(body);
               setError("");
-              setNotice(
-                "Saved — payments now use " +
-                  (mode === "own" ? "this account's Daraja API." : "the company payment settings."),
-              );
+              setNotice("Saved — payments now use this account's Daraja API.");
             })
             .catch((cause: unknown) => {
               setError(cause instanceof Error ? cause.message : "Payment settings could not be saved.");
@@ -252,45 +313,66 @@ export function IspPaymentsPage() {
             .finally(() => setPending(false));
         }}
       >
-        <fieldset className="grid gap-3">
-          <legend className="text-sm font-medium text-foreground">Payment source</legend>
-          {choices.map((choice) => {
-            const selected = mode === choice.mode;
-            return (
-              <label
-                key={choice.mode}
-                className={cn(
-                  "grid cursor-pointer gap-1 rounded-lg border px-3 py-2 transition-colors duration-fast ease-out",
-                  selected ? "border-primary bg-primary/5 shadow-xs" : "border-border hover:border-input hover:bg-surface-muted/50",
-                )}
-              >
-                <span className="flex items-center gap-3">
-                  <input
-                    type="radio"
-                    name="payment-mode"
-                    className="h-4 w-4"
-                    checked={selected}
-                    onChange={() => setMode(choice.mode)}
-                  />
-                  <span className="font-semibold">{choice.title}</span>
-                </span>
-                <span className="pl-7 text-sm text-muted-foreground">{choice.detail}</span>
-              </label>
-            );
-          })}
-        </fieldset>
         <div className="grid gap-4">
-          <h2 className="text-lg font-semibold">{mode === "own" ? "Your Daraja API" : "Company payment settings"}</h2>
-          <div className="grid gap-1">
-            <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status">
-              <span className={cn("h-2.5 w-2.5 rounded-full", statusDot)} aria-hidden="true" />
-              {statusText}
-            </p>
-            {record?.updatedAt ? (
-              <p className="text-xs text-muted-foreground">Last saved {record.updatedAt}</p>
-            ) : null}
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="flex items-center gap-3">
+              <span
+                className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary"
+                aria-hidden="true"
+              >
+                <Smartphone className="h-5 w-5" />
+              </span>
+              <div className="grid gap-0.5">
+                <h2 className="text-lg font-semibold">Your Daraja API</h2>
+                <p className="text-sm text-muted-foreground">Collect directly to your own paybill or till.</p>
+              </div>
+            </div>
+            <div className="grid gap-1 justify-items-end">
+              <p
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-caption font-semibold",
+                  check.state === "ok"
+                    ? "border-success-border/60 bg-success-soft/70 text-success"
+                    : check.state === "failed"
+                      ? "border-destructive-border/60 bg-destructive-soft/60 text-destructive"
+                      : "border-border bg-surface-muted/60 text-muted-foreground",
+                )}
+                role="status"
+              >
+                <span className={cn("h-1.5 w-1.5 rounded-full", statusDot)} aria-hidden="true" />
+                {check.state === "ok"
+                  ? "Connected"
+                  : check.state === "failed"
+                    ? "Not connected"
+                    : check.state === "checking"
+                      ? "Checking…"
+                      : "Not tested"}
+              </p>
+              {record?.updatedAt ? (
+                <p className="text-xs text-muted-foreground">Last saved {record.updatedAt}</p>
+              ) : null}
+            </div>
           </div>
-          <div className="grid gap-4">
+          {pooled ? (
+            <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-info-border/60 bg-info-soft/50 px-4 py-3">
+              <p className="text-sm text-foreground">
+                The company gateway is collecting payments — these credentials stay saved but are not
+                in use until you switch back.
+              </p>
+              <SecondaryButton type="button" onClick={() => setView("company")}>
+                Manage the company gateway
+              </SecondaryButton>
+            </div>
+          ) : null}
+          <fieldset className="grid gap-4" disabled={pooled}>
+          {check.state !== "idle" && check.state !== "ok" ? (
+            <p className="text-sm text-muted-foreground">{statusText}</p>
+          ) : null}
+          <div className="grid gap-1">
+            <h3 className="text-sm font-semibold text-foreground">M-Pesa collections</h3>
+            <p className="text-sm text-muted-foreground">Credentials from your Daraja app.</p>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
             <FormField id="daraja-environment" label="Environment">
               <select
                 id="daraja-environment"
@@ -359,7 +441,7 @@ export function IspPaymentsPage() {
               />
             </FormField>
           </div>
-          <div className="grid gap-4 border-t border-border pt-4">
+          <div className="grid gap-4 rounded-xl border border-border/70 bg-surface-muted/40 p-4">
             <div className="grid gap-1">
               <h3 className="text-sm font-semibold text-foreground">Payment URLs &amp; security</h3>
               <p className="text-sm text-muted-foreground">
@@ -441,20 +523,347 @@ export function IspPaymentsPage() {
               </FormField>
             </div>
           </div>
-          <div className="sticky bottom-3 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-surface/90 px-4 py-3 shadow-card backdrop-blur-md">
+          <div className="sticky bottom-3 flex flex-wrap items-center gap-3 rounded-xl border border-border bg-surface/90 px-4 py-3 shadow-card backdrop-blur-md sm:-mx-1">
             <PrimaryButton type="submit" disabled={pending || !loaded}>
-              {mode === "own" ? "Save my Daraja API" : "Save company payment settings"}
+              Save my Daraja API
             </PrimaryButton>
             <SecondaryButton
               type="button"
               disabled={pending || check.state === "checking"}
-              onClick={() => testConnection(mode, drafts[mode])}
+              onClick={() => testConnection(draft)}
             >
               Test connection
             </SecondaryButton>
           </div>
+          </fieldset>
         </div>
       </form>
+      ) : (
+        <GatewaySettingsCard
+          onModeChange={(mode) => {
+            setGatewayMode(mode);
+            setView(mode === "company_gateway" ? "company" : "own");
+          }}
+        />
+      )}
     </div>
+  );
+}
+
+function GatewaySettingsCard({ onModeChange }: { onModeChange?: (mode: GatewayMode) => void }) {
+  const [settings, setSettings] = useState<PayoutSettings | null>(null);
+  const [readOnly, setReadOnly] = useState(false);
+  const [destinationValue, setDestinationValue] = useState("");
+  const [shortcodeKind, setShortcodeKind] = useState<"paybill" | "till" | "">("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
+  const [pending, setPending] = useState(false);
+  const [loaded, setLoaded] = useState(false);
+  const [checkState, setCheckState] = useState<"idle" | "checking" | "ok" | "failed">("idle");
+  const [checks, setChecks] = useState<{ key: string; ok: boolean; detail: string }[]>([]);
+
+  const apply = useCallback((body: { settings: PayoutSettings; readOnly: boolean }) => {
+    setSettings(body.settings);
+    setReadOnly(body.readOnly);
+    setLoaded(true);
+  }, []);
+
+  useEffect(() => {
+    apiRequest<{ settings: PayoutSettings; readOnly: boolean }>("/api/gateway/settings")
+      .then(apply)
+      .catch((cause: unknown) => {
+        setLoaded(true);
+        setError(cause instanceof Error ? cause.message : "Gateway settings could not be loaded.");
+      });
+  }, [apply]);
+
+  function save(body: Record<string, unknown>) {
+    setError("");
+    setNotice("");
+    setPending(true);
+    apiRequest<{ outcome: string; settings: PayoutSettings }>("/api/gateway/settings", {
+      method: "POST",
+      body: JSON.stringify({ ...body, password }),
+    })
+      .then((result) => {
+        setSettings((current) => (current ? { ...current, ...result.settings } : result.settings));
+        onModeChange?.(result.settings.gateway_mode);
+        setPassword("");
+        setDestinationValue("");
+        setShortcodeKind("");
+        setNotice(
+          result.outcome === "destination-pending"
+            ? "Saved — the new payout destination applies after the 24-hour review window."
+            : result.outcome === "destination-set"
+              ? "Saved — the payout destination is set."
+              : "Saved.",
+        );
+      })
+      .catch((cause: unknown) =>
+        setError(cause instanceof Error ? cause.message : "Gateway settings could not be saved."))
+      .finally(() => setPending(false));
+  }
+
+  function runCheck(thenOptIn: boolean) {
+    setError("");
+    setCheckState("checking");
+    apiRequest<{ ok: boolean; checks: { key: string; ok: boolean; detail: string }[] }>(
+      "/api/gateway/settings/check",
+    )
+      .then((body) => {
+        setChecks(body.checks);
+        setCheckState(body.ok ? "ok" : "failed");
+        if (body.ok && thenOptIn) save({ gatewayMode: "company_gateway" });
+      })
+      .catch((cause: unknown) => {
+        setCheckState("failed");
+        setError(cause instanceof Error ? cause.message : "The gateway check could not be completed.");
+      });
+  }
+
+  if (!loaded) return null;
+  const pooled = settings?.gateway_mode === "company_gateway";
+  const pendingChange = settings?.pending_change
+    ? (() => {
+        try {
+          return JSON.parse(settings.pending_change as string) as { destination_type?: string; destination_value?: string };
+        } catch {
+          return null;
+        }
+      })()
+    : null;
+
+  const destinationDigits = destinationValue.replace(/\D/g, "");
+  const detectedPhone = /^(?:254[17]\d{8}|0[17]\d{8}|[17]\d{8})$/.test(destinationDigits);
+  const needsShortcodeKind = Boolean(destinationDigits) && !detectedPhone;
+
+  return (
+    <section className="form-card mt-6 max-w-2xl">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div className="flex items-center gap-3">
+          <span
+            className={cn(
+              "flex h-10 w-10 shrink-0 items-center justify-center rounded-xl",
+              pooled ? "bg-success/10 text-success" : "bg-primary/10 text-primary",
+            )}
+            aria-hidden="true"
+          >
+            <Landmark className="h-5 w-5" />
+          </span>
+          <div className="grid gap-0.5">
+            <h2 className="text-lg font-semibold">Company gateway</h2>
+            <p className="text-sm text-muted-foreground">
+              The company collects on its M-Pesa shortcode and pays you out.
+            </p>
+          </div>
+        </div>
+        <span
+          className={cn(
+            "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-caption font-semibold",
+            pooled
+              ? "border-success-border/60 bg-success-soft/70 text-success"
+              : "border-border bg-surface-muted/60 text-muted-foreground",
+          )}
+        >
+          <span
+            className={cn("h-1.5 w-1.5 rounded-full", pooled ? "bg-success" : "bg-muted-foreground")}
+            aria-hidden="true"
+          />
+          {pooled ? "Active" : "Not connected"}
+        </span>
+      </div>
+      {readOnly ? (
+        <p className="notice mt-4" role="status">
+          Staff view — only the account owner can change payout settings.
+        </p>
+      ) : null}
+      {error ? (
+        <p className="notice mt-4" role="alert">
+          {error}
+        </p>
+      ) : null}
+      {notice ? (
+        <p className="notice mt-4 border-success-border bg-success-soft/60" role="status">
+          {notice}
+        </p>
+      ) : null}
+      {pendingChange ? (
+        <p className="notice mt-4" role="status">
+          Destination change to {pendingChange.destination_type} {pendingChange.destination_value ?? ""}{" "}
+          applies at {settings?.pending_change_effective_at}. Contact the company before then to stop it.
+        </p>
+      ) : null}
+
+      <div className="mt-4 grid gap-4">
+        <div
+          className={cn(
+            "grid gap-3 rounded-xl border p-4",
+            pooled ? "border-success-border/60 bg-success-soft/50" : "border-border bg-surface-muted/40",
+          )}
+        >
+          {pooled ? (
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm font-medium text-foreground">
+                Collections are pooled through the company shortcode.
+              </p>
+              <div className="flex flex-wrap items-center gap-2">
+                <SecondaryButton
+                  type="button"
+                  disabled={readOnly || pending || checkState === "checking"}
+                  onClick={() => runCheck(false)}
+                >
+                  {checkState === "checking" ? "Checking…" : "Test connection"}
+                </SecondaryButton>
+                <SecondaryButton
+                  type="button"
+                  disabled={readOnly || pending || !password}
+                  onClick={() => save({ gatewayMode: "own_daraja" })}
+                >
+                  Switch back to my Daraja
+                </SecondaryButton>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-wrap items-center justify-between gap-3">
+              <p className="text-sm text-muted-foreground">
+                Enter your account password below, then check the connection — if everything is set up
+                you're opted in automatically and subscribers start paying the company shortcode.
+              </p>
+              <PrimaryButton
+                type="button"
+                disabled={readOnly || pending || !password || checkState === "checking"}
+                onClick={() => runCheck(true)}
+              >
+                {checkState === "checking" ? (
+                  <span className="inline-flex items-center gap-2">
+                    <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                    Checking…
+                  </span>
+                ) : (
+                  "Check connection & opt in"
+                )}
+              </PrimaryButton>
+            </div>
+          )}
+          {checks.length ? (
+            <ul className="grid gap-1.5">
+              {checks.map((check) => (
+                <li key={check.key} className="flex items-start gap-2 text-sm">
+                  {check.ok ? (
+                    <Check className="mt-0.5 h-4 w-4 shrink-0 text-success" aria-hidden="true" />
+                  ) : (
+                    <XCircle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" aria-hidden="true" />
+                  )}
+                  <span className={check.ok ? "text-foreground" : "text-destructive"}>
+                    {check.detail}
+                  </span>
+                </li>
+              ))}
+            </ul>
+          ) : null}
+        </div>
+
+        {pooled ? (
+          <div className="grid gap-4 border-t border-border pt-4">
+            <div className="flex items-center gap-2.5">
+              <span
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"
+                aria-hidden="true"
+              >
+                <Send className="h-4 w-4" />
+              </span>
+              <div className="grid gap-0.5">
+                <h3 className="text-sm font-semibold text-foreground">Where to send your money</h3>
+                {settings?.destination_type ? (
+                  <p className="text-sm text-muted-foreground">
+                    Currently sent to {settings.destination_type} {settings.destination_value}
+                    {settings.account_reference ? ` · ref ${settings.account_reference}` : ""}.
+                  </p>
+                ) : null}
+              </div>
+            </div>
+            <FormField
+              id="gw-destination"
+              label="Phone, paybill, or till number"
+              hint="Enter your M-Pesa phone number, paybill, or till — payouts go there automatically. Leave empty to keep the current destination."
+            >
+              <input
+                id="gw-destination"
+                className="field"
+                inputMode="tel"
+                placeholder="e.g. 0712 345 678 or 654321"
+                value={destinationValue}
+                disabled={readOnly || pending}
+                onChange={(event) => setDestinationValue(event.target.value)}
+              />
+            </FormField>
+            {needsShortcodeKind ? (
+              <FormField id="gw-shortcode-kind" label="That number is a">
+                <select
+                  id="gw-shortcode-kind"
+                  className="field"
+                  value={shortcodeKind}
+                  disabled={readOnly || pending}
+                  onChange={(event) => setShortcodeKind(event.target.value as "paybill" | "till")}
+                >
+                  <option value="">Choose one</option>
+                  <option value="paybill">Paybill</option>
+                  <option value="till">Till (Buy Goods)</option>
+                </select>
+              </FormField>
+            ) : null}
+          </div>
+        ) : null}
+
+        <div className="grid gap-4 rounded-xl border border-border bg-surface-muted/40 p-4">
+          <div className="flex items-center gap-2.5">
+            <span
+              className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-warning/10 text-warning"
+              aria-hidden="true"
+            >
+              <LockKeyhole className="h-4 w-4" />
+            </span>
+            <p className="text-sm text-muted-foreground">
+              Confirm your account password to change the collection mode or payout destination.
+            </p>
+          </div>
+          <div className="flex flex-wrap items-end gap-3">
+            <div className="min-w-52 flex-1">
+              <FormField id="gw-password" label="Account password">
+              <input
+                id="gw-password"
+                type="password"
+                className="field"
+                autoComplete="current-password"
+                value={password}
+                disabled={readOnly || pending}
+                onChange={(event) => setPassword(event.target.value)}
+              />
+              </FormField>
+            </div>
+            {pooled ? (
+              <PrimaryButton
+                type="button"
+                disabled={readOnly || pending || !password || (needsShortcodeKind && !shortcodeKind)}
+                onClick={() => {
+                  const body: Record<string, unknown> = { settlementMode: "immediate" };
+                  if (destinationValue.trim()) {
+                    body.destination = {
+                      type: detectedPhone ? "phone" : shortcodeKind,
+                      value: destinationValue.trim(),
+                      accountReference: "",
+                    };
+                  }
+                  save(body);
+                }}
+              >
+                Save gateway settings
+              </PrimaryButton>
+            ) : null}
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }

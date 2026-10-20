@@ -33,7 +33,6 @@ ACCESS_ACCEPT = 2
 ACCESS_REJECT = 3
 ACCOUNTING_REQUEST = 4
 ACCOUNTING_RESPONSE = 5
-DISCONNECT_REQUEST = 40
 DISCONNECT_ACK = 41
 
 STATUS_START = 1
@@ -408,6 +407,9 @@ def reply_attributes(cursor, username, extra):
 
 
 STALE_SESSION_MINUTES = 15
+# Rows on a confirmed-down NAS with no interim evidence are only retired after
+# this much silence — a tunnel flap must not reap rows for clients still surfing.
+DEAD_NAS_MINUTES = 45
 
 
 def open_sessions(cursor, usernames):
@@ -437,6 +439,46 @@ def close_stale_sessions(cursor, usernames):
     )
 
 
+def sweep_stale_sessions(connect):
+    """Globally retire radacct rows a dead NAS stranded.
+
+    A powered-off router sends no Accounting-Stop, so without this sweep those
+    rows keep subscribers showing 'surfing' forever. A row is only closed when
+    the NAS provably went silent — either it sent interim updates that then
+    stopped (acctupdatetime moved past acctstarttime, then aged out), or its
+    management tunnel is confirmed 'down' for much longer than a flap. A
+    session that never sent an interim update on a healthy or unknown NAS is
+    left alone: interim updates may simply be disabled there, and a live client
+    must never be dropped. If a row was closed wrongly the NAS's next interim
+    update re-inserts it.
+    """
+    db = connect()
+    try:
+        with db.cursor() as cursor:
+            cursor.execute(
+                """
+                UPDATE radacct a
+                LEFT JOIN isp_mikrotik_devices d ON d.tunnel_ip = a.nasipaddress
+                SET a.acctstoptime = COALESCE(a.acctupdatetime, a.acctstarttime),
+                    a.acctterminatecause = 'lost-service'
+                WHERE a.acctstoptime IS NULL
+                  AND (
+                        (a.acctupdatetime IS NOT NULL AND a.acctupdatetime > a.acctstarttime
+                         AND a.acctupdatetime < DATE_SUB(NOW(), INTERVAL %s MINUTE))
+                        OR (d.tunnel_status = 'down'
+                            AND COALESCE(a.acctupdatetime, a.acctstarttime) < DATE_SUB(NOW(), INTERVAL %s MINUTE))
+                  )
+                """,
+                (STALE_SESSION_MINUTES, DEAD_NAS_MINUTES),
+            )
+            if cursor.rowcount:
+                print(f"event=radius-sweep stale-closed={cursor.rowcount}", flush=True)
+    except Exception as error:
+        print(f"event=radius-sweep error={error}", flush=True)
+    finally:
+        db.close()
+
+
 def open_session_rows(cursor, usernames):
     names = list(usernames)
     marks = ", ".join(["%s"] * len(names))
@@ -452,53 +494,22 @@ def open_session_rows(cursor, usernames):
     return list(cursor.fetchall())
 
 
-def disconnect_packet(secret, username, session_id="", framed=""):
-    """RFC 5176 Disconnect-Request. The Request Authenticator is MD5(header + zeroes + attrs + secret)."""
-    attrs = encode_attr(1, str(username).encode())
-    if session_id:
-        attrs += encode_attr(44, str(session_id).encode())
-    try:
-        if framed:
-            attrs += encode_attr(8, socket.inet_aton(str(framed)))
-    except OSError:
-        pass
-    head = struct.pack(">BBH", DISCONNECT_REQUEST, secrets.randbelow(256), 20 + len(attrs))
-    authenticator = hashlib.md5(head + bytes(16) + attrs + secret.encode()).digest()
-    return head + authenticator + attrs
-
-
-def disconnect_session(host, secret, username, session_id="", framed=""):
-    """Fire a Disconnect-Request at the NAS on UDP 3799. Best-effort; the radacct row is closed regardless."""
-    try:
-        udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        udp.settimeout(2)
-        udp.sendto(disconnect_packet(secret, username, session_id, framed), (host, 3799))
-        udp.close()
-    except OSError:
-        pass
-
-
 def kick_sessions(cursor, rows):
-    """PoD the oldest open sessions so a re-dialing subscriber is not locked out by a dead one."""
-    for row in rows:
-        host = (row.get("nasipaddress") or "").strip()
-        if not host:
-            continue
-        cursor.execute("SELECT secret FROM nas WHERE nasname = %s LIMIT 1", (host,))
-        nas = cursor.fetchone()
-        if nas:
-            disconnect_session(
-                host,
-                nas["secret"],
-                row.get("username") or "",
-                row.get("acctsessionid") or "",
-                row.get("framedipaddress") or "",
-            )
+    """Close the oldest open rows so a re-dialing subscriber is not locked out.
+
+    No Disconnect-Request is sent from the auth path: a radacct row is only a
+    guess about what the NAS holds, and after a router reboot a stale
+    Acct-Session-Id can match a brand-new live session — a PoD built on that
+    guess can kill a client that is legitimately surfing. A genuinely
+    duplicated login is displaced by the PPP profile's only-one on the NAS
+    itself, with no session-id guessing. Closing the row frees Simultaneous-Use
+    and, if the old session really was live, its next interim update or Stop
+    re-syncs the table."""
     ids = [row["radacctid"] for row in rows if row.get("radacctid") is not None]
     if ids:
         marks = ", ".join(["%s"] * len(ids))
         cursor.execute(
-            f"UPDATE radacct SET acctstoptime = NOW(), acctterminatecause = 'nas-request' WHERE radacctid IN ({marks}) AND acctstoptime IS NULL",
+            f"UPDATE radacct SET acctstoptime = NOW(), acctterminatecause = 'superseded' WHERE radacctid IN ({marks}) AND acctstoptime IS NULL",
             ids,
         )
 
