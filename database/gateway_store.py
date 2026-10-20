@@ -360,25 +360,39 @@ def ensure_schema(cursor):
         )
 
     # Append-only ledger: corrections are reversing entries, so the DB itself
-    # refuses UPDATE and DELETE on ledger rows.
-    cursor.execute("DROP TRIGGER IF EXISTS gw_ledger_no_update")
-    cursor.execute(
-        """
-        CREATE TRIGGER gw_ledger_no_update
-        BEFORE UPDATE ON gateway_ledger_entries
-        FOR EACH ROW
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'gateway_ledger_entries is append-only'
-        """
-    )
-    cursor.execute("DROP TRIGGER IF EXISTS gw_ledger_no_delete")
-    cursor.execute(
-        """
-        CREATE TRIGGER gw_ledger_no_delete
-        BEFORE DELETE ON gateway_ledger_entries
-        FOR EACH ROW
-        SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'gateway_ledger_entries is append-only'
-        """
-    )
+    # refuses UPDATE and DELETE on ledger rows. Trigger creation needs the
+    # TRIGGER privilege — plus SUPER or log_bin_trust_function_creators when
+    # binary logging is on — so a restricted DB user gets a warning instead of
+    # a failed deploy; the ledger is then kept append-only by the code paths.
+    try:
+        cursor.execute("DROP TRIGGER IF EXISTS gw_ledger_no_update")
+        cursor.execute(
+            """
+            CREATE TRIGGER gw_ledger_no_update
+            BEFORE UPDATE ON gateway_ledger_entries
+            FOR EACH ROW
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'gateway_ledger_entries is append-only'
+            """
+        )
+        cursor.execute("DROP TRIGGER IF EXISTS gw_ledger_no_delete")
+        cursor.execute(
+            """
+            CREATE TRIGGER gw_ledger_no_delete
+            BEFORE DELETE ON gateway_ledger_entries
+            FOR EACH ROW
+            SIGNAL SQLSTATE '45000' SET MESSAGE_TEXT = 'gateway_ledger_entries is append-only'
+            """
+        )
+    except pymysql.err.OperationalError as error:
+        if error.args and error.args[0] in (1044, 1142, 1419):
+            print(
+                "event=gateway-schema warning=ledger-triggers-skipped "
+                f"error={error} — grant TRIGGER privilege or set "
+                "log_bin_trust_function_creators=ON to enforce append-only in the DB",
+                flush=True,
+            )
+        else:
+            raise
 
 
 def backfill_gateway_modes(cursor):
