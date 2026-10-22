@@ -99,16 +99,24 @@ def sync_peers(rows):
     apply_config(peers)
 
 
-def peer_lines(peers):
-    from routeros_api import HOTSPOT_NETWORK, PPPOE_NETWORK
+def peer_networks(tunnel_ip):
+    """A peer's AllowedIPs. WireGuard gives each range to one peer only, so
+    the client ranges every router shares are never listed; blocked clients
+    arrive netmapped into the router's own portal block instead."""
+    from routeros_api import portal_map_network
 
+    mapped = portal_map_network(tunnel_ip)
+    return [f"{tunnel_ip}/32"] + ([mapped] if mapped else [])
+
+
+def peer_lines(peers):
     lines = []
     for public_key, tunnel_ip in peers:
         lines.extend(
             [
                 "[Peer]",
                 f"PublicKey = {public_key}",
-                f"AllowedIPs = {tunnel_ip}/32, {PPPOE_NETWORK}, {HOTSPOT_NETWORK}",
+                f"AllowedIPs = {', '.join(peer_networks(tunnel_ip))}",
                 "",
             ]
         )
@@ -177,16 +185,15 @@ def _ensure_posix_routes(peers):
         return
     from routeros_api import HOTSPOT_NETWORK, PPPOE_NETWORK
 
-    networks = {PPPOE_NETWORK, HOTSPOT_NETWORK}
-    networks.update(f"{tunnel_ip}/32" for _key, tunnel_ip in peers)
-    for network in sorted(networks):
+    networks = set()
+    for _key, tunnel_ip in peers:
+        networks.update(peer_networks(tunnel_ip))
+    commands = [["ip", "route", "replace", network, "dev", TUNNEL_NAME] for network in sorted(networks)]
+    # Older releases routed the shared client ranges down the tunnel.
+    commands += [["ip", "route", "del", network, "dev", TUNNEL_NAME] for network in (PPPOE_NETWORK, HOTSPOT_NETWORK)]
+    for command in commands:
         try:
-            subprocess.run(
-                ["ip", "route", "replace", network, "dev", TUNNEL_NAME],
-                check=False,
-                capture_output=True,
-                timeout=15,
-            )
+            subprocess.run(command, check=False, capture_output=True, timeout=15)
         except (OSError, subprocess.TimeoutExpired):
             pass
 

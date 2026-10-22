@@ -173,6 +173,33 @@ class HotspotRouterTests(unittest.TestCase):
         self.assertIn(b"src-address-list=pppoe-suspended", sent)
         self.assertIn(b"isp-centric-portal-nat", sent)
 
+    def test_portal_nat_netmaps_blocked_users_into_the_router_block(self):
+        sock = sock_with(("=name=ether2", "=type=ether", "=comment=PPPoE"))
+        sock.getpeername = lambda: ("10.88.0.5", 8728)
+        routeros_api.apply_pppoe_enforcement("10.88.0.5", "secret-password", True, opener=lambda _address, _timeout: sock)
+        sent = b"".join(sock.sent)
+        self.assertIn(b"=action=netmap", sent)
+        self.assertIn(b"=to-addresses=10.89.5.0/24", sent)
+
+    def test_identify_reads_router_and_host_from_a_netmapped_visitor(self):
+        class Cursor:
+            def __init__(self):
+                self.calls = []
+
+            def execute(self, sql, params):
+                self.calls.append((sql, params))
+
+            def fetchone(self):
+                return None
+
+        cursor = Cursor()
+        portal_server.identify(cursor, "10.89.5.37")
+        self.assertIn("r.nasipaddress = %s AND r.framedipaddress LIKE %s", cursor.calls[0][0])
+        self.assertEqual(cursor.calls[0][1], ("10.88.0.5", "%.37"))
+        cursor = Cursor()
+        portal_server.identify(cursor, "10.10.0.37")
+        self.assertEqual(cursor.calls[0][1], ("10.10.0.37",))
+
     def test_authorize_writes_user_and_logs_in(self):
         sock = sock_with()
         report = routeros_api.authorize_hotspot_client(
