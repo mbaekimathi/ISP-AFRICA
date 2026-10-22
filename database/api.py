@@ -5988,8 +5988,9 @@ def reconcile_device(connect, device):
                     "source": device["tunnel_ip"],
                 },
                 access=access or None,
+                heal=True,
             )
-            changes.append("pppoe")
+            changes.append("pppoe(" + ",".join(state.get("pppoe_missing") or []) + ")")
         except routeros_api.RouterError as error:
             print(f"event=reconcile device={device['name']} change=pppoe error={error}", flush=True)
     if device.get("hotspot_enabled") and not state["hotspot"]:

@@ -1148,7 +1148,7 @@ def _add_placed(sock, reader, words):
         talk(sock, reader, [word for word in words if not word.startswith("=place-before=")])
 
 
-def _enable_pppoe(sock, reader, iface, servers, radius=None, shared=False):
+def _enable_pppoe(sock, reader, iface, servers, radius=None, shared=False, heal=False):
     pools = talk(sock, reader, ["/ip/pool/print"])
     if not _named(pools, PPPOE_POOL):
         talk(sock, reader, ["/ip/pool/add", f"=name={PPPOE_POOL}", f"=ranges={PPPOE_RANGE}"])
@@ -1292,10 +1292,15 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None, shared=False):
             if ours.get(order[index]) and ours.get(order[index + 1]):
                 _move_filter(sock, reader, ours[order[index]], ours[order[index + 1]])
     prefix = PPPOE_LOCAL.rsplit(".", 1)[0] + "."
-    try:
-        connections = talk(sock, reader, ["/ip/firewall/connection/print"])
-    except RouterError:
-        connections = []
+    # A self-heal re-asserts missing rules on a router whose subscribers are
+    # already surfing: flushing conntrack or PPP sessions there would knock
+    # every paid client offline each time the reconcile loop runs.
+    connections = []
+    if not heal:
+        try:
+            connections = talk(sock, reader, ["/ip/firewall/connection/print"])
+        except RouterError:
+            connections = []
     for row in connections:
         touched = any(
             (row.get(key) or "").startswith(prefix)
@@ -1364,7 +1369,8 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None, shared=False):
         ours = row.get("name") == DHCP_PORTAL_NAME or (row.get("interface") == iface and row.get("profile") == DHCP_PORTAL_PROFILE)
         if ours and row.get("disabled") != "true" and _row_id(row):
             talk(sock, reader, ["/ip/hotspot/set", f"=.id={_row_id(row)}", "=disabled=yes"])
-    _drop_open_sessions(sock, reader)
+    if not heal:
+        _drop_open_sessions(sock, reader)
 
 
 def _disable_pppoe(sock, reader, iface, shared=False):
@@ -1458,8 +1464,11 @@ def _wan_ports(sock, reader):
     return avoid, lan
 
 
-def apply_pppoe_enforcement(host, password, enforced, timeout=12, port=API_PORT, opener=None, radius=None, access=None):
-    """Turn PPPoE enforcement on or off with direct API writes. This does not create a system script."""
+def apply_pppoe_enforcement(host, password, enforced, timeout=12, port=API_PORT, opener=None, radius=None, access=None, heal=False):
+    """Turn PPPoE enforcement on or off with direct API writes. This does not create a system script.
+
+    heal=True re-asserts drifted rules without dropping live PPP sessions or
+    connection tracking — used by the background reconcile loop."""
     if not isinstance(enforced, bool):
         raise RouterError("Choose whether PPPoE enforcement is on or off.")
     connect = opener or socket.create_connection
@@ -1487,7 +1496,7 @@ def apply_pppoe_enforcement(host, password, enforced, timeout=12, port=API_PORT,
         kinds = {row.get("name") or "": row.get("type") or "" for row in interfaces}
         shared = kinds.get(iface) == "bridge" or iface in lan
         if enforced:
-            _enable_pppoe(sock, reader, iface, servers, radius, shared=shared)
+            _enable_pppoe(sock, reader, iface, servers, radius, shared=shared, heal=heal)
         else:
             _disable_pppoe(sock, reader, iface, shared=shared)
     finally:
@@ -2246,22 +2255,28 @@ def inspect_access(host, password, radius_address="", timeout=4, port=API_PORT, 
     # Without accept=yes on /radius/incoming the router refuses Disconnect-
     # Requests, so paused/expired subscribers keep their subscribed session
     # and are never moved into the portal address lists.
-    incoming_ok = any(row.get("accept") == "yes" for row in incoming)
-    pppoe = (
-        pppoe_server
-        and PPPOE_DROP_PPP in comments
-        and PPPOE_ALLOW in comments
-        and {PPPOE_PORTAL_NAT_SUS, PPPOE_PORTAL_NAT_EXP} <= nat_redirects
-        and radius_ok
-        and incoming_ok
-    )
+    # RouterOS 7's API reports yes/no properties as "true"/"false".
+    incoming_ok = any(str(row.get("accept") or "").lower() in {"true", "yes"} for row in incoming)
+    checks = {
+        "pppoe-server": pppoe_server,
+        "firewall": PPPOE_DROP_PPP in comments and PPPOE_ALLOW in comments,
+        "portal-nat": {PPPOE_PORTAL_NAT_SUS, PPPOE_PORTAL_NAT_EXP} <= nat_redirects,
+        "radius": radius_ok,
+        "radius-incoming": incoming_ok,
+    }
+    pppoe = all(checks.values())
     hotspot = any(
         _row_id(row)
         and row.get("disabled") != "true"
         and (row.get("interface") or "") not in avoid
         for row in spots
     )
-    return {"pppoe": pppoe, "hotspot": hotspot, "read_failed": bool(failed_reads[0])}
+    return {
+        "pppoe": pppoe,
+        "hotspot": hotspot,
+        "read_failed": bool(failed_reads[0]),
+        "pppoe_missing": [name for name, ok in checks.items() if not ok],
+    }
 
 
 def authorize_hotspot_client(host, password, ip, mac, username, secret, profile, rate_limit, shared_users, uptime, timeout=12, port=API_PORT, opener=None):
