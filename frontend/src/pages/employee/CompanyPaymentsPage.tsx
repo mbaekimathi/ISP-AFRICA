@@ -164,7 +164,7 @@ export function CompanyPaymentsPage() {
       .then((body) => {
         apply(body);
         setError("");
-        setNotice("Saved. Checking the connection with Daraja…");
+        setNotice("Saved.");
       })
       .catch((cause: unknown) => {
         setError(cause instanceof Error ? cause.message : "Company payment settings could not be saved.");
