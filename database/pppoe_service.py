@@ -332,19 +332,6 @@ def validate_pppoe_provisioning(payload, context, today=None):
     }
 
 
-def session_timeout_seconds(expiry_iso, now=None):
-    """Seconds until the end of the expiry day, so sessions die at the cutoff."""
-    if not expiry_iso:
-        return None
-    day = parse_day(expiry_iso)
-    if not day or day == "invalid":
-        return None
-    now = now or datetime.now()
-    cutoff = datetime(day.year, day.month, day.day) + timedelta(days=1)
-    remaining = int((cutoff - now).total_seconds())
-    return min(max(60, remaining), 45 * 86400)
-
-
 def radius_plan(plan):
     """Attributes FreeRADIUS SQL should hold.
 
@@ -365,9 +352,10 @@ def radius_plan(plan):
     elif plan.get("poolName"):
         replies.append({"attribute": "Framed-Pool", "op": ":=", "value": plan["poolName"]})
     if active:
-        seconds = session_timeout_seconds(plan.get("expiryDate"))
-        if seconds:
-            replies.append({"attribute": "Session-Timeout", "op": ":=", "value": str(seconds)})
+        # No Session-Timeout for a paying subscriber: one fixed at dial time
+        # outlives a renewal and cuts the client at the old expiry anyway.
+        # The pppoe sweep disconnects the session when the subscription
+        # actually expires.
         group = plan["groupName"]
         group_replies = [
             {"attribute": "Mikrotik-Rate-Limit", "op": ":=", "value": plan["rateLimit"]},

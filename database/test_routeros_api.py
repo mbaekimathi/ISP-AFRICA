@@ -564,6 +564,37 @@ class RouterOsApiTests(unittest.TestCase):
         self.assertIn(b"/ppp/active/print", explicit)
         self.assertIn(b"/ip/firewall/connection/print", explicit)
 
+    def test_heal_leaves_live_server_and_present_rules_alone(self):
+        rp = routeros_api
+        done = sentence("!done")
+        filters = b"".join(
+            sentence("!re", f"=.id=*{index + 10}", "=chain=forward", f"=comment={comment}")
+            for index, comment in enumerate(sorted(rp.PPPOE_FILTERS))
+        )
+
+        class RouterSocket(ScriptedSocket):
+            def sendall(self, payload):
+                self.sent.append(payload)
+                if b"/interface/pppoe-server/server/print" in payload:
+                    self.incoming += sentence(
+                        "!re", "=.id=*1", f"=service-name={rp.PPPOE_SERVICE}", "=interface=ether3", "=disabled=false"
+                    ) + done
+                elif b"/ip/firewall/filter/print" in payload:
+                    self.incoming += filters + done
+                else:
+                    self.incoming += done
+
+        sock = RouterSocket([])
+        rp.apply_pppoe_enforcement(
+            "10.88.0.5", "secret-password", True, heal=True, access="ether2", opener=lambda _address, _timeout: sock
+        )
+        sent = b"".join(sock.sent)
+        self.assertNotIn(b"/interface/pppoe-server/server/set", sent)
+        self.assertNotIn(b"/ip/firewall/filter/remove", sent)
+        self.assertNotIn(b"/ip/firewall/filter/add", sent)
+        self.assertNotIn(b"/ip/dhcp-server/set", sent)
+        self.assertNotIn(b"/ppp/active/", sent)
+
 
 if __name__ == "__main__":
     unittest.main()
