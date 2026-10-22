@@ -4,6 +4,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from unittest import mock
+
+import api
 import portal_server
 import pppoe_store
 import routeros_api
@@ -134,6 +137,45 @@ def pending_purchase(**extra):
 
 
 class HotspotRouterTests(unittest.TestCase):
+    def test_block_sharing_adds_ttl_rule_on_enable(self):
+        sock = sock_with(("=name=ether3", "=type=ether", "=comment=Hotspot"))
+        routeros_api.apply_hotspot_access(
+            "10.88.0.5", "secret-password", True, block_sharing=True, opener=lambda _address, _timeout: sock
+        )
+        sent = b"".join(sock.sent)
+        self.assertIn(b"/ip/firewall/mangle/add", sent)
+        self.assertIn(b"=new-ttl=set:1", sent)
+        self.assertIn(b"=chain=postrouting", sent)
+        self.assertIn(routeros_api.HOTSPOT_NO_SHARE.encode(), sent)
+
+    def test_sharing_left_alone_when_not_chosen(self):
+        sock = sock_with(("=name=ether3", "=type=ether", "=comment=Hotspot"))
+        routeros_api.apply_hotspot_access("10.88.0.5", "secret-password", True, opener=lambda _address, _timeout: sock)
+        self.assertNotIn(b"/ip/firewall/mangle", b"".join(sock.sent))
+
+    def test_allow_sharing_removes_the_rule(self):
+        done = sentence("!done")
+        rows = sentence("!re", "=.id=*9", "=out-interface=ether3", "=new-ttl=set:1", f"=comment={routeros_api.HOTSPOT_NO_SHARE}")
+        sock = ScriptedSocket([rows + done, done])
+        routeros_api._hotspot_sharing(sock, routeros_api.ByteReader(sock), "ether3", False)
+        sent = b"".join(sock.sent)
+        self.assertIn(b"/ip/firewall/mangle/remove", sent)
+        self.assertIn(b"=.id=*9", sent)
+        self.assertNotIn(b"/ip/firewall/mangle/add", sent)
+
+    def test_block_sharing_keeps_a_matching_rule(self):
+        done = sentence("!done")
+        rows = (
+            sentence("!re", "=.id=*9", "=out-interface=ether3", "=new-ttl=set:1", f"=comment={routeros_api.HOTSPOT_NO_SHARE}")
+            + sentence("!re", "=.id=*8", "=out-interface=ether9", "=new-ttl=set:1", f"=comment={routeros_api.HOTSPOT_NO_SHARE}")
+        )
+        sock = ScriptedSocket([rows + done, done, done])
+        routeros_api._hotspot_sharing(sock, routeros_api.ByteReader(sock), "ether3", True)
+        sent = b"".join(sock.sent)
+        self.assertIn(b"=.id=*8", sent)
+        self.assertNotIn(b"=.id=*9", sent)
+        self.assertNotIn(b"/ip/firewall/mangle/add", sent)
+
     def test_hotspot_enable_writes_captive_portal(self):
         sock = sock_with(("=name=ether3", "=type=ether", "=comment=Hotspot"))
         report = routeros_api.apply_hotspot_access("10.88.0.5", "secret-password", True, opener=lambda _address, _timeout: sock)
@@ -440,3 +482,74 @@ class HotspotVoucherTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BlockSharingApiTests(unittest.TestCase):
+    def device(self, **extra):
+        row = {
+            "id": "router-1",
+            "client_id": "client-1",
+            "name": "Shop",
+            "tunnel_ip": "10.88.0.5",
+            "api_secret": "sealed",
+            "pppoe_enforced": 0,
+            "hotspot_enabled": 1,
+            "hotspot_block_sharing": 1,
+        }
+        row.update(extra)
+        return row
+
+    def reconcile(self, device, state):
+        with mock.patch.object(routeros_api, "open_password", return_value="pw"), mock.patch.object(
+            routeros_api, "inspect_access", return_value=state
+        ), mock.patch.object(api, "_mark_tunnel"), mock.patch.object(
+            routeros_api, "apply_hotspot_sharing"
+        ) as sharing, mock.patch.object(routeros_api, "apply_hotspot_access") as access:
+            api.reconcile_device(None, device)
+        return sharing, access
+
+    def test_reconcile_restores_missing_sharing_block(self):
+        sharing, access = self.reconcile(
+            self.device(), {"pppoe": False, "hotspot": True, "sharing_blocked": False, "read_failed": False}
+        )
+        sharing.assert_called_once_with("10.88.0.5", "pw", True)
+        access.assert_not_called()
+
+    def test_reconcile_leaves_matching_sharing_alone(self):
+        sharing, access = self.reconcile(
+            self.device(), {"pppoe": False, "hotspot": True, "sharing_blocked": True, "read_failed": False}
+        )
+        sharing.assert_not_called()
+        access.assert_not_called()
+
+    def test_reconcile_unknown_sharing_is_not_touched(self):
+        sharing, _access = self.reconcile(
+            self.device(), {"pppoe": False, "hotspot": True, "sharing_blocked": None, "read_failed": False}
+        )
+        sharing.assert_not_called()
+
+    def test_reconcile_rebuilds_hotspot_with_sharing_choice(self):
+        _sharing, access = self.reconcile(
+            self.device(), {"pppoe": False, "hotspot": False, "sharing_blocked": False, "read_failed": False}
+        )
+        access.assert_called_once_with("10.88.0.5", "pw", True, block_sharing=True)
+
+    def test_save_switches_only_sharing_on_live_hotspot(self):
+        handler = api.Handler.__new__(api.Handler)
+        rows = iter([{"hotspotEnabled": True, "hotspotBlockSharing": False}, {"hotspotEnabled": True, "hotspotBlockSharing": True}])
+        cursor = FakeCursor([])
+        with mock.patch.object(handler, "require_client", return_value="client-1", create=True), mock.patch.object(
+            handler, "mikrotik_row", side_effect=lambda *_args: next(rows), create=True
+        ), mock.patch.object(handler, "push_hotspot_access", return_value={"message": "Updated on the router."}, create=True) as push:
+            body = handler.save_hotspot_access(cursor, "router-1", "token", {"enabled": True, "blockSharing": True, "push": True})
+        self.assertTrue(body["applied"])
+        push.assert_called_once_with(cursor, "router-1", "client-1", True, True, True)
+        self.assertEqual(cursor.queries[0][1], (1, 1, "router-1", "client-1"))
+
+    def test_save_rejects_non_boolean_sharing(self):
+        handler = api.Handler.__new__(api.Handler)
+        with mock.patch.object(handler, "require_client", return_value="client-1", create=True), mock.patch.object(
+            handler, "mikrotik_row", return_value={"hotspotEnabled": True}, create=True
+        ):
+            with self.assertRaises(api.ApiError):
+                handler.save_hotspot_access(FakeCursor([]), "router-1", "token", {"enabled": True, "blockSharing": "yes"})

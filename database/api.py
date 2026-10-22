@@ -1183,6 +1183,7 @@ def ensure_schema():
                 ("api_secret", "api_secret VARCHAR(512) NULL"),
                 ("pppoe_enforced", "pppoe_enforced TINYINT NOT NULL DEFAULT 0"),
                 ("hotspot_enabled", "hotspot_enabled TINYINT NOT NULL DEFAULT 0"),
+                ("hotspot_block_sharing", "hotspot_block_sharing TINYINT NOT NULL DEFAULT 0"),
                 ("wg_private", "wg_private VARCHAR(512) NULL"),
                 ("port_plan", "port_plan TEXT NULL"),
             ):
@@ -3499,28 +3500,41 @@ class Handler(BaseHTTPRequestHandler):
         if not isinstance(enabled, bool):
             raise ApiError(400, "Choose whether the hotspot is on or off.")
         previous = 1 if current.get("hotspotEnabled") else 0
+        previous_block = 1 if current.get("hotspotBlockSharing") else 0
+        block = payload.get("blockSharing", bool(previous_block))
+        if not isinstance(block, bool):
+            raise ApiError(400, "Choose whether sharing is blocked.")
         cursor.execute(
-            "UPDATE isp_mikrotik_devices SET hotspot_enabled = %s WHERE id = %s AND client_id = %s",
-            (1 if enabled else 0, device_id, client_id),
+            """
+            UPDATE isp_mikrotik_devices SET hotspot_enabled = %s, hotspot_block_sharing = %s
+            WHERE id = %s AND client_id = %s
+            """,
+            (1 if enabled else 0, 1 if block else 0, device_id, client_id),
         )
         device = self.mikrotik_row(cursor, device_id, client_id)
         if payload.get("push") is not True:
             return {"device": device, "applied": False, "message": ""}
+        # Only the sharing switch moved on a live hotspot: change just that
+        # rule instead of re-running the whole hotspot setup.
+        sharing_only = enabled and previous and block != bool(previous_block)
         try:
-            self.push_hotspot_access(cursor, device_id, client_id, enabled)
+            report = self.push_hotspot_access(cursor, device_id, client_id, enabled, block, sharing_only)
         except routeros_api.RouterError as error:
             cursor.execute(
-                "UPDATE isp_mikrotik_devices SET hotspot_enabled = %s WHERE id = %s AND client_id = %s",
-                (previous, device_id, client_id),
+                """
+                UPDATE isp_mikrotik_devices SET hotspot_enabled = %s, hotspot_block_sharing = %s
+                WHERE id = %s AND client_id = %s
+                """,
+                (previous, previous_block, device_id, client_id),
             )
             return {
                 "device": self.mikrotik_row(cursor, device_id, client_id),
                 "applied": False,
                 "message": routeros_api.router_change_message(error),
             }
-        return {"device": device, "applied": True, "message": "Updated on the router."}
+        return {"device": device, "applied": True, "message": (report or {}).get("message") or "Updated on the router."}
 
-    def push_hotspot_access(self, cursor, device_id, client_id, enabled):
+    def push_hotspot_access(self, cursor, device_id, client_id, enabled, block_sharing=None, sharing_only=False):
         cursor.execute(
             "SELECT tunnel_ip, api_secret FROM isp_mikrotik_devices WHERE id = %s AND client_id = %s",
             (device_id, client_id),
@@ -3529,7 +3543,9 @@ class Handler(BaseHTTPRequestHandler):
         if not row or not row.get("api_secret") or not row.get("tunnel_ip"):
             raise routeros_api.RouterError("Router access is not saved yet, so nothing was changed on the router.")
         password = routeros_api.open_password(row["api_secret"])
-        routeros_api.apply_hotspot_access(row["tunnel_ip"], password, enabled)
+        if sharing_only:
+            return routeros_api.apply_hotspot_sharing(row["tunnel_ip"], password, bool(block_sharing))
+        return routeros_api.apply_hotspot_access(row["tunnel_ip"], password, enabled, block_sharing=block_sharing)
 
     def hotspot_page_previews(self, cursor, device_id, token):
         client_id = self.require_client(cursor, token)
@@ -3886,6 +3902,7 @@ class Handler(BaseHTTPRequestHandler):
             "apiReady": bool(row.get("api_secret")),
             "pppoeEnforced": bool(row.get("pppoe_enforced")),
             "hotspotEnabled": bool(row.get("hotspot_enabled")),
+            "hotspotBlockSharing": bool(row.get("hotspot_block_sharing")),
             "stageTested": bool(row.get("stage_tested_at")),
             "serverTunnelIp": "10.88.0.1",
             "endpoint": endpoint,
@@ -5884,7 +5901,7 @@ def reconcile_all(connect):
             cursor.execute(
                 """
                 SELECT id, client_id, name, tunnel_ip, api_secret, pppoe_interface, port_plan,
-                       pppoe_enforced, hotspot_enabled
+                       pppoe_enforced, hotspot_enabled, hotspot_block_sharing
                 FROM isp_mikrotik_devices
                 WHERE status = 'active' AND api_secret IS NOT NULL AND tunnel_ip IS NOT NULL
                 """
@@ -5992,12 +6009,23 @@ def reconcile_device(connect, device):
             changes.append("pppoe")
         except routeros_api.RouterError as error:
             print(f"event=reconcile device={device['name']} change=pppoe error={error}", flush=True)
+    block = bool(device.get("hotspot_block_sharing"))
     if device.get("hotspot_enabled") and not state["hotspot"]:
         try:
-            routeros_api.apply_hotspot_access(device["tunnel_ip"], password, True)
+            routeros_api.apply_hotspot_access(device["tunnel_ip"], password, True, block_sharing=block)
             changes.append("hotspot")
         except routeros_api.RouterError as error:
             print(f"event=reconcile device={device['name']} change=hotspot error={error}", flush=True)
+    elif (
+        device.get("hotspot_enabled")
+        and state.get("sharing_blocked") is not None
+        and state["sharing_blocked"] != block
+    ):
+        try:
+            routeros_api.apply_hotspot_sharing(device["tunnel_ip"], password, block)
+            changes.append("sharing")
+        except routeros_api.RouterError as error:
+            print(f"event=reconcile device={device['name']} change=sharing error={error}", flush=True)
     if changes:
         print(f"event=reconcile device={device['name']} applied={'+'.join(changes)}", flush=True)
 
