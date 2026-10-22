@@ -203,6 +203,39 @@ class HotspotRouterTests(unittest.TestCase):
         self.assertIn(b"=mac-address=AA:BB:CC:DD:EE:FF", sent)
         self.assertNotIn(b"/system/script", sent)
 
+    def test_authorize_locks_login_to_paying_device(self):
+        done = sentence("!done")
+        profile_row = sentence("!re", "=.id=*7", "=name=hs-pkg1", "=shared-users=5") + done
+        active = (
+            sentence("!re", "=.id=*A", "=user=hs-abc123", "=mac-address=11:22:33:44:55:66")
+            + sentence("!re", "=.id=*B", "=user=hs-abc123", "=mac-address=AA:BB:CC:DD:EE:FF")
+            + done
+        )
+        # login, gate sweep (profiles, users, bindings, walled ip, walled),
+        # user profiles, profile set, users, user add, active sessions, then the rest.
+        sock = ScriptedSocket([done] * 6 + [profile_row, done, done, done, active] + [done] * 20)
+        routeros_api.authorize_hotspot_client(
+            "10.88.0.5", "secret-password", "10.5.50.10", "aa-bb-cc-dd-ee-ff",
+            "hs-abc123", "pw-xyz", "hs-pkg1", "5M/10M", 1, "7200s",
+            opener=lambda _address, _timeout: sock,
+        )
+        sent = b"".join(sock.sent)
+        self.assertIn(b"/ip/hotspot/user/profile/set", sent)
+        self.assertIn(b"=shared-users=1", sent)
+        self.assertIn(b"/ip/hotspot/user/add", sent)
+        self.assertEqual(sent.count(b"=mac-address=AA:BB:CC:DD:EE:FF"), 2)
+        self.assertIn(b"=.id=*A", sent)
+        self.assertNotIn(b"=.id=*B", sent)
+
+    def test_authorize_without_mac_skips_login(self):
+        sock = sock_with()
+        report = routeros_api.authorize_hotspot_client(
+            "10.88.0.5", "secret-password", "10.5.50.10", "", "hs-abc123", "pw-xyz", "hs-pkg1", "", 1, "1h",
+            opener=lambda _address, _timeout: sock,
+        )
+        self.assertFalse(report["online"])
+        self.assertNotIn(b"/ip/hotspot/active/login", b"".join(sock.sent))
+
     def test_authorize_rejects_unsafe_names(self):
         with self.assertRaises(routeros_api.RouterError):
             routeros_api.authorize_hotspot_client(

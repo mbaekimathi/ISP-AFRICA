@@ -2264,6 +2264,14 @@ def inspect_access(host, password, radius_address="", timeout=4, port=API_PORT, 
     return {"pppoe": pppoe, "hotspot": hotspot, "read_failed": bool(failed_reads[0])}
 
 
+MAC_ADDRESS = re.compile(r"^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$")
+
+
+def _hotspot_mac(value):
+    mac = str(value or "").strip().upper().replace("-", ":")
+    return mac if MAC_ADDRESS.match(mac) and mac != "00:00:00:00:00:00" else ""
+
+
 def authorize_hotspot_client(host, password, ip, mac, username, secret, profile, rate_limit, shared_users, uptime, timeout=12, port=API_PORT, opener=None):
     """Create a paid hotspot account on the router and log the waiting client in."""
     if not (_safe_iface(str(username)) and _safe_iface(str(secret))):
@@ -2283,20 +2291,27 @@ def authorize_hotspot_client(host, password, ip, mac, username, secret, profile,
             _harden_hotspot_gate(sock, reader)
         except RouterError:
             pass
-        profile_words = []
+        # Always write shared-users: a profile left at a higher value by an
+        # older push would let one paid login be reused on other devices.
+        profile_words = [f"=shared-users={max(1, int(shared_users or 1))}"]
         if rate_limit:
             profile_words.append(f"=rate-limit={rate_limit}")
-        if shared_users and int(shared_users) > 1:
-            profile_words.append(f"=shared-users={int(shared_users)}")
         profiles = talk(sock, reader, ["/ip/hotspot/user/profile/print"])
         matched = [row for row in profiles if row.get("name") == profile and _row_id(row)]
         if matched:
-            if profile_words:
-                for row in matched:
-                    talk(sock, reader, ["/ip/hotspot/user/profile/set", f"=.id={_row_id(row)}"] + profile_words)
+            for row in matched:
+                talk(sock, reader, ["/ip/hotspot/user/profile/set", f"=.id={_row_id(row)}"] + profile_words)
         else:
             talk(sock, reader, ["/ip/hotspot/user/profile/add", f"=name={profile}"] + profile_words)
-        user_words = [f"=password={secret}", f"=profile={profile}", f"=limit-uptime={uptime}"]
+        # Lock the login to the device that paid or redeemed it, so the
+        # username/password cannot put any other device online.
+        lock = _hotspot_mac(mac)
+        user_words = [
+            f"=password={secret}",
+            f"=profile={profile}",
+            f"=limit-uptime={uptime}",
+            f"=mac-address={lock or '00:00:00:00:00:00'}",
+        ]
         users = talk(sock, reader, ["/ip/hotspot/user/print"])
         matched = [row for row in users if row.get("name") == username and _row_id(row)]
         if matched:
@@ -2304,8 +2319,15 @@ def authorize_hotspot_client(host, password, ip, mac, username, secret, profile,
                 talk(sock, reader, ["/ip/hotspot/user/set", f"=.id={_row_id(row)}"] + user_words)
         else:
             talk(sock, reader, ["/ip/hotspot/user/add", f"=name={username}"] + user_words)
+        try:
+            for row in talk(sock, reader, ["/ip/hotspot/active/print"]):
+                other = str(row.get("mac-address") or "").upper()
+                if row.get("user") == username and other != lock and _row_id(row):
+                    talk(sock, reader, ["/ip/hotspot/active/remove", f"=.id={_row_id(row)}"])
+        except RouterError:
+            pass
         online = False
-        if ip and mac:
+        if ip and lock:
             try:
                 talk(
                     sock,
@@ -2315,7 +2337,7 @@ def authorize_hotspot_client(host, password, ip, mac, username, secret, profile,
                         f"=user={username}",
                         f"=password={secret}",
                         f"=ip={ip}",
-                        f"=mac-address={mac}",
+                        f"=mac-address={lock}",
                     ],
                 )
                 online = True
