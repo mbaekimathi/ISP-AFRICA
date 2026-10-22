@@ -629,9 +629,11 @@ def accounting(cursor, packet, source_ip):
             [nas_ip, *names],
         )
     if status == STATUS_START:
+        # Acct-Session-Id is a per-router counter that restarts on reboot, so
+        # two routers routinely reuse the same id — always scope by NAS.
         cursor.execute(
-            "UPDATE radacct SET acctstoptime = NOW() WHERE acctsessionid = %s AND acctstoptime IS NULL",
-            (session_id,),
+            "UPDATE radacct SET acctstoptime = NOW() WHERE acctsessionid = %s AND nasipaddress = %s AND acctstoptime IS NULL",
+            (session_id, nas_ip),
         )
         cursor.execute(
             """
@@ -653,9 +655,9 @@ def accounting(cursor, packet, source_ip):
                 framedipaddress = COALESCE(NULLIF(%s, ''), framedipaddress),
                 acctstoptime = IF(%s, NOW(), acctstoptime),
                 acctterminatecause = IF(%s, %s, acctterminatecause)
-            WHERE acctsessionid = %s AND acctstoptime IS NULL
+            WHERE acctsessionid = %s AND nasipaddress = %s AND acctstoptime IS NULL
             """,
-            (session_time, bytes_in, bytes_out, framed, stop, stop, cause[:32], session_id),
+            (session_time, bytes_in, bytes_out, framed, stop, stop, cause[:32], session_id, nas_ip),
         )
         if cursor.rowcount == 0:
             cursor.execute(

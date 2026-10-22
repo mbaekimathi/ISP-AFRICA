@@ -223,5 +223,45 @@ class AuthenticateTests(unittest.TestCase):
         self.assertIsNone(radius_server.authenticate(EmptyNas(), pap_packet(PASSWORD), "203.0.113.9"))
 
 
+def accounting_packet(status, session_id, nas_ip="10.88.0.10"):
+    import socket
+    import struct
+
+    attrs = (
+        radius_server.encode_attr(40, struct.pack(">I", status))
+        + radius_server.encode_attr(44, session_id.encode())
+        + radius_server.encode_attr(1, USERNAME.encode())
+        + radius_server.encode_attr(4, socket.inet_aton(nas_ip))
+    )
+    head = struct.pack(">BBH", 4, 7, 20 + len(attrs))
+    auth = hashlib.md5(head + bytes(16) + attrs + SECRET.encode()).digest()
+    return radius_server.parse_packet(head + auth + attrs)
+
+
+class AccountingScopeTests(unittest.TestCase):
+    """Acct-Session-Id restarts per router, so radacct writes must be scoped by NAS."""
+
+    def setUp(self):
+        radius_server.nas_cache_clear()
+
+    def radacct_writes(self, status):
+        cursor = FakeCursor()
+        cursor.rowcount = 1
+        radius_server.accounting(cursor, accounting_packet(status, "81a00001"), "10.88.0.10")
+        return [(sql, args) for sql, args in cursor.queries if sql.startswith("UPDATE radacct SET")]
+
+    def test_start_only_closes_rows_on_the_same_nas(self):
+        writes = self.radacct_writes(radius_server.STATUS_START)
+        self.assertEqual(len(writes), 1)
+        self.assertIn("nasipaddress = %s", writes[0][0])
+        self.assertEqual(writes[0][1], ("81a00001", "10.88.0.10"))
+
+    def test_interim_only_updates_rows_on_the_same_nas(self):
+        writes = self.radacct_writes(radius_server.STATUS_INTERIM)
+        self.assertEqual(len(writes), 1)
+        self.assertIn("acctsessionid = %s AND nasipaddress = %s", writes[0][0])
+        self.assertEqual(writes[0][1][-2:], ("81a00001", "10.88.0.10"))
+
+
 if __name__ == "__main__":
     unittest.main()
