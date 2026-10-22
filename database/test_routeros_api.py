@@ -372,6 +372,7 @@ class RouterOsApiTests(unittest.TestCase):
         self.assertIn(b"/ip/firewall/connection/print", sent)
         self.assertIn(b"/ipv6/firewall/filter/add", sent)
         self.assertIn(b"/interface/pppoe-server/server/add", sent)
+        self.assertIn(b"=keepalive-timeout=60", sent)
         self.assertIn(b"in-interface=ether2", sent)
         self.assertNotIn(b"/system/script", sent)
         self.assertNotIn(b"secret-password", b"".join(sock.sent[1:]))

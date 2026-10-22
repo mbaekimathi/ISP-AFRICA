@@ -982,6 +982,9 @@ PPPOE_LOCAL = "10.10.0.1"
 PPPOE_RANGE = "10.10.0.2-10.10.0.254"
 PPPOE_ADDRESS = "10.10.0.1/24"
 PPPOE_NETWORK = "10.10.0.0/24"
+# RouterOS defaults to 10s: a CPE on a lossy radio link that misses a few
+# LCP echoes is hung up. 60s rides out short fades.
+PPPOE_KEEPALIVE = "60"
 PPPOE_ALLOW = "isp-centric-pppoe-allow"
 PPPOE_ALLOW_BACK = "isp-centric-pppoe-allow-back"
 PPPOE_PORTAL_SUS_UP = "isp-centric-pppoe-portal-sus-up"
@@ -1200,6 +1203,7 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None, shared=False, heal=
                     "=disabled=no",
                     f"=interface={iface}",
                     f"=default-profile={PPPOE_PROFILE}",
+                    f"=keepalive-timeout={PPPOE_KEEPALIVE}",
                 ],
             )
     else:
@@ -1211,6 +1215,7 @@ def _enable_pppoe(sock, reader, iface, servers, radius=None, shared=False, heal=
                 f"=service-name={PPPOE_SERVICE}",
                 f"=interface={iface}",
                 f"=default-profile={PPPOE_PROFILE}",
+                f"=keepalive-timeout={PPPOE_KEEPALIVE}",
                 "=disabled=no",
             ],
         )
@@ -1679,6 +1684,7 @@ def _configure_port(sock, reader, target, uses):
                     f"=service-name={details['service']}",
                     f"=interface={target}",
                     f"=default-profile={profile}",
+                    f"=keepalive-timeout={PPPOE_KEEPALIVE}",
                     "=disabled=no",
                 ],
             )
