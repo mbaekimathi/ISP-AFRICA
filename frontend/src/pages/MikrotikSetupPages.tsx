@@ -22,6 +22,7 @@ type RouterRecord = {
   apiReady: boolean;
   pppoeEnforced: boolean;
   hotspotEnabled: boolean;
+  hotspotBlockSharing: boolean;
   portPlan?: Record<string, PortUse[]>;
 };
 
@@ -618,43 +619,59 @@ export function MikrotikHotspotPage() {
   const { deviceId = "" } = useParams();
   const { device, error } = useRouterRecord(deviceId);
   const [enabled, setEnabled] = useState(false);
+  const [blockSharing, setBlockSharing] = useState(false);
   const [saving, setSaving] = useState(false);
   const [note, setNote] = useState("");
   const requestId = useRef(0);
   useEffect(() => {
-    if (device) setEnabled(device.hotspotEnabled);
+    if (device) {
+      setEnabled(device.hotspotEnabled);
+      setBlockSharing(Boolean(device.hotspotBlockSharing));
+    }
   }, [device]);
 
-  function toggleHotspot() {
+  function saveHotspot(nextEnabled: boolean, nextBlock: boolean) {
     if (!device || saving) return;
-    const next = !enabled;
     const previous = enabled;
+    const previousBlock = blockSharing;
     const mine = ++requestId.current;
-    setEnabled(next);
+    setEnabled(nextEnabled);
+    setBlockSharing(nextBlock);
     setSaving(true);
     setNote("Updating the router…");
     apiRequest<{ device: RouterRecord; applied: boolean; message: string }>(`/api/mikrotiks/${deviceId}/hotspot`, {
       method: "POST",
-      body: JSON.stringify({ enabled: next, push: true }),
+      body: JSON.stringify({ enabled: nextEnabled, blockSharing: nextBlock, push: true }),
     })
       .then((body) => {
         if (requestId.current !== mine) return;
         if (!body.applied) {
           setEnabled(previous);
+          setBlockSharing(previousBlock);
           setNote(body.message || "The router was not changed.");
           return;
         }
         setEnabled(body.device.hotspotEnabled);
-        setNote("Updated on the router.");
+        setBlockSharing(Boolean(body.device.hotspotBlockSharing));
+        setNote(body.message || "Updated on the router.");
       })
       .catch((cause: unknown) => {
         if (requestId.current !== mine) return;
         setEnabled(previous);
+        setBlockSharing(previousBlock);
         setNote(cause instanceof Error ? cause.message : "The hotspot setting could not be updated.");
       })
       .finally(() => {
         if (requestId.current === mine) setSaving(false);
       });
+  }
+
+  function toggleHotspot() {
+    saveHotspot(!enabled, blockSharing);
+  }
+
+  function toggleSharing() {
+    saveHotspot(enabled, !blockSharing);
   }
 
   return (
@@ -684,6 +701,31 @@ export function MikrotikHotspotPage() {
           >
             <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-surface shadow ${enabled ? "left-6" : "left-0.5"}`} />
             <span className="sr-only">{enabled ? "On" : "Off"}</span>
+          </button>
+        </div>
+        <div className="flex items-center justify-between gap-4 rounded-xl border border-border px-4 py-3">
+          <div>
+            <p id="hotspot-sharing-label" className="text-sm font-medium">
+              Block sharing
+            </p>
+            <p className="mt-1 text-sm text-muted-foreground">
+              {blockSharing
+                ? "On. A paid phone or laptop can surf, but it cannot pass the connection to another Wi-Fi router or a tethered device."
+                : "Off. A paid device can share its connection through its own Wi-Fi router or phone hotspot."}
+            </p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            id="hotspot-sharing"
+            aria-labelledby="hotspot-sharing-label"
+            aria-checked={blockSharing}
+            disabled={saving || !device || !enabled}
+            className={`relative h-7 w-12 shrink-0 rounded-full transition ${blockSharing ? "bg-primary" : "bg-surface-muted"} border border-border disabled:opacity-60`}
+            onClick={toggleSharing}
+          >
+            <span className={`absolute top-0.5 h-5 w-5 rounded-full bg-surface shadow ${blockSharing ? "left-6" : "left-0.5"}`} />
+            <span className="sr-only">{blockSharing ? "On" : "Off"}</span>
           </button>
         </div>
         <p id="hotspot-apply-note" className="text-sm text-muted-foreground">

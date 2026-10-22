@@ -1786,6 +1786,7 @@ HOTSPOT_RANGE = "10.5.50.2-10.5.50.254"
 HOTSPOT_DNS = "hotspot.local"
 HOTSPOT_BLOCK = "isp-centric-hotspot-block"
 HOTSPOT_BLOCK_INPUT = "isp-centric-hotspot-block-input"
+HOTSPOT_NO_SHARE = "isp-centric-hotspot-no-share"
 API_GROUP = "isp-centric-api"
 NO_NAT = "isp-centric-no-nat"
 PORTAL_NAT = "isp-centric-portal-nat"
@@ -2214,10 +2215,62 @@ def _device_mode_gate(sock, reader):
     return blocked
 
 
-def apply_hotspot_access(host, password, enabled, timeout=12, port=API_PORT, opener=None):
-    """Turn hotspot access on or off with direct API writes. This does not create a system script."""
-    if not isinstance(enabled, bool):
-        raise RouterError("Choose whether the hotspot is on or off.")
+def _hotspot_sharing(sock, reader, iface, block):
+    """Stop a paid device from passing its connection on to other devices.
+
+    Packets leaving toward hotspot clients get TTL 1: a phone or laptop on the
+    hotspot accepts them, but a customer's own Wi-Fi router or a tethering
+    phone has to forward them one more hop, which drops them. That way the
+    devices hiding behind one paid device cannot surf on its login.
+    """
+    rows = talk(sock, reader, ["/ip/firewall/mangle/print"])
+    ours = [row for row in rows if row.get("comment") == HOTSPOT_NO_SHARE and _row_id(row)]
+    keep = None
+    if block:
+        keep = next(
+            (
+                row
+                for row in ours
+                if row.get("out-interface") == iface
+                and row.get("new-ttl") == "set:1"
+                and row.get("disabled") not in {"true", "yes"}
+            ),
+            None,
+        )
+    for row in ours:
+        if row is not keep:
+            talk(sock, reader, ["/ip/firewall/mangle/remove", f"=.id={_row_id(row)}"])
+    if block and keep is None:
+        talk(
+            sock,
+            reader,
+            [
+                "/ip/firewall/mangle/add",
+                "=chain=postrouting",
+                "=action=change-ttl",
+                "=new-ttl=set:1",
+                f"=out-interface={iface}",
+                "=passthrough=yes",
+                f"=comment={HOTSPOT_NO_SHARE}",
+            ],
+        )
+
+
+def _hotspot_target(sock, reader):
+    interfaces = talk(sock, reader, ["/interface/print"])
+    spots = talk(sock, reader, ["/ip/hotspot/print"])
+    avoid, _lan = _wan_ports(sock, reader)
+    iface = _hotspot_port(interfaces, spots, avoid=avoid)
+    if not _safe_iface(iface):
+        raise RouterError("This router has no port for the hotspot, so nothing was changed.")
+    try:
+        bridges = talk(sock, reader, ["/interface/bridge/port/print"])
+    except RouterError:
+        bridges = []
+    return _bridge_target(bridges, iface), spots
+
+
+def _open_api(host, password, timeout, port, opener):
     connect = opener or socket.create_connection
     try:
         sock = connect((host, port), timeout)
@@ -2229,17 +2282,35 @@ def apply_hotspot_access(host, password, enabled, timeout=12, port=API_PORT, ope
         login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
         if any(row.get("ret") for row in login):
             raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
-        interfaces = talk(sock, reader, ["/interface/print"])
-        spots = talk(sock, reader, ["/ip/hotspot/print"])
-        avoid, lan = _wan_ports(sock, reader)
-        iface = _hotspot_port(interfaces, spots, avoid=avoid)
-        if not _safe_iface(iface):
-            raise RouterError("This router has no port for the hotspot, so nothing was changed.")
-        try:
-            bridges = talk(sock, reader, ["/interface/bridge/port/print"])
-        except RouterError:
-            bridges = []
-        iface = _bridge_target(bridges, iface)
+    except Exception:
+        sock.close()
+        raise
+    return sock, reader
+
+
+def apply_hotspot_sharing(host, password, block, timeout=12, port=API_PORT, opener=None):
+    """Turn hotspot connection sharing on or off without touching the hotspot itself."""
+    if not isinstance(block, bool):
+        raise RouterError("Choose whether sharing is blocked.")
+    sock, reader = _open_api(host, password, timeout, port, opener)
+    try:
+        iface, _spots = _hotspot_target(sock, reader)
+        _hotspot_sharing(sock, reader, iface, block)
+    finally:
+        sock.close()
+    return {"applied": True, "message": "Updated on the router."}
+
+
+def apply_hotspot_access(host, password, enabled, timeout=12, port=API_PORT, opener=None, block_sharing=None):
+    """Turn hotspot access on or off with direct API writes. This does not create a system script.
+
+    block_sharing=None leaves the sharing rule as it is on the router."""
+    if not isinstance(enabled, bool):
+        raise RouterError("Choose whether the hotspot is on or off.")
+    sock, reader = _open_api(host, password, timeout, port, opener)
+    sharing_failed = False
+    try:
+        iface, spots = _hotspot_target(sock, reader)
         if enabled:
             blocked = _device_mode_gate(sock, reader)
             if "hotspot" in blocked:
@@ -2250,6 +2321,11 @@ def apply_hotspot_access(host, password, enabled, timeout=12, port=API_PORT, ope
             _enable_hotspot(sock, reader, iface, spots)
         else:
             _disable_hotspot(sock, reader, iface)
+        if block_sharing is not None:
+            try:
+                _hotspot_sharing(sock, reader, iface, bool(block_sharing) and enabled)
+            except RouterError:
+                sharing_failed = True
         if enabled and "fetch" in blocked:
             return {
                 "applied": True,
@@ -2258,6 +2334,8 @@ def apply_hotspot_access(host, password, enabled, timeout=12, port=API_PORT, ope
             }
     finally:
         sock.close()
+    if sharing_failed:
+        return {"applied": True, "message": "The hotspot was updated, but the router refused the sharing block. Try again."}
     return {"applied": True, "message": "Updated on the router."}
 
 
@@ -2295,6 +2373,16 @@ def inspect_access(host, password, radius_address="", timeout=4, port=API_PORT, 
         spots = read(["/ip/hotspot/print"])
         radius_rows = read(["/radius/print"])
         incoming = read(["/radius/incoming/print"])
+        # Unknown (None) rather than a failed read: a router that cannot list
+        # mangle rules must not stop the rest of the self-heal.
+        try:
+            mangles = talk(sock, reader, ["/ip/firewall/mangle/print"])
+            sharing_blocked = any(
+                row.get("comment") == HOTSPOT_NO_SHARE and row.get("disabled") not in {"true", "yes"}
+                for row in mangles
+            )
+        except RouterError:
+            sharing_blocked = None
         try:
             avoid, _lan = _wan_ports(sock, reader)
         except RouterError:
@@ -2347,9 +2435,18 @@ def inspect_access(host, password, radius_address="", timeout=4, port=API_PORT, 
     return {
         "pppoe": pppoe,
         "hotspot": hotspot,
+        "sharing_blocked": sharing_blocked,
         "read_failed": bool(failed_reads[0]),
         "pppoe_missing": [name for name, ok in checks.items() if not ok],
     }
+
+
+MAC_ADDRESS = re.compile(r"^[0-9A-F]{2}(?::[0-9A-F]{2}){5}$")
+
+
+def _hotspot_mac(value):
+    mac = str(value or "").strip().upper().replace("-", ":")
+    return mac if MAC_ADDRESS.match(mac) and mac != "00:00:00:00:00:00" else ""
 
 
 def authorize_hotspot_client(host, password, ip, mac, username, secret, profile, rate_limit, shared_users, uptime, timeout=12, port=API_PORT, opener=None):
@@ -2371,20 +2468,27 @@ def authorize_hotspot_client(host, password, ip, mac, username, secret, profile,
             _harden_hotspot_gate(sock, reader)
         except RouterError:
             pass
-        profile_words = []
+        # Always write shared-users: a profile left at a higher value by an
+        # older push would let one paid login be reused on other devices.
+        profile_words = [f"=shared-users={max(1, int(shared_users or 1))}"]
         if rate_limit:
             profile_words.append(f"=rate-limit={rate_limit}")
-        if shared_users and int(shared_users) > 1:
-            profile_words.append(f"=shared-users={int(shared_users)}")
         profiles = talk(sock, reader, ["/ip/hotspot/user/profile/print"])
         matched = [row for row in profiles if row.get("name") == profile and _row_id(row)]
         if matched:
-            if profile_words:
-                for row in matched:
-                    talk(sock, reader, ["/ip/hotspot/user/profile/set", f"=.id={_row_id(row)}"] + profile_words)
+            for row in matched:
+                talk(sock, reader, ["/ip/hotspot/user/profile/set", f"=.id={_row_id(row)}"] + profile_words)
         else:
             talk(sock, reader, ["/ip/hotspot/user/profile/add", f"=name={profile}"] + profile_words)
-        user_words = [f"=password={secret}", f"=profile={profile}", f"=limit-uptime={uptime}"]
+        # Lock the login to the device that paid or redeemed it, so the
+        # username/password cannot put any other device online.
+        lock = _hotspot_mac(mac)
+        user_words = [
+            f"=password={secret}",
+            f"=profile={profile}",
+            f"=limit-uptime={uptime}",
+            f"=mac-address={lock or '00:00:00:00:00:00'}",
+        ]
         users = talk(sock, reader, ["/ip/hotspot/user/print"])
         matched = [row for row in users if row.get("name") == username and _row_id(row)]
         if matched:
@@ -2392,8 +2496,15 @@ def authorize_hotspot_client(host, password, ip, mac, username, secret, profile,
                 talk(sock, reader, ["/ip/hotspot/user/set", f"=.id={_row_id(row)}"] + user_words)
         else:
             talk(sock, reader, ["/ip/hotspot/user/add", f"=name={username}"] + user_words)
+        try:
+            for row in talk(sock, reader, ["/ip/hotspot/active/print"]):
+                other = str(row.get("mac-address") or "").upper()
+                if row.get("user") == username and other != lock and _row_id(row):
+                    talk(sock, reader, ["/ip/hotspot/active/remove", f"=.id={_row_id(row)}"])
+        except RouterError:
+            pass
         online = False
-        if ip and mac:
+        if ip and lock:
             try:
                 talk(
                     sock,
@@ -2403,7 +2514,7 @@ def authorize_hotspot_client(host, password, ip, mac, username, secret, profile,
                         f"=user={username}",
                         f"=password={secret}",
                         f"=ip={ip}",
-                        f"=mac-address={mac}",
+                        f"=mac-address={lock}",
                     ],
                 )
                 online = True
