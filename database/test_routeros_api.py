@@ -524,6 +524,7 @@ class RouterOsApiTests(unittest.TestCase):
             + done,
             sentence("!re", "=.id=*4", "=chain=dstnat", "=action=dst-nat", "=disabled=false", f"=comment={rp.PPPOE_PORTAL_NAT_SUS}")
             + sentence("!re", "=.id=*5", "=chain=dstnat", "=action=dst-nat", "=disabled=false", f"=comment={rp.PPPOE_PORTAL_NAT_EXP}")
+            + sentence("!re", "=.id=*7", "=chain=srcnat", "=action=netmap", "=to-addresses=10.89.5.0/24", f"=comment={rp.PORTAL_NAT_SKIP}")
             + done,
             done,
             sentence("!re", "=.id=*6", "=address=10.88.0.1", "=service=ppp") + done,
@@ -541,6 +542,30 @@ class RouterOsApiTests(unittest.TestCase):
             self.assertTrue(state["pppoe"], accept)
             self.assertEqual(state["pppoe_missing"], [])
             self.assertFalse(state["read_failed"])
+
+    def test_inspect_wants_the_portal_netmap(self):
+        replies = self.inspect_replies("true")
+        replies[3] = replies[3].replace(b"=action=netmap", b"=action=accept")
+        sock = ScriptedSocket(replies)
+        state = routeros_api.inspect_access(
+            "10.88.0.5", "secret-password", radius_address="10.88.0.1", opener=lambda _address, _timeout: sock
+        )
+        self.assertEqual(state["pppoe_missing"], ["portal-map"])
+
+    def test_wireguard_peers_own_only_their_portal_block(self):
+        import wg_host
+
+        lines = "\n".join(wg_host.peer_lines([("key-a", "10.88.0.2"), ("key-b", "10.88.0.3")]))
+        self.assertIn("AllowedIPs = 10.88.0.2/32, 10.89.2.0/24", lines)
+        self.assertIn("AllowedIPs = 10.88.0.3/32, 10.89.3.0/24", lines)
+        self.assertNotIn("10.10.0.0/24", lines)
+
+    def test_portal_map_round_trip(self):
+        self.assertEqual(routeros_api.portal_map_network("10.88.0.5"), "10.89.5.0/24")
+        self.assertIsNone(routeros_api.portal_map_network("192.168.1.5"))
+        self.assertEqual(routeros_api.portal_map_client("10.89.5.37"), ("10.88.0.5", 37))
+        self.assertIsNone(routeros_api.portal_map_client("10.10.0.37"))
+        self.assertIsNone(routeros_api.portal_map_client("10.89.0.37"))
 
     def test_inspect_reports_what_is_missing(self):
         sock = ScriptedSocket(self.inspect_replies("false"))

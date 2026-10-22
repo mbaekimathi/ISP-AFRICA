@@ -1790,6 +1790,34 @@ API_GROUP = "isp-centric-api"
 NO_NAT = "isp-centric-no-nat"
 PORTAL_NAT = "isp-centric-portal-nat"
 PORTAL_NAT_SKIP = "isp-centric-portal-nat-skip"
+# Every router hands out the same client ranges, so blocked PPPoE clients are
+# netmapped toward the portal into a per-router block: router 10.88.0.N maps
+# 10.10.0.H to 10.89.N.H. The portal reads the router from N and the client
+# from H, and each WireGuard peer owns only its own block.
+PORTAL_MAP_PREFIX = "10.89"
+
+
+def portal_map_network(router):
+    parts = str(router or "").split(".")
+    if len(parts) == 4 and parts[:3] == ["10", "88", "0"] and parts[3].isdigit() and 2 <= int(parts[3]) <= 254:
+        return f"{PORTAL_MAP_PREFIX}.{int(parts[3])}.0/24"
+    return None
+
+
+def portal_map_client(ip):
+    """(router tunnel IP, client host octet) for a netmapped portal visitor."""
+    parts = str(ip or "").split(".")
+    if len(parts) != 4 or ".".join(parts[:2]) != PORTAL_MAP_PREFIX or not all(part.isdigit() for part in parts[2:]):
+        return None
+    router = f"10.88.0.{int(parts[2])}"
+    return (router, int(parts[3])) if portal_map_network(router) else None
+
+
+def _router_address(sock):
+    try:
+        return sock.getpeername()[0]
+    except (AttributeError, OSError, IndexError, TypeError):
+        return ""
 PORTAL_WALLED = "isp-centric-portal-walled"
 PORTAL_PAGES = "isp-portal"
 PORTAL_PAGE_NAMES = ("login.html", "status.html", "error.html")
@@ -1948,6 +1976,8 @@ def _portal_nat(sock, reader):
     # masquerade on top and hide blocked clients behind the tunnel address.
     nats = talk(sock, reader, ["/ip/firewall/nat/print"])
     anchor = next((_row_id(row) for row in nats if row.get("comment") == PORTAL_NAT and _row_id(row)), anchor)
+    mapped = portal_map_network(_router_address(sock))
+    action = ["=action=netmap", f"=to-addresses={mapped}"] if mapped else ["=action=accept"]
     for address_list in (PPPOE_EXPIRED, PPPOE_SUSPENDED):
         _add_placed(
             sock,
@@ -1955,7 +1985,7 @@ def _portal_nat(sock, reader):
             [
                 "/ip/firewall/nat/add",
                 "=chain=srcnat",
-                "=action=accept",
+                *action,
                 "=protocol=tcp",
                 f"=dst-address={host}",
                 f"=dst-port={port}",
@@ -2298,6 +2328,15 @@ def inspect_access(host, password, radius_address="", timeout=4, port=API_PORT, 
         "radius": radius_ok,
         "radius-incoming": incoming_ok,
     }
+    mapped = portal_map_network(host)
+    if mapped:
+        checks["portal-map"] = any(
+            row.get("comment") == PORTAL_NAT_SKIP
+            and row.get("action") == "netmap"
+            and row.get("to-addresses") == mapped
+            and row.get("disabled") != "true"
+            for row in nats
+        )
     pppoe = all(checks.values())
     hotspot = any(
         _row_id(row)

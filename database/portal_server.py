@@ -181,6 +181,11 @@ def esc(value):
 
 
 def identify(cursor, ip):
+    mapped = routeros_api.portal_map_client(ip)
+    if mapped:
+        match, params = "r.nasipaddress = %s AND r.framedipaddress LIKE %s", (mapped[0], f"%.{mapped[1]}")
+    else:
+        match, params = "r.framedipaddress = %s", (ip,)
     cursor.execute(
         """
         SELECT s.id AS subscriber_id, s.client_id, s.first_name, s.last_name, s.phone,
@@ -192,10 +197,10 @@ def identify(cursor, ip):
         JOIN pppoe_subscribers s ON s.pppoe_username = r.username
         JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
         JOIN isp_packages p ON p.id = s.package_id
-        WHERE r.framedipaddress = %s AND r.acctstoptime IS NULL
+        WHERE {match} AND r.acctstoptime IS NULL
         ORDER BY r.acctstarttime DESC LIMIT 1
-        """,
-        (ip,),
+        """.format(match=match),
+        params,
     )
     row = cursor.fetchone()
     if row:
@@ -215,12 +220,12 @@ def identify(cursor, ip):
         JOIN pppoe_subscribers s ON s.pppoe_username = r.username
         JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
         JOIN isp_packages p ON p.id = s.package_id
-        WHERE r.framedipaddress = %s
+        WHERE {match}
           AND r.acctstoptime IS NOT NULL
           AND r.acctstoptime > DATE_SUB(NOW(), INTERVAL 15 MINUTE)
         ORDER BY r.acctstoptime DESC LIMIT 1
-        """,
-        (ip,),
+        """.format(match=match),
+        params,
     )
     return cursor.fetchone()
 
