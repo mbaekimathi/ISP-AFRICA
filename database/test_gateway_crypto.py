@@ -11,7 +11,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import gateway_crypto
 
-ENV_KEYS = ("ISP_GATEWAY_SECRET", "ISP_GATEWAY_KEY_ID", "ISP_GATEWAY_SECRETS_OLD", "ISP_ENV")
+ENV_KEYS = (
+    "ISP_GATEWAY_SECRET",
+    "ISP_GATEWAY_KEY_ID",
+    "ISP_GATEWAY_SECRETS_OLD",
+    "ISP_ENV",
+    "ISP_ROUTER_SECRET",
+    "ISP_ACCOUNT_CODE_SECRET",
+)
 
 
 @contextlib.contextmanager
@@ -90,6 +97,28 @@ class SealOpenTests(unittest.TestCase):
         with env(ISP_ENV="production"):
             with self.assertRaises(gateway_crypto.GatewayCryptoError):
                 gateway_crypto.seal("value")
+
+    def test_production_falls_back_to_the_router_secret(self):
+        with env(ISP_ENV="production", ISP_ROUTER_SECRET="router-secret"):
+            sealed = gateway_crypto.seal("value")
+            self.assertTrue(sealed.startswith("gcm1.s1."))
+            self.assertEqual(gateway_crypto.open_secret(sealed), "value")
+        with env(ISP_ENV="production", ISP_ACCOUNT_CODE_SECRET="code-secret"):
+            self.assertTrue(gateway_crypto.seal("value").startswith("gcm1.s1."))
+
+    def test_router_secret_rows_still_open_after_a_gateway_key_is_set(self):
+        with env(ISP_ENV="production", ISP_ROUTER_SECRET="router-secret"):
+            sealed = gateway_crypto.seal("value")
+        with env(ISP_ENV="production", ISP_ROUTER_SECRET="router-secret", ISP_GATEWAY_SECRET="gw"):
+            self.assertTrue(gateway_crypto.seal("other").startswith("gcm1.g1."))
+            self.assertEqual(gateway_crypto.open_secret(sealed), "value")
+        with env(ISP_ENV="production", ISP_ROUTER_SECRET="changed"):
+            with self.assertRaises(gateway_crypto.GatewayCryptoError):
+                gateway_crypto.open_secret(sealed)
+
+    def test_development_keeps_the_built_in_key(self):
+        with env(ISP_ROUTER_SECRET="router-secret"):
+            self.assertTrue(gateway_crypto.seal("value").startswith("gcm1.g1."))
 
 
 if __name__ == "__main__":

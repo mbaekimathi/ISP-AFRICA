@@ -11,6 +11,12 @@ AES-256-GCM using a dedicated key that never touches the database:
 
 Envelope format:  gcm1.<key_id>.<base64(nonce || ciphertext || tag)>
 
+When ISP_GATEWAY_SECRET is unset in production, new values are sealed under
+key id "s1" with key material from ISP_ROUTER_SECRET (or
+ISP_ACCOUNT_CODE_SECRET), so saving payment settings keeps working. Setting
+ISP_GATEWAY_SECRET later switches new writes to it; "s1" rows keep opening
+for as long as that server secret stays unchanged.
+
 Rotation: set a new ISP_GATEWAY_KEY_ID + ISP_GATEWAY_SECRET and move the old
 pair into ISP_GATEWAY_SECRETS_OLD. New writes use the new key; old rows keep
 decrypting until they are re-sealed.
@@ -28,6 +34,7 @@ from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
 ENVELOPE_VERSION = "gcm1"
 DEFAULT_KEY_ID = "g1"
+SERVER_KEY_ID = "s1"
 DEV_KEY_MATERIAL = "isp-gateway-development-key"
 
 _warned = False
@@ -37,8 +44,24 @@ class GatewayCryptoError(Exception):
     """Raised when sealing or opening a gateway secret cannot proceed."""
 
 
+def _server_material():
+    return (
+        (os.environ.get("ISP_ROUTER_SECRET") or "").strip()
+        or (os.environ.get("ISP_ACCOUNT_CODE_SECRET") or "").strip()
+    )
+
+
 def current_key_id():
-    return (os.environ.get("ISP_GATEWAY_KEY_ID") or "").strip() or DEFAULT_KEY_ID
+    explicit = (os.environ.get("ISP_GATEWAY_KEY_ID") or "").strip()
+    if explicit:
+        return explicit
+    if (
+        os.environ.get("ISP_ENV") == "production"
+        and not (os.environ.get("ISP_GATEWAY_SECRET") or "").strip()
+        and _server_material()
+    ):
+        return SERVER_KEY_ID
+    return DEFAULT_KEY_ID
 
 
 def _parse_old(text):
@@ -52,7 +75,11 @@ def _parse_old(text):
 
 
 def _keyring():
-    ring = _parse_old(os.environ.get("ISP_GATEWAY_SECRETS_OLD"))
+    ring = {}
+    server = _server_material()
+    if server:
+        ring[SERVER_KEY_ID] = server
+    ring.update(_parse_old(os.environ.get("ISP_GATEWAY_SECRETS_OLD")))
     current = (os.environ.get("ISP_GATEWAY_SECRET") or "").strip()
     if current:
         ring[current_key_id()] = current
@@ -67,7 +94,8 @@ def _material_for(key_id):
         global _warned
         if os.environ.get("ISP_ENV") == "production":
             raise GatewayCryptoError(
-                "ISP_GATEWAY_SECRET is not configured — gateway secrets cannot be sealed."
+                "No sealing key is configured on the server. Set ISP_GATEWAY_SECRET "
+                "(or ISP_ROUTER_SECRET) in .env and restart the service."
             )
         if not _warned:
             _warned = True

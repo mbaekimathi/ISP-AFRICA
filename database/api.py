@@ -471,9 +471,10 @@ def clean_endpoint(value):
 
 def daraja_oauth_probe(environment, consumer_key, consumer_secret):
     """Cheapest proof Daraja credentials work — one OAuth round-trip."""
-    import urllib.request
-    import urllib.error
     import base64
+    import http.client
+    import urllib.error
+    import urllib.request
 
     host = "https://api.safaricom.co.ke" if environment == "live" else "https://sandbox.safaricom.co.ke"
     request = urllib.request.Request(
@@ -487,13 +488,13 @@ def daraja_oauth_probe(environment, consumer_key, consumer_secret):
         detail = ""
         try:
             detail = str(json.loads(error.read().decode() or "{}").get("errorMessage") or "").strip()
-        except (ValueError, OSError):
+        except (ValueError, OSError, http.client.HTTPException):
             detail = ""
         suffix = f": {detail}" if detail else ""
         if error.code in (400, 401, 403):
             return {"connected": False, "reason": f"Daraja rejected the credentials ({error.code}{suffix}). Check the consumer key, secret, and environment."}
         return {"connected": False, "reason": f"Daraja answered with an error ({error.code}{suffix}). Try again shortly."}
-    except (urllib.error.URLError, OSError, ValueError) as error:
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as error:
         return {"connected": False, "reason": f"Daraja could not be reached: {getattr(error, 'reason', error)}."}
     if body.get("access_token"):
         return {"connected": True, "reason": ""}
@@ -2245,6 +2246,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(status, body)
         except pymysql.MySQLError:
             self.send_json(status, {"error": "The account database could not be reached."})
+        except gateway_crypto.GatewayCryptoError as error:
+            status = 503
+            print(f"event=gateway-crypto path={path} error={error}", flush=True)
+            self.send_json(status, {"error": str(error)})
         except Exception:
             traceback.print_exc()
             self.send_json(status, {"error": "The account service could not complete that request."})
