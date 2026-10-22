@@ -68,6 +68,7 @@ export function CompanyPaymentsPage() {
   const [daraja, setDaraja] = useState<DarajaDraft>(emptyDaraja);
   const [darajaInfo, setDarajaInfo] = useState<DarajaInfo | null>(null);
   const [error, setError] = useState("");
+  const [notice, setNotice] = useState("");
   const [pending, setPending] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [check, setCheck] = useState<{ state: "idle" | "checking" | "ok" | "failed"; reason: string }>({
@@ -154,6 +155,7 @@ export function CompanyPaymentsPage() {
 
   function save() {
     setError("");
+    setNotice("");
     setPending(true);
     apiRequest<CompanyPayments>("/api/employee/company/payments", {
       method: "POST",
@@ -162,6 +164,7 @@ export function CompanyPaymentsPage() {
       .then((body) => {
         apply(body);
         setError("");
+        setNotice("Saved. Checking the connection with Daraja…");
       })
       .catch((cause: unknown) => {
         setError(cause instanceof Error ? cause.message : "Company payment settings could not be saved.");
@@ -204,11 +207,6 @@ export function CompanyPaymentsPage() {
         title="Company payments"
         description="Set up the company payment gateway — collections, B2C/B2B transfers, and callbacks all run through the company Daraja API. Saved secrets stay hidden and are kept when you leave those fields unchanged."
       />
-      {error ? (
-        <p className="mt-4 notice" role="alert">
-          {error}
-        </p>
-      ) : null}
       <form
         className="form-card mt-6 max-w-2xl"
         onSubmit={(event) => {
@@ -382,16 +380,28 @@ export function CompanyPaymentsPage() {
             ) : null}
           </div>
         ) : null}
+        {error ? (
+          <p className="notice" role="alert">
+            {error}
+          </p>
+        ) : notice ? (
+          <p className="notice border-success-border bg-success-soft/60" role="status">
+            {notice}
+          </p>
+        ) : null}
         <div className="flex flex-wrap items-center gap-3">
           <PrimaryButton type="submit" disabled={pending || !loaded}>
-            Save company gateway
+            {pending ? "Saving…" : "Save company gateway"}
           </PrimaryButton>
           <SecondaryButton
             type="button"
             disabled={pending || check.state === "checking"}
-            onClick={() => testConnection(daraja)}
+            onClick={() => {
+              setNotice("");
+              testConnection(daraja);
+            }}
           >
-            Test connection
+            {check.state === "checking" ? "Testing…" : "Test connection"}
           </SecondaryButton>
         </div>
       </form>
