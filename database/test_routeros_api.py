@@ -372,6 +372,7 @@ class RouterOsApiTests(unittest.TestCase):
         self.assertIn(b"/ip/firewall/connection/print", sent)
         self.assertIn(b"/ipv6/firewall/filter/add", sent)
         self.assertIn(b"/interface/pppoe-server/server/add", sent)
+        self.assertIn(b"=keepalive-timeout=60", sent)
         self.assertIn(b"in-interface=ether2", sent)
         self.assertNotIn(b"/system/script", sent)
         self.assertNotIn(b"secret-password", b"".join(sock.sent[1:]))
@@ -511,6 +512,89 @@ class RouterOsApiTests(unittest.TestCase):
         self.assertIn(b"/system/script/run", sent)
         self.assertIn(b"/system/script/remove", sent)
         self.assertNotIn(b"secret-password", b"".join(sock.sent[1:]))
+
+    def inspect_replies(self, accept):
+        done = sentence("!done")
+        rp = routeros_api
+        return [
+            done,
+            sentence("!re", "=.id=*1", "=service-name=pppoe", "=disabled=false") + done,
+            sentence("!re", "=.id=*2", f"=comment={rp.PPPOE_DROP_PPP}")
+            + sentence("!re", "=.id=*3", f"=comment={rp.PPPOE_ALLOW}")
+            + done,
+            sentence("!re", "=.id=*4", "=chain=dstnat", "=action=dst-nat", "=disabled=false", f"=comment={rp.PPPOE_PORTAL_NAT_SUS}")
+            + sentence("!re", "=.id=*5", "=chain=dstnat", "=action=dst-nat", "=disabled=false", f"=comment={rp.PPPOE_PORTAL_NAT_EXP}")
+            + done,
+            done,
+            sentence("!re", "=.id=*6", "=address=10.88.0.1", "=service=ppp") + done,
+            sentence("!re", f"=accept={accept}", "=port=3799") + done,
+            done,
+            done,
+        ]
+
+    def test_inspect_reads_routeros7_boolean_incoming_accept(self):
+        for accept in ("true", "yes"):
+            sock = ScriptedSocket(self.inspect_replies(accept))
+            state = routeros_api.inspect_access(
+                "10.88.0.5", "secret-password", radius_address="10.88.0.1", opener=lambda _address, _timeout: sock
+            )
+            self.assertTrue(state["pppoe"], accept)
+            self.assertEqual(state["pppoe_missing"], [])
+            self.assertFalse(state["read_failed"])
+
+    def test_inspect_reports_what_is_missing(self):
+        sock = ScriptedSocket(self.inspect_replies("false"))
+        state = routeros_api.inspect_access(
+            "10.88.0.5", "secret-password", radius_address="10.88.0.1", opener=lambda _address, _timeout: sock
+        )
+        self.assertFalse(state["pppoe"])
+        self.assertEqual(state["pppoe_missing"], ["radius-incoming"])
+
+    def test_enforcement_heal_keeps_live_sessions_and_connections(self):
+        done = sentence("!done")
+        replies = [done, sentence("!re", "=name=ether2", "=type=ether", "=comment=PPPoE") + done] + [done] * 60
+        sock = ScriptedSocket(list(replies))
+        routeros_api.apply_pppoe_enforcement("10.88.0.5", "secret-password", True, heal=True, opener=lambda _address, _timeout: sock)
+        healed = b"".join(sock.sent)
+        self.assertIn(b"isp-centric-pppoe-allow", healed)
+        self.assertNotIn(b"/ppp/active/", healed)
+        self.assertNotIn(b"/ip/firewall/connection/", healed)
+        sock = ScriptedSocket(list(replies))
+        routeros_api.apply_pppoe_enforcement("10.88.0.5", "secret-password", True, opener=lambda _address, _timeout: sock)
+        explicit = b"".join(sock.sent)
+        self.assertIn(b"/ppp/active/print", explicit)
+        self.assertIn(b"/ip/firewall/connection/print", explicit)
+
+    def test_heal_leaves_live_server_and_present_rules_alone(self):
+        rp = routeros_api
+        done = sentence("!done")
+        filters = b"".join(
+            sentence("!re", f"=.id=*{index + 10}", "=chain=forward", f"=comment={comment}")
+            for index, comment in enumerate(sorted(rp.PPPOE_FILTERS))
+        )
+
+        class RouterSocket(ScriptedSocket):
+            def sendall(self, payload):
+                self.sent.append(payload)
+                if b"/interface/pppoe-server/server/print" in payload:
+                    self.incoming += sentence(
+                        "!re", "=.id=*1", f"=service-name={rp.PPPOE_SERVICE}", "=interface=ether3", "=disabled=false"
+                    ) + done
+                elif b"/ip/firewall/filter/print" in payload:
+                    self.incoming += filters + done
+                else:
+                    self.incoming += done
+
+        sock = RouterSocket([])
+        rp.apply_pppoe_enforcement(
+            "10.88.0.5", "secret-password", True, heal=True, access="ether2", opener=lambda _address, _timeout: sock
+        )
+        sent = b"".join(sock.sent)
+        self.assertNotIn(b"/interface/pppoe-server/server/set", sent)
+        self.assertNotIn(b"/ip/firewall/filter/remove", sent)
+        self.assertNotIn(b"/ip/firewall/filter/add", sent)
+        self.assertNotIn(b"/ip/dhcp-server/set", sent)
+        self.assertNotIn(b"/ppp/active/", sent)
 
 
 if __name__ == "__main__":

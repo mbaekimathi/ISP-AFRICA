@@ -87,6 +87,7 @@ const pppoe = buildPppoeScript({
 });
 assert.equal(pppoe.applicable, true);
 assert.ok(pppoe.script.includes("/interface pppoe-server server add"));
+assert.ok(pppoe.script.includes("keepalive-timeout=60"));
 assert.ok(pppoe.script.includes("in-interface=all-ppp"));
 assert.ok(pppoe.script.includes("action=drop"));
 assert.ok(pppoe.script.includes("accept src-address-list=pppoe-subscribed in-interface=all-ppp"));

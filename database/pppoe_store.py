@@ -413,7 +413,25 @@ def _drop_nas_cache():
         pass
 
 
+DISCONNECT_REQUEST = 40
+COA_REQUEST = 43
+MIKROTIK_VENDOR = 14988
+MIKROTIK_RATE_LIMIT = 8
+
+
 def send_disconnect(host, secret, username, session_id="", framed=""):
+    return _send_dynamic(DISCONNECT_REQUEST, host, secret, username, session_id, framed)
+
+
+def send_rate_change(host, secret, username, rate_limit, session_id="", framed=""):
+    """CoA-Request (RFC 5176) that re-rates a live session in place."""
+    rate = rate_limit.encode()
+    inner = bytes([MIKROTIK_RATE_LIMIT, len(rate) + 2]) + rate
+    vsa = MIKROTIK_VENDOR.to_bytes(4, "big") + inner
+    return _send_dynamic(COA_REQUEST, host, secret, username, session_id, framed, bytes([26, len(vsa) + 2]) + vsa)
+
+
+def _send_dynamic(code, host, secret, username, session_id="", framed="", extra=b""):
     if not host or not secret:
         return "queued"
     identifier = secrets.randbelow(256)
@@ -427,8 +445,9 @@ def send_disconnect(host, secret, username, session_id="", framed=""):
             attributes += bytes([8, 6]) + socket.inet_aton(framed)
         except OSError:
             pass
+    attributes += extra
     length = 20 + len(attributes)
-    head = bytes([40, identifier, length >> 8, length & 255])
+    head = bytes([code, identifier, length >> 8, length & 255])
     authenticator = hashlib.md5(head + bytes(16) + attributes + secret.encode()).digest()
     packet = head + authenticator + attributes
     try:
@@ -439,9 +458,10 @@ def send_disconnect(host, secret, username, session_id="", framed=""):
         sock.sendto(packet, (host, 3799))
         try:
             data, _source = sock.recvfrom(4096)
-            if data and data[0] == 41:
+            # ACK is code + 1 (41 / 44), NAK is code + 2 (42 / 45).
+            if data and data[0] == code + 1:
                 return "sent"
-            if data and data[0] == 42:
+            if data and data[0] == code + 2:
                 return "refused"
         except socket.timeout:
             return "no-answer"
@@ -1795,6 +1815,38 @@ def coa_for(cursor, row, username):
     return send_disconnect(nas["nasname"], secret, username)
 
 
+def rerate_sessions(cursor, row, username, rate_limit):
+    """Apply a new speed to live sessions without hanging them up.
+
+    Each open session gets a CoA-Request carrying the new Mikrotik-Rate-Limit;
+    only a session whose NAS refuses or ignores it is disconnected so it redials
+    on the new plan. With nothing open, the next dial already reads the plan.
+    """
+    cursor.execute(
+        """
+        SELECT nasipaddress, acctsessionid, framedipaddress
+        FROM radacct WHERE username = %s AND acctstoptime IS NULL
+        """,
+        (username,),
+    )
+    sessions = cursor.fetchall()
+    if not sessions:
+        return "unchanged"
+    result = "updated"
+    for session in sessions:
+        host = (session.get("nasipaddress") or "").strip()
+        cursor.execute("SELECT secret FROM nas WHERE nasname = %s LIMIT 1", (host,))
+        nas = cursor.fetchone()
+        if not host or not nas or not nas.get("secret"):
+            return coa_for(cursor, row, username)
+        sid = session.get("acctsessionid") or ""
+        framed = session.get("framedipaddress") or ""
+        if send_rate_change(host, nas["secret"], username, rate_limit, sid, framed) != "sent":
+            outcome = send_disconnect(host, nas["secret"], username, sid, framed)
+            result = "reconnected" if outcome == "sent" else outcome
+    return result
+
+
 def disconnect_router_clients(cursor, client_id, router_id, actor_id, reason):
     """Disconnect every client still assigned to a router that is being deleted."""
     cursor.execute(
@@ -2020,6 +2072,7 @@ def reactivate(cursor, client_id, subscriber_id, payload):
 
 def upgrade(cursor, client_id, subscriber_id, payload):
     row = require_owned(cursor, client_id, subscriber_id)
+    was_surfing = subscription_can_surf(row, date.today())
     package = load_package(cursor, client_id, str(payload.get("packageId") or ""))
     if not package or row["router_id"] not in {str(item) for item in package["routers"]}:
         raise PppoeError(400, "Choose a package linked to this router.")
@@ -2046,14 +2099,18 @@ def upgrade(cursor, client_id, subscriber_id, payload):
         row["package_id"] = package["id"]
         row["upload_mbps"] = package["uploadMbps"]
         row["download_mbps"] = package["downloadMbps"]
-        apply_plan(cursor, row, row["status"] == "active")
+        plan = apply_plan(cursor, row, row["status"] == "active")
         log_event(cursor, client_id, subscriber_id, client_id, "upgrade", package["name"])
         finish(cursor)
     except Exception as error:
         abort(cursor)
         raise PppoeError(400, "The package change was not saved.") from error
     body = subscriber_detail(cursor, client_id, subscriber_id)
-    body["coa"] = coa_for(cursor, row, row["pppoe_username"])
+    if was_surfing and plan["radiusActive"]:
+        # Same address list, new speed: re-rate the live session in place.
+        body["coa"] = rerate_sessions(cursor, row, row["pppoe_username"], plan["rateLimit"])
+    else:
+        body["coa"] = coa_for(cursor, row, row["pppoe_username"])
     return body
 
 

@@ -305,7 +305,7 @@ export function buildDetectedPortsScript(assignments: DetectedPortSetup[]) {
           lines.push(`:if ([:len [/ip address find where address="${localAddress}/32" or address="${localAddress}/24"]] = 0) do={ /ip address add address=${localAddress}/32 interface=$target comment=isp-centric-pppoe };`);
         }
         lines.push(`:if ([:len [/ppp profile find where name="${pool}-profile"]] = 0) do={ /ppp profile add name=${pool}-profile local-address=${localAddress} remote-address=${pool} only-one=yes };`);
-        lines.push(`:if ([:len [/interface pppoe-server server find where service-name="${service}"]] = 0) do={ /interface pppoe-server server add service-name=${service} interface=$target default-profile=${pool}-profile disabled=no };`);
+        lines.push(`:if ([:len [/interface pppoe-server server find where service-name="${service}"]] = 0) do={ /interface pppoe-server server add service-name=${service} interface=$target default-profile=${pool}-profile keepalive-timeout=60 disabled=no };`);
         continue;
       }
       const hotspotName = TOKEN.test(item.service) ? item.service : "";
@@ -379,7 +379,7 @@ export function buildPppoeScript(input: { iface: string; service: string; pool: 
     const prefix = localAddress.split(".").slice(0, 3).join(".");
     lines.push(
       `:if ([:len [/ppp profile find where name="${pool}-profile"]] = 0) do={ /ppp profile add name=${pool}-profile local-address=${localAddress} remote-address=${pool} only-one=yes };`,
-      `:if ([:len [/interface pppoe-server server find where service-name="${service}"]] = 0) do={ /interface pppoe-server server add service-name=${service} interface=${iface} default-profile=${pool}-profile disabled=no } else={ /interface pppoe-server server set [find where service-name="${service}"] disabled=no };`,
+      `:if ([:len [/interface pppoe-server server find where service-name="${service}"]] = 0) do={ /interface pppoe-server server add service-name=${service} interface=${iface} default-profile=${pool}-profile keepalive-timeout=60 disabled=no } else={ /interface pppoe-server server set [find where service-name="${service}"] disabled=no };`,
       `/ip firewall filter remove [find where comment="isp-centric-pppoe-allow"];`,
       `/ip firewall filter remove [find where comment="isp-centric-pppoe-allow-back"];`,
       `/ip firewall filter remove [find where comment="isp-centric-pppoe-suspended"];`,

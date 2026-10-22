@@ -144,7 +144,7 @@ class PppoeValidationTests(unittest.TestCase):
         self.assertIn("Simultaneous-Use", attributes)
         self.assertNotIn("Auth-Type", attributes)
         self.assertEqual(built["replies"][0]["value"], "10.10.0.2")
-        self.assertIn("Session-Timeout", [row["attribute"] for row in built["replies"]])
+        self.assertNotIn("Session-Timeout", [row["attribute"] for row in built["replies"]])
         self.assertEqual(built["groupReplies"][0]["value"], "5M/10M")
         self.assertEqual(built["groupReplies"][1]["value"], "pppoe-subscribed")
         self.assertFalse(pppoe_store.subscription_can_surf({"status": "active", "billing_status": "suspended", "expiry_date": None}, TODAY))
@@ -297,6 +297,80 @@ class PppoeValidationTests(unittest.TestCase):
             pppoe_store.send_disconnect = original
         self.assertEqual(result, "sent")
         self.assertEqual(sent, [("10.88.0.9", "router-secret", "254795606115")])
+
+
+class RerateTests(unittest.TestCase):
+    """A package change on a surfing client re-rates the session instead of hanging it up."""
+
+    class Cursor:
+        def __init__(self, sessions):
+            self.sessions = sessions
+            self.last = ""
+
+        def execute(self, sql, args=None):
+            self.last = sql
+
+        def fetchall(self):
+            return self.sessions
+
+        def fetchone(self):
+            return {"secret": "nas-secret"}
+
+    def rerate(self, coa_outcome):
+        calls = []
+        sessions = [{"nasipaddress": "10.88.0.5", "acctsessionid": "81a00001", "framedipaddress": "10.10.0.9"}]
+        original = (pppoe_store.send_rate_change, pppoe_store.send_disconnect)
+        pppoe_store.send_rate_change = lambda *args: calls.append(("coa", args)) or coa_outcome
+        pppoe_store.send_disconnect = lambda *args: calls.append(("disconnect", args)) or "sent"
+        try:
+            result = pppoe_store.rerate_sessions(self.Cursor(sessions), {"router_id": "r1"}, "0712345678", "10M/20M")
+        finally:
+            pppoe_store.send_rate_change, pppoe_store.send_disconnect = original
+        return result, calls
+
+    def test_acked_coa_keeps_the_session(self):
+        result, calls = self.rerate("sent")
+        self.assertEqual(result, "updated")
+        self.assertEqual([kind for kind, _ in calls], ["coa"])
+        self.assertEqual(calls[0][1], ("10.88.0.5", "nas-secret", "0712345678", "10M/20M", "81a00001", "10.10.0.9"))
+
+    def test_refused_coa_falls_back_to_a_disconnect(self):
+        result, calls = self.rerate("refused")
+        self.assertEqual(result, "reconnected")
+        self.assertEqual([kind for kind, _ in calls], ["coa", "disconnect"])
+
+    def test_no_open_session_needs_nothing(self):
+        result = pppoe_store.rerate_sessions(self.Cursor([]), {"router_id": "r1"}, "0712345678", "10M/20M")
+        self.assertEqual(result, "unchanged")
+
+    def test_rate_change_packet_carries_mikrotik_rate_limit(self):
+        import socket as socket_module
+
+        captured = {}
+
+        class FakeUdp:
+            def settimeout(self, _seconds):
+                pass
+
+            def sendto(self, packet, address):
+                captured["packet"], captured["address"] = packet, address
+
+            def recvfrom(self, _size):
+                return bytes([44]), None
+
+            def close(self):
+                pass
+
+        original = socket_module.socket
+        socket_module.socket = lambda *_args: FakeUdp()
+        try:
+            outcome = pppoe_store.send_rate_change("10.88.0.5", "nas-secret", "0712345678", "10M/20M")
+        finally:
+            socket_module.socket = original
+        self.assertEqual(outcome, "sent")
+        self.assertEqual(captured["address"], ("10.88.0.5", 3799))
+        self.assertEqual(captured["packet"][0], pppoe_store.COA_REQUEST)
+        self.assertIn((14988).to_bytes(4, "big") + bytes([8, 9]) + b"10M/20M", captured["packet"])
 
 
 class VoucherTests(unittest.TestCase):
