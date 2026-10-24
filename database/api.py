@@ -367,6 +367,17 @@ def stamp(value):
     return value.isoformat(sep=" ") if hasattr(value, "isoformat") else str(value)
 
 
+def jsonable(value):
+    """json.dumps fallback for DB-native types — datetimes get the same
+    'YYYY-MM-DD HH:MM:SS' stamp the hand-rolled serializers emit, and
+    Decimals keep their plain decimal string form."""
+    if isinstance(value, datetime):
+        return value.isoformat(sep=" ")
+    if hasattr(value, "isoformat"):
+        return value.isoformat()
+    return str(value)
+
+
 def keep_or_clean(value, existing, message, minimum, maximum):
     text = str(value or "").strip()
     if not text or text.startswith("••••"):
@@ -2588,6 +2599,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(status, {"error": str(error)})
         except Exception:
             traceback.print_exc()
+            # send_json may have already run `status = 200` before the body
+            # failed to serialize — a crash is always a 500, never a masked
+            # success, or the UI swallows the error body as real data.
+            status = 500
             self.send_json(status, {"error": "The account service could not complete that request."})
         finally:
             elapsed = int((time.perf_counter() - started) * 1000)
@@ -6223,7 +6238,7 @@ class Handler(BaseHTTPRequestHandler):
         return f"https://{host}"
 
     def send_json(self, status, body, cookie=None):
-        encoded = json.dumps(body).encode("utf-8")
+        encoded = json.dumps(body, default=jsonable).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Content-Length", str(len(encoded)))
