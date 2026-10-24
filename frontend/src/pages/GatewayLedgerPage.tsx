@@ -47,6 +47,10 @@ type PaymentRow = {
   mpesa_receipt: string | null;
   status: string;
   custody: string;
+  batch_id: string | null;
+  transfers_total: number;
+  transfers_confirmed: number;
+  transfer_receipt: string | null;
   created_at: string;
 };
 
@@ -99,12 +103,12 @@ const payoutTone: Record<string, StatusTone> = {
 };
 
 const custodyLabel: Record<string, string> = {
-  awaiting: "Awaiting payment",
-  held: "Held",
-  scheduled: "Scheduled",
-  in_transit: "In transit",
-  delivered: "Delivered",
-  under_review: "Under review",
+  awaiting: "Not confirmed",
+  held: "Held — not transferred",
+  scheduled: "Queued to transfer",
+  in_transit: "Transferring",
+  delivered: "Transferred",
+  under_review: "Transfer under review",
   unmatched: "Unmatched",
   failed: "Failed",
 };
@@ -164,6 +168,8 @@ export function GatewayLedgerPage() {
   const [summary, setSummary] = useState<Summary | null>(null);
   const [tab, setTab] = useState<Tab>("payments");
   const [paymentStatus, setPaymentStatus] = useState("all");
+  const [paymentsOffset, setPaymentsOffset] = useState(0);
+  const [paymentsMore, setPaymentsMore] = useState(false);
   const [payments, setPayments] = useState<PaymentRow[] | null>(null);
   const [payouts, setPayouts] = useState<PayoutRow[] | null>(null);
   const [entries, setEntries] = useState<LedgerRow[] | null>(null);
@@ -180,14 +186,20 @@ export function GatewayLedgerPage() {
     const fail = (cause: unknown) =>
       setMessage(cause instanceof Error ? cause.message : "That view could not be loaded.");
     if (tab === "payments") {
-      setPayments(null);
-      const params = paymentStatus === "all" ? "" : `?status=${paymentStatus}`;
-      apiRequest<{ payments: PaymentRow[] }>(`/api/gateway/payments${params}`).then((b) => setPayments(b.payments)).catch(fail);
+      if (paymentsOffset === 0) setPayments(null);
+      const params = new URLSearchParams({ limit: "500", offset: String(paymentsOffset) });
+      if (paymentStatus !== "all") params.set("status", paymentStatus);
+      apiRequest<{ payments: PaymentRow[] }>(`/api/gateway/payments?${params}`)
+        .then((b) => {
+          setPayments((rows) => (paymentsOffset === 0 ? b.payments : [...(rows ?? []), ...b.payments]));
+          setPaymentsMore(b.payments.length >= 500);
+        })
+        .catch(fail);
     }
     if (tab === "payouts") apiRequest<{ payouts: PayoutRow[] }>("/api/gateway/payouts").then((b) => setPayouts(b.payouts)).catch(fail);
     if (tab === "ledger") apiRequest<{ entries: LedgerRow[] }>("/api/gateway/ledger").then((b) => setEntries(b.entries)).catch(fail);
     if (tab === "notices") apiRequest<{ notifications: NoticeRow[] }>("/api/gateway/notifications").then((b) => setNotices(b.notifications)).catch(fail);
-  }, [tab, paymentStatus]);
+  }, [tab, paymentStatus, paymentsOffset]);
 
   const pooled = summary?.mode === "company_gateway";
 
@@ -260,7 +272,7 @@ export function GatewayLedgerPage() {
             <FormPicker
               label="Gateway views"
               value={tab}
-              onChange={(id) => setTab(id as Tab)}
+              onChange={(id) => { setTab(id as Tab); setPaymentsOffset(0); }}
               options={[
                 { id: "payments", label: "Payments" },
                 { id: "payouts", label: "Payouts" },
@@ -274,11 +286,11 @@ export function GatewayLedgerPage() {
             <section className="card mt-4 overflow-hidden">
               <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
                 <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><ArrowLeftRight className="h-4 w-4" /></span>
-                <h2 className="text-sm font-semibold">Pooled payments</h2>
+                <h2 className="text-sm font-semibold">All gateway transactions</h2>
                 <select
                   className="field ml-auto w-auto py-1.5 text-xs"
                   value={paymentStatus}
-                  onChange={(event) => setPaymentStatus(event.target.value)}
+                  onChange={(event) => { setPaymentStatus(event.target.value); setPaymentsOffset(0); }}
                   aria-label="Filter by status"
                 >
                   <option value="all">All statuses</option>
@@ -298,13 +310,13 @@ export function GatewayLedgerPage() {
                       <th className="px-5 py-3 font-medium">From</th>
                       <th className="px-5 py-3 font-medium">Receipt</th>
                       <th className="px-5 py-3 text-right font-medium">Amount</th>
-                      <th className="px-5 py-3 font-medium">Custody</th>
+                      <th className="px-5 py-3 font-medium">Transfer status</th>
                     </tr>
                   </thead>
                   <tbody>
                     {payments === null ? <LoadingRow cols={6} /> : null}
                     {payments !== null && payments.length === 0 ? (
-                      <tr><td colSpan={6} className="px-5 py-10 text-center text-muted-foreground">No pooled payments yet.</td></tr>
+                      <tr><td colSpan={6} className="px-5 py-10 text-center text-muted-foreground">No transactions through the gateway yet.</td></tr>
                     ) : null}
                     {(payments ?? []).map((row) => (
                       <tr key={row.id}>
@@ -313,12 +325,31 @@ export function GatewayLedgerPage() {
                         <td className="px-5 py-3 tabular">{row.msisdn || "—"}</td>
                         <td className="px-5 py-3 font-mono text-xs">{row.mpesa_receipt || "—"}</td>
                         <td className="px-5 py-3 text-right font-semibold tabular">{money(row.amount)}</td>
-                        <td className="px-5 py-3"><StatusBadge tone={custodyTone[row.custody] ?? "neutral"}>{custodyLabel[row.custody] ?? row.custody}</StatusBadge></td>
+                        <td className="px-5 py-3">
+                          <StatusBadge tone={custodyTone[row.custody] ?? "neutral"}>{custodyLabel[row.custody] ?? row.custody}</StatusBadge>
+                          {row.transfers_total ? (
+                            <div className="mt-0.5 text-[11px] text-muted-foreground">
+                              {row.transfers_confirmed}/{row.transfers_total} payout{row.transfers_total === 1 ? "" : "s"}
+                              {row.transfer_receipt ? <> · <span className="font-mono">{row.transfer_receipt}</span></> : null}
+                            </div>
+                          ) : null}
+                        </td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
+              {paymentsMore ? (
+                <div className="border-t border-border px-5 py-3 text-center">
+                  <button
+                    type="button"
+                    className="field w-auto py-1.5 text-xs"
+                    onClick={() => setPaymentsOffset((n) => n + 500)}
+                  >
+                    Show older transactions
+                  </button>
+                </div>
+              ) : null}
             </section>
           ) : null}
 

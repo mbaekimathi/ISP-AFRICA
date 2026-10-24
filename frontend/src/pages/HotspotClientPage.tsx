@@ -4,14 +4,16 @@ import { Link, useNavigate, useParams } from "react-router-dom";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
   Activity,
+  ArrowDownUp,
   ArrowLeft,
   CalendarClock,
+  Check,
   ChevronDown,
   Copy,
   Gauge,
+  History,
   Power,
   Router,
-  Smartphone,
   Ticket,
   Trash2,
   UserRound,
@@ -26,6 +28,7 @@ import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
 import { clientPage } from "@/lib/accounts";
+import { cn } from "@/lib/cn";
 import { useAuth } from "@/providers/AuthProvider";
 
 type Voucher = {
@@ -201,36 +204,7 @@ function ActionDialog({
   );
 }
 
-function Section({
-  title,
-  open,
-  onToggle,
-  action,
-  children,
-}: {
-  title: string;
-  open: boolean;
-  onToggle: (open: boolean) => void;
-  action?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <details
-      className="group border-t border-border first:border-t-0"
-      open={open}
-      onToggle={(event) => onToggle(event.currentTarget.open)}
-    >
-      <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-4 text-sm font-semibold hover:bg-surface-muted [&::-webkit-details-marker]:hidden">
-        <span>{title}</span>
-        <span className="flex items-center gap-3">
-          {action}
-          <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-open:rotate-180" />
-        </span>
-      </summary>
-      <div className="px-5 pb-5 pt-1">{children}</div>
-    </details>
-  );
-}
+type HistoryTab = "vouchers" | "sessions" | "timeline";
 
 function TrendChart({
   data,
@@ -349,7 +323,7 @@ export function HotspotClientPage() {
   const [detail, setDetail] = useState<GuestDetail | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
-  const [openSection, setOpenSection] = useState<string | null>(null);
+  const [tab, setTab] = useState<HistoryTab>("vouchers");
   const [dialog, setDialog] = useState<"recharge" | "end" | "delete" | null>(null);
   const [voucherCount, setVoucherCount] = useState(1);
   const [rechargePeriods, setRechargePeriods] = useState(1);
@@ -463,8 +437,11 @@ export function HotspotClientPage() {
   const firstHost = detail.hosts?.[0] ?? null;
   const timeLeft = firstLive?.sessionTimeLeft || "—";
   const usedVouchers = detail.vouchers.filter((voucher) => voucher.status === "used").length;
-  const toggleSection = (id: string) => (next: boolean) =>
-    setOpenSection((current) => (next ? id : current === id ? null : current));
+  const historyTabs: { id: HistoryTab; label: string; count: number }[] = [
+    { id: "vouchers", label: "Vouchers", count: detail.vouchers.length },
+    { id: "sessions", label: "Sessions", count: detail.sessions.length },
+    { id: "timeline", label: "Timeline", count: detail.timeline.length },
+  ];
   const statusLabel = client.deleted ? "Deleted" : ended ? "Ended" : online ? "Online" : connected ? "Connected" : "Offline";
   const statusHint = online
     ? `Surfing for ${firstLive?.uptime || "a moment"}`
@@ -583,26 +560,31 @@ export function HotspotClientPage() {
                   <Router className="h-3.5 w-3.5" aria-hidden="true" />
                   {client.routerName || "This router"}
                 </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <Ticket className="h-3.5 w-3.5" aria-hidden="true" />
-                  {usedVouchers}/{detail.vouchers.length} vouchers used
-                </span>
+                {detail.vouchers.length ? (
+                  <span className="inline-flex items-center gap-1.5">
+                    <Ticket className="h-3.5 w-3.5" aria-hidden="true" />
+                    {usedVouchers}/{detail.vouchers.length} vouchers used
+                  </span>
+                ) : null}
               </div>
             </div>
           </div>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ml-auto flex min-w-0 flex-col gap-1.5">
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Voucher</p>
             <div className="flex items-center gap-2 rounded-xl border border-border bg-surface-muted/50 px-3 py-2">
-              <Ticket className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
-              <code className="min-w-0 truncate text-sm font-medium">{detail.vouchers[0]?.code || "—"}</code>
+              <Ticket className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
+              <code className="min-w-0 truncate font-mono text-sm font-semibold tracking-wide">
+                {detail.vouchers[0]?.code || "—"}
+              </code>
               {detail.vouchers.length ? (
                 <button
                   type="button"
                   aria-label="Copy voucher codes"
-                  title="Copy voucher codes"
+                  title={detail.vouchers.length > 1 ? `Copy all ${detail.vouchers.length} voucher codes` : "Copy voucher code"}
                   className="shrink-0 text-muted-foreground transition hover:text-foreground"
                   onClick={copyVouchers}
                 >
-                  <Copy className="h-3.5 w-3.5" />
+                  {copied ? <Check className="h-3.5 w-3.5 text-success" /> : <Copy className="h-3.5 w-3.5" />}
                 </button>
               ) : null}
             </div>
@@ -620,30 +602,22 @@ export function HotspotClientPage() {
           hintClass={statusColor}
         />
         <StatCard
-          icon={<Smartphone className="h-4 w-4" />}
-          label="Live devices"
-          value={detail.routerReachable ? String(detail.live.length + (detail.hosts?.length ?? 0)) : "—"}
-          hint={
-            detail.routerReachable
-              ? online
-                ? "On the router now"
-                : connected
-                  ? "Connected — not surfing"
-                  : "None on the router"
-              : "Router unreachable"
-          }
+          icon={<CalendarClock className="h-4 w-4" />}
+          label="Time left"
+          value={online ? timeLeft : "—"}
+          hint={online ? "On the live session" : "No open session"}
+        />
+        <StatCard
+          icon={<ArrowDownUp className="h-4 w-4" />}
+          label="Data used"
+          value={bytes(detail.usage.bytesIn + detail.usage.bytesOut)}
+          hint={`${detail.usage.sessions} session${detail.usage.sessions === 1 ? "" : "s"}`}
         />
         <StatCard
           icon={<Wallet className="h-4 w-4" />}
           label="Paid"
           value={money(client.amount)}
           hint={client.mpesaCode ? `Receipt ${client.mpesaCode}` : client.status}
-        />
-        <StatCard
-          icon={<CalendarClock className="h-4 w-4" />}
-          label="Time left"
-          value={online ? timeLeft : "—"}
-          hint={online ? "On the live session" : "No open session"}
         />
       </div>
 
@@ -760,87 +734,99 @@ export function HotspotClientPage() {
           </section>
 
           <section className="card overflow-hidden">
-            <Section
-              title="Vouchers"
-              open={openSection === "vouchers"}
-              onToggle={toggleSection("vouchers")}
-              action={
-                detail.vouchers.length ? (
-                  <span className="text-xs text-muted-foreground">{usedVouchers}/{detail.vouchers.length} used</span>
-                ) : undefined
-              }
-            >
-            {detail.vouchers.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No vouchers issued for this purchase.</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="data-table min-w-[44rem]">
-                  <thead className="border-b border-border text-xs text-muted-foreground">
-                    <tr>
-                      <th className="px-2 py-2 font-medium">Code</th>
-                      <th className="px-2 py-2 font-medium">Valid for</th>
-                      <th className="px-2 py-2 font-medium">Status</th>
-                      <th className="px-2 py-2 font-medium">Issued</th>
-                      <th className="px-2 py-2 font-medium">Used</th>
-                      <th className="px-2 py-2 font-medium">Device</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detail.vouchers.map((voucher) => (
-                      <tr key={voucher.id} className="border-b border-border last:border-0">
-                        <td className="px-2 py-2 font-mono text-xs font-semibold text-primary">{voucher.code}</td>
-                        <td className="px-2 py-2">{duration(voucher.seconds)}</td>
-                        <td className="px-2 py-2">
-                          <StatusBadge tone={statusTone[voucher.status] ?? "neutral"}>{voucher.status}</StatusBadge>
-                        </td>
-                        <td className="px-2 py-2">{voucher.issuedAt ?? "—"}</td>
-                        <td className="px-2 py-2">{voucher.usedAt ?? "—"}</td>
-                        <td className="px-2 py-2 text-xs text-muted-foreground">{voucher.redeemedMac || voucher.redeemedIp || "—"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+            <CardHeader icon={<History className="h-4 w-4" />} title="History">
+              <div className="inline-flex rounded-lg bg-surface-muted p-1" role="tablist" aria-label="Guest history">
+                {historyTabs.map((item) => (
+                  <button
+                    key={item.id}
+                    type="button"
+                    role="tab"
+                    aria-selected={tab === item.id}
+                    onClick={() => setTab(item.id)}
+                    className={cn(
+                      "rounded-md px-3 py-1.5 text-xs font-semibold transition",
+                      tab === item.id
+                        ? "bg-surface text-foreground shadow-xs"
+                        : "text-muted-foreground hover:text-foreground",
+                    )}
+                  >
+                    {item.label}
+                    <span className="ml-1.5 tabular-nums text-subtle">{item.count}</span>
+                  </button>
+                ))}
               </div>
-            )}
-          </Section>
-
-          <Section title="Sessions" open={openSection === "sessions"} onToggle={toggleSection("sessions")}>
-            {detail.sessions.length === 0 ? (
-              <p className="text-sm text-muted-foreground">No sessions have been accounted yet.</p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="data-table min-w-[48rem]">
-                  <thead className="border-b border-border text-xs text-muted-foreground">
-                    <tr>
-                      <th className="px-2 py-2 font-medium">Account</th>
-                      <th className="px-2 py-2 font-medium">Started</th>
-                      <th className="px-2 py-2 font-medium">Stopped</th>
-                      <th className="px-2 py-2 font-medium">Length</th>
-                      <th className="px-2 py-2 font-medium">Down / Up</th>
-                      <th className="px-2 py-2 font-medium">Ended because</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {detail.sessions.map((session, index) => (
-                      <tr key={index} className="border-b border-border last:border-0">
-                        <td className="px-2 py-2 font-medium">{session.label}</td>
-                        <td className="px-2 py-2">{session.start ?? "—"}</td>
-                        <td className="px-2 py-2">
-                          {session.live ? <StatusBadge tone="active">Live now</StatusBadge> : session.stop ?? "—"}
-                        </td>
-                        <td className="px-2 py-2">{duration(session.seconds)}</td>
-                        <td className="px-2 py-2">{bytes(session.bytesIn)} / {bytes(session.bytesOut)}</td>
-                        <td className="px-2 py-2 text-xs text-muted-foreground">{session.cause || "—"}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </Section>
-
-            <Section title="Timeline" open={openSection === "timeline"} onToggle={toggleSection("timeline")}>
-              {detail.timeline.length === 0 ? (
+            </CardHeader>
+            <div className="px-5 pb-5 pt-4" role="tabpanel">
+              {tab === "vouchers" ? (
+                detail.vouchers.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No vouchers issued for this purchase.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <p className="mb-2 text-xs text-muted-foreground">
+                      {usedVouchers}/{detail.vouchers.length} used
+                    </p>
+                    <table className="data-table min-w-[44rem]">
+                      <thead className="border-b border-border text-xs text-muted-foreground">
+                        <tr>
+                          <th className="px-2 py-2 font-medium">Code</th>
+                          <th className="px-2 py-2 font-medium">Valid for</th>
+                          <th className="px-2 py-2 font-medium">Status</th>
+                          <th className="px-2 py-2 font-medium">Issued</th>
+                          <th className="px-2 py-2 font-medium">Used</th>
+                          <th className="px-2 py-2 font-medium">Device</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.vouchers.map((voucher) => (
+                          <tr key={voucher.id} className="border-b border-border last:border-0">
+                            <td className="px-2 py-2 font-mono text-xs font-semibold text-primary">{voucher.code}</td>
+                            <td className="px-2 py-2">{duration(voucher.seconds)}</td>
+                            <td className="px-2 py-2">
+                              <StatusBadge tone={statusTone[voucher.status] ?? "neutral"}>{voucher.status}</StatusBadge>
+                            </td>
+                            <td className="px-2 py-2">{voucher.issuedAt ?? "—"}</td>
+                            <td className="px-2 py-2">{voucher.usedAt ?? "—"}</td>
+                            <td className="px-2 py-2 text-xs text-muted-foreground">{voucher.redeemedMac || voucher.redeemedIp || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )
+              ) : tab === "sessions" ? (
+                detail.sessions.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No sessions have been accounted yet.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="data-table min-w-[48rem]">
+                      <thead className="border-b border-border text-xs text-muted-foreground">
+                        <tr>
+                          <th className="px-2 py-2 font-medium">Account</th>
+                          <th className="px-2 py-2 font-medium">Started</th>
+                          <th className="px-2 py-2 font-medium">Stopped</th>
+                          <th className="px-2 py-2 font-medium">Length</th>
+                          <th className="px-2 py-2 font-medium">Down / Up</th>
+                          <th className="px-2 py-2 font-medium">Ended because</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.sessions.map((session, index) => (
+                          <tr key={index} className="border-b border-border last:border-0">
+                            <td className="px-2 py-2 font-medium">{session.label}</td>
+                            <td className="px-2 py-2">{session.start ?? "—"}</td>
+                            <td className="px-2 py-2">
+                              {session.live ? <StatusBadge tone="active">Live now</StatusBadge> : session.stop ?? "—"}
+                            </td>
+                            <td className="px-2 py-2">{duration(session.seconds)}</td>
+                            <td className="px-2 py-2">{bytes(session.bytesIn)} / {bytes(session.bytesOut)}</td>
+                            <td className="px-2 py-2 text-xs text-muted-foreground">{session.cause || "—"}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )
+              ) : detail.timeline.length === 0 ? (
                 <p className="text-sm text-muted-foreground">No events recorded yet.</p>
               ) : (
                 <ol className="grid gap-3">
@@ -855,38 +841,44 @@ export function HotspotClientPage() {
                   ))}
                 </ol>
               )}
-            </Section>
+            </div>
           </section>
         </div>
 
         <div className="grid min-w-0 content-start gap-4">
           <section className="card overflow-hidden">
-            <CardHeader icon={<Wifi className="h-4 w-4" />} title="Connection" />
-            <dl className="px-5 py-3">
-              <InfoRow label="IP">{firstLive?.ip || firstHost?.ip || client.ip || "Not connected"}</InfoRow>
-              <InfoRow label="MAC">{firstLive?.mac || firstHost?.mac || client.mac || "—"}</InfoRow>
-              <InfoRow label="Uptime">{firstLive?.uptime || firstHost?.uptime || "—"}</InfoRow>
-              <InfoRow label="Idle">{firstLive?.idleTime || firstHost?.idleTime || "—"}</InfoRow>
-              <InfoRow label="Time left">{online ? timeLeft : "—"}</InfoRow>
-              <InfoRow label="Last seen">{detail.usage.lastSeen ?? "Never"}</InfoRow>
-            </dl>
-          </section>
-
-          <section className="card overflow-hidden">
-            <CardHeader icon={<UserRound className="h-4 w-4" />} title="Guest details" />
-            <dl className="px-5 py-3">
-              <InfoRow label="Phone">{client.phone || "—"}</InfoRow>
-              <InfoRow label="Package">{client.packageName}</InfoRow>
-              <InfoRow label="Router">{client.routerName || "—"}</InfoRow>
-              <InfoRow label="Paid">
-                {money(client.amount)}{client.mpesaCode ? ` · ${client.mpesaCode}` : ""}
-              </InfoRow>
-              <InfoRow label="Requested">{client.createdAt ?? "—"}</InfoRow>
-              <InfoRow label="Paid at">{client.paidAt ?? "—"}</InfoRow>
-              <InfoRow label="Devices">{client.devices}</InfoRow>
-              <InfoRow label="Periods">{client.periods}</InfoRow>
-              <InfoRow label="Access ended">{client.endedAt ?? "—"}</InfoRow>
-            </dl>
+            <CardHeader icon={<UserRound className="h-4 w-4" />} title="Details" />
+            <div className="px-5 py-3">
+              <p className="flex items-center gap-1.5 pb-1 pt-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <Wifi className="h-3.5 w-3.5" aria-hidden="true" />
+                Connection
+              </p>
+              <dl>
+                <InfoRow label="IP">{firstLive?.ip || firstHost?.ip || client.ip || "Not connected"}</InfoRow>
+                <InfoRow label="MAC">{firstLive?.mac || firstHost?.mac || client.mac || "—"}</InfoRow>
+                <InfoRow label="Uptime">{firstLive?.uptime || firstHost?.uptime || "—"}</InfoRow>
+                <InfoRow label="Idle">{firstLive?.idleTime || firstHost?.idleTime || "—"}</InfoRow>
+                <InfoRow label="Time left">{online ? timeLeft : "—"}</InfoRow>
+                <InfoRow label="Last seen">{detail.usage.lastSeen ?? "Never"}</InfoRow>
+              </dl>
+              <p className="mt-3 flex items-center gap-1.5 border-t border-border/60 pb-1 pt-4 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <Ticket className="h-3.5 w-3.5" aria-hidden="true" />
+                Purchase
+              </p>
+              <dl>
+                <InfoRow label="Phone">{client.phone || "—"}</InfoRow>
+                <InfoRow label="Package">{client.packageName}</InfoRow>
+                <InfoRow label="Router">{client.routerName || "—"}</InfoRow>
+                <InfoRow label="Paid">
+                  {money(client.amount)}{client.mpesaCode ? ` · ${client.mpesaCode}` : ""}
+                </InfoRow>
+                <InfoRow label="Requested">{client.createdAt ?? "—"}</InfoRow>
+                <InfoRow label="Paid at">{client.paidAt ?? "—"}</InfoRow>
+                <InfoRow label="Devices">{client.devices}</InfoRow>
+                <InfoRow label="Periods">{client.periods}</InfoRow>
+                <InfoRow label="Access ended">{client.endedAt ?? "—"}</InfoRow>
+              </dl>
+            </div>
           </section>
         </div>
       </div>

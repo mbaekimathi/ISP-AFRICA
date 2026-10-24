@@ -1075,7 +1075,14 @@ def custody_rows(cursor, client_id=None, status=None, limit=200, offset=0):
     sql = f"""
         SELECT p.id, p.client_id, p.source, p.channel, p.msisdn, p.amount,
                p.mpesa_receipt, p.checkout_id, p.status, p.confirmed_at, p.created_at,
-               be.batch_id, {CUSTODY_SQL} AS custody
+               be.batch_id,
+               (SELECT COUNT(*) FROM gateway_payouts po WHERE po.batch_id = be.batch_id) AS transfers_total,
+               (SELECT COUNT(*) FROM gateway_payouts po WHERE po.batch_id = be.batch_id
+                 AND po.status = 'confirmed') AS transfers_confirmed,
+               (SELECT MAX(po.mpesa_receipt) FROM gateway_payouts po
+                 WHERE po.batch_id = be.batch_id AND po.status = 'confirmed'
+                   AND po.mpesa_receipt IS NOT NULL AND po.mpesa_receipt <> '') AS transfer_receipt,
+               {CUSTODY_SQL} AS custody
         FROM gateway_payments p
         LEFT JOIN gateway_ledger_entries e ON e.payment_id = p.id AND e.type = 'collection'
         LEFT JOIN settlement_batch_entries be ON be.ledger_entry_id = e.id
