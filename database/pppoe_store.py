@@ -2866,18 +2866,22 @@ def list_hotspot_clients(cursor, client_id, query):
         surf_until = item["surf_until"] if isinstance(item["surf_until"], datetime) else None
         macs = {str(item["mac"] or "").upper()} | {m.strip().upper() for m in (item.get("device_macs") or "").split(",") if m.strip()}
         hosts = [live_hosts[mac] for mac in macs if mac in live_hosts]
-        authorized = any(host["authorized"] for host in hosts)
+        granted = any(host["authorized"] or host.get("bypassed") for host in hosts)
         if item["status"] == "paid":
-            if authorized:
+            if granted:
                 router_status = "surfing"
             elif hosts:
                 router_status = "connected"
             else:
                 router_status = "surfing" if used and (not surf_until or surf_until > now) else "expired" if used else "not_surfing"
         elif item["status"] == "pending":
-            router_status = "connected" if hosts else "pending_activation"
+            router_status = "surfing" if granted else "connected" if hosts else "pending_activation"
         else:
-            router_status = "connected" if hosts else "disconnected"
+            # An unpaid purchase can still show authorized/bypassed on the
+            # router (leftover session, MAC-cookie login, ip-binding) — surf
+            # it as surfing so the failed-but-online case is visible instead
+            # of looking like a device that merely joined the Wi-Fi.
+            router_status = "surfing" if granted else "connected" if hosts else "disconnected"
         rows.append(
             {
                 "id": item["id"],
