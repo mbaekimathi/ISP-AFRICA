@@ -167,6 +167,12 @@ def ensure_schema(cursor):
         """
     )
 
+    cursor.execute("SHOW COLUMNS FROM gateway_payments LIKE 'last_verified_at'")
+    if cursor.fetchone() is None:
+        cursor.execute(
+            "ALTER TABLE gateway_payments ADD COLUMN last_verified_at DATETIME NULL"
+        )
+
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS settlement_batches (
@@ -657,7 +663,7 @@ def fail_collection(cursor, checkout_id, status="failed", reason="", raw=None):
     cursor.execute(
         """
         UPDATE gateway_payments
-        SET status = %s, raw_callback = COALESCE(%s, raw_callback)
+        SET status = %s, last_verified_at = NOW(), raw_callback = COALESCE(%s, raw_callback)
         WHERE checkout_id = %s AND status IN ('initiated', 'unmatched')
         """,
         (status, raw, str(checkout_id or "")[:64]),
@@ -708,6 +714,40 @@ def stale_initiated_payments(cursor, older_than_minutes=3, younger_than_hours=24
         (int(older_than_minutes), int(younger_than_hours)),
     )
     return list(cursor.fetchall())
+
+
+def failed_payment_rechecks(cursor, older_than_minutes=3, recheck_after_minutes=30,
+                            younger_than_hours=24, limit=10):
+    """Failed/cancelled pooled STK rows due another Daraja look. A reported
+    failure can be premature (late PIN still completes the charge), so the
+    sweep re-verifies on a spaced schedule — last_verified_at keeps each
+    re-check from hammering the query API."""
+    cursor.execute(
+        """
+        SELECT id, client_id, checkout_id, created_at
+        FROM gateway_payments
+        WHERE status IN ('failed', 'cancelled') AND channel = 'stk'
+          AND checkout_id IS NOT NULL
+          AND created_at < DATE_SUB(NOW(), INTERVAL %s MINUTE)
+          AND created_at > DATE_SUB(NOW(), INTERVAL %s HOUR)
+          AND (last_verified_at IS NULL
+               OR last_verified_at < DATE_SUB(NOW(), INTERVAL %s MINUTE))
+        ORDER BY created_at
+        LIMIT %s
+        """,
+        (int(older_than_minutes), int(younger_than_hours),
+         int(recheck_after_minutes), int(limit)),
+    )
+    return list(cursor.fetchall())
+
+
+def mark_payment_verified(cursor, checkout_id):
+    """Stamp the last stkpushquery check — the sweep spaces re-verification
+    off this, so a Daraja hiccup never turns into a query loop."""
+    cursor.execute(
+        "UPDATE gateway_payments SET last_verified_at = NOW() WHERE checkout_id = %s",
+        (str(checkout_id or "")[:64],),
+    )
 
 
 def record_balance_check(cursor, balance):

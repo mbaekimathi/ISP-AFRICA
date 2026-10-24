@@ -115,10 +115,13 @@ def _metadata(stk_callback):
 def process_stk(connect, payload):
     """Verify an Express callback with stkpushquery, then credit exactly once.
 
-    The callback itself never proves the money moved; it only tells us to go
-    ask Daraja. Whoever wins the FOR UPDATE claim — this processor, a phone
-    poll, or the sweep — writes the one collection ledger entry and runs the
-    one subscriber credit."""
+    The callback itself never proves the money moved — or that it stayed put.
+    It only tells us to go ask Daraja: a cancel/timeout ResultCode can arrive
+    while the phone still completes the charge (PIN entered late), so success
+    and failure callbacks alike go through the query before anything writes.
+    Whoever wins the FOR UPDATE claim — this processor, a phone poll, or the
+    sweep — writes the one collection ledger entry and runs the one
+    subscriber credit."""
     import portal_server
 
     callback = ((payload or {}).get("Body") or {}).get("stkCallback") or {}
@@ -131,9 +134,6 @@ def process_stk(connect, payload):
     amount = meta.get("Amount")
     msisdn = str(meta.get("PhoneNumber") or "")
     raw = json.dumps(payload)
-    if result_code != "0":
-        _fail_stk(connect, checkout_id, result_code, callback.get("ResultDesc") or "", raw)
-        return
     with connect() as db:
         with db.cursor() as cursor:
             settings = portal_server.daraja_settings(cursor, _payment_client(cursor, checkout_id))
@@ -141,11 +141,12 @@ def process_stk(connect, payload):
         return
     verified = _verify_stk(settings, checkout_id)
     if verified is None:
-        return  # Daraja unreachable — the sweep will try again later
-    if verified != "paid":
-        _fail_stk(connect, checkout_id, "query", verified, raw)
+        return  # Daraja unreachable or the prompt is still open — the sweep retries
+    if verified == "paid":
+        _credit_stk(connect, checkout_id, receipt, amount, msisdn, raw)
         return
-    _credit_stk(connect, checkout_id, receipt, amount, msisdn, raw)
+    _fail_stk(connect, checkout_id, result_code,
+              verified or callback.get("ResultDesc") or "", raw)
 
 
 def _payment_client(cursor, checkout_id):
@@ -211,10 +212,13 @@ def fulfil_stk_credit(cursor, checkout_id):
         (checkout_id,),
     )
     receipt = (cursor.fetchone() or {}).get("mpesa_receipt")
+    # A failed row can come back: this claim only runs after stkpushquery
+    # proved the money moved, so 'failed' is just a premature callback, never
+    # a reason to keep the request dead.
     cursor.execute(
         """
         UPDATE pppoe_stk_requests SET status = 'processing'
-        WHERE checkout_id = %s AND (status = 'pending' OR (status = 'failed' AND mpesa_code <> ''))
+        WHERE checkout_id = %s AND status IN ('pending', 'failed')
         """,
         (checkout_id,),
     )
@@ -269,7 +273,7 @@ def fulfil_stk_credit(cursor, checkout_id):
         """
         UPDATE hotspot_purchases SET status = 'paid', paid_at = NOW(),
             mpesa_code = COALESCE(%s, mpesa_code)
-        WHERE checkout_id = %s AND (status = 'pending' OR (status = 'failed' AND mpesa_code <> ''))
+        WHERE checkout_id = %s AND status IN ('pending', 'failed')
         """,
         (receipt, checkout_id),
     )
@@ -541,7 +545,10 @@ def sweep(connect):
     with connect() as db:
         with db.cursor() as cursor:
             stale = gateway_store.stale_initiated_payments(cursor, STK_STALE_MINUTES)
-            clients = {row["client_id"] for row in stale if row.get("client_id")}
+            recheck = gateway_store.failed_payment_rechecks(cursor, STK_STALE_MINUTES)
+            clients = {
+                row["client_id"] for row in stale + recheck if row.get("client_id")
+            }
             settings_by_client = {}
             for client_id in clients:
                 settings_by_client[client_id] = portal_server.daraja_settings(cursor, client_id)
@@ -559,5 +566,25 @@ def sweep(connect):
                 _credit_stk(connect, checkout_id, None, None, "", None)
             elif not age_ok:
                 _fail_stk(connect, checkout_id, "expired", "The prompt expired before it was paid.", None)
+        except Exception as error:
+            print(f"event=gateway-sweep checkout={str(row.get('checkout_id'))[-6:]} error={type(error).__name__}", flush=True)
+    # Rows already marked failed get one more look on a spaced schedule — a
+    # premature cancel/timeout callback can mark a payment that still lands,
+    # and nobody may be left polling to catch it.
+    for row in recheck:
+        try:
+            checkout_id = row["checkout_id"]
+            settings = settings_by_client.get(row.get("client_id"))
+            if not settings or not settings.get("gateway_pool"):
+                continue
+            verified = _verify_stk(settings, checkout_id)
+            if verified is None:
+                continue  # unreachable — try again on the next pass
+            with connect() as db:
+                with db.cursor() as cursor:
+                    gateway_store.mark_payment_verified(cursor, checkout_id)
+                db.commit()
+            if verified == "paid":
+                _credit_stk(connect, checkout_id, None, None, "", None)
         except Exception as error:
             print(f"event=gateway-sweep checkout={str(row.get('checkout_id'))[-6:]} error={type(error).__name__}", flush=True)

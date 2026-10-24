@@ -1896,9 +1896,10 @@ class PortalHandler(BaseHTTPRequestHandler):
                 if request["status"] == "processing":
                     return self._send(b'{"state":"pending"}', 200, "application/json")
                 confirmed = bool(str(request.get("mpesa_code") or "").strip())
-                if request["status"] == "failed" and not confirmed:
-                    reason = request["last_error"] or "Payment was declined."
-                    return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
+                # A failed row with no receipt is not answered blind: the
+                # callback that marked it can be premature — stkpushquery gets
+                # the deciding vote below, and 'paid' revives the request.
+                failed = request["status"] == "failed" and not confirmed
                 # The callback is unauthenticated, so its receipt is never proof of
                 # payment: always confirm with stkpushquery before crediting. The
                 # stored mpesa_code only lets a callback-failed row be re-claimed
@@ -1911,7 +1912,12 @@ class PortalHandler(BaseHTTPRequestHandler):
                 stale = (datetime.now() - request["created_at"]).total_seconds() > 180
                 if result is None:
                     # Another poll owns the live query — keep waiting on it.
-                    if stale and queried:
+                    if not queried:
+                        return self._send(b'{"state":"pending"}', 200, "application/json")
+                    if failed:
+                        reason = request["last_error"] or "Payment was declined."
+                        return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
+                    if stale:
                         return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
                     return self._send(b'{"state":"pending"}', 200, "application/json")
                 state, reason = stk_state(result)
@@ -1919,6 +1925,9 @@ class PortalHandler(BaseHTTPRequestHandler):
                     # stkpushquery reports interim codes like 1037 while the
                     # prompt is still open — only the callback (or the expiry
                     # window) may fail the request, never the query alone.
+                    if failed and state == "failed":
+                        reason = reason or request["last_error"] or "Payment was declined."
+                        return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
                     if stale:
                         reason = reason or "The prompt expired. Try again."
                         cursor.execute(
@@ -1929,7 +1938,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                         return self._send(json.dumps({"state": "failed", "reason": reason}).encode(), 200, "application/json")
                     return self._send(b'{"state":"pending"}', 200, "application/json")
                 cursor.execute(
-                    "UPDATE pppoe_stk_requests SET status = 'processing' WHERE checkout_id = %s AND (status = 'pending' OR (status = 'failed' AND mpesa_code <> ''))",
+                    "UPDATE pppoe_stk_requests SET status = 'processing' WHERE checkout_id = %s AND status IN ('pending', 'failed')",
                     (checkout_id,),
                 )
                 db.commit()
@@ -2206,8 +2215,9 @@ class PortalHandler(BaseHTTPRequestHandler):
                         db.rollback()
                     return self._send(json.dumps(hotspot_paid_result(cursor, row)).encode(), 200, "application/json")
                 confirmed = bool(str(row.get("mpesa_code") or "").strip())
-                if row["status"] == "failed" and not confirmed:
-                    return self._send(b'{"state":"failed","reason":"Payment was declined."}', 200, "application/json")
+                # A failed row with no receipt still gets the query below —
+                # the failure callback can be premature, and 'paid' revives it.
+                failed = row["status"] == "failed" and not confirmed
                 with HOTSPOT_LOCK:
                     pending = HOTSPOT_PENDING.get(checkout_id)
                 if not pending:
@@ -2225,7 +2235,13 @@ class PortalHandler(BaseHTTPRequestHandler):
                     result, queried = stk_query_shared(settings, checkout_id)
                 if result is None:
                     # Another poll owns the live query — keep waiting on it.
-                    if stale and queried:
+                    if not queried:
+                        return self._send(b'{"state":"pending"}', 200, "application/json")
+                    if failed:
+                        with HOTSPOT_LOCK:
+                            HOTSPOT_PENDING.pop(checkout_id, None)
+                        return self._send(b'{"state":"failed","reason":"Payment was declined."}', 200, "application/json")
+                    if stale:
                         with HOTSPOT_LOCK:
                             HOTSPOT_PENDING.pop(checkout_id, None)
                         return self._send(b'{"state":"failed","reason":"The prompt expired. Try again."}', 200, "application/json")
@@ -2235,6 +2251,11 @@ class PortalHandler(BaseHTTPRequestHandler):
                     # Interim query results (premature 1037 etc.) are not final —
                     # the Daraja callback decides failure. Keep waiting until the
                     # prompt expires rather than stranding a still-open prompt.
+                    if failed and state == "failed":
+                        with HOTSPOT_LOCK:
+                            HOTSPOT_PENDING.pop(checkout_id, None)
+                        body = {"state": "failed", "reason": reason or "Payment was declined."}
+                        return self._send(json.dumps(body).encode(), 200, "application/json")
                     if stale:
                         with HOTSPOT_LOCK:
                             HOTSPOT_PENDING.pop(checkout_id, None)
@@ -2246,7 +2267,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 )
                 receipt = (cursor.fetchone() or {}).get("mpesa_receipt")
                 cursor.execute(
-                    "UPDATE hotspot_purchases SET status = 'paid', paid_at = NOW(), mpesa_code = COALESCE(%s, mpesa_code) WHERE checkout_id = %s AND (status = 'pending' OR (status = 'failed' AND mpesa_code <> ''))",
+                    "UPDATE hotspot_purchases SET status = 'paid', paid_at = NOW(), mpesa_code = COALESCE(%s, mpesa_code) WHERE checkout_id = %s AND status IN ('pending', 'failed')",
                     (receipt, checkout_id),
                 )
                 db.commit()
