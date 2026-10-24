@@ -1,6 +1,6 @@
 import sys
 import unittest
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -218,17 +218,40 @@ class PppoeValidationTests(unittest.TestCase):
         self.assertEqual(pppoe_service.analysis_bucket("active", 0, later, TODAY, "", "down"), "disconnected")
         self.assertEqual(pppoe_service.analysis_bucket("expired", 1, earlier, TODAY), "expired")
         self.assertEqual(pppoe_service.analysis_bucket("active", 1, later, TODAY, "disconnect"), "disconnected")
+        # A client whose CPE held a session before and dropped it is
+        # disconnected, not merely "not surfing".
+        self.assertEqual(pppoe_service.analysis_bucket("active", 0, later, TODAY, "", "up", True), "disconnected")
         tallied = pppoe_service.tally_client_analysis(
             [
                 {"service": "pppoe", "status": "active", "open_sessions": 1, "expiry_date": later, "last_action": ""},
+                {"service": "pppoe", "status": "active", "open_sessions": 0, "any_sessions": 3, "expiry_date": later, "last_action": ""},
                 {"service": "hotspot", "status": "expired", "open_sessions": 0, "expiry_date": earlier, "last_action": ""},
                 {"service": "hotspot", "status": "pending_activation", "open_sessions": 0, "expiry_date": None, "last_action": ""},
             ],
             TODAY,
         )
         self.assertEqual(tallied["pppoe"]["surfing"], 1)
+        self.assertEqual(tallied["pppoe"]["disconnected"], 1)
         self.assertEqual(tallied["hotspot"]["expired"], 1)
         self.assertEqual(tallied["hotspot"]["notSurfing"], 1)
+
+    def test_hotspot_analysis_buckets(self):
+        now = datetime(2026, 10, 16, 12, 0, 0)
+        tallied = pppoe_service.tally_hotspot_analysis(
+            [
+                {"status": "paid", "used_vouchers": 1, "surf_until": datetime(2026, 10, 17, 12, 0, 0)},
+                {"status": "paid", "used_vouchers": 0, "surf_until": None},
+                {"status": "paid", "used_vouchers": 2, "surf_until": datetime(2026, 10, 15, 12, 0, 0)},
+                {"status": "pending", "used_vouchers": 0, "surf_until": None},
+                {"status": "failed", "used_vouchers": 0, "surf_until": None},
+            ],
+            now,
+        )
+        self.assertEqual(tallied["surfing"], 1)
+        self.assertEqual(tallied["notSurfing"], 2)
+        self.assertEqual(tallied["expired"], 1)
+        self.assertEqual(tallied["disconnected"], 1)
+        self.assertEqual(tallied["total"], 5)
 
     def test_lifecycle_rules(self):
         self.assertEqual(pppoe_service.job_transition("pending_activation", TODAY, None, TODAY), "active")

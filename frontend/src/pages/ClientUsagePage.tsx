@@ -30,6 +30,7 @@ type UsageReport = {
   rangeBytesIn: number;
   rangeBytesOut: number;
   series: UsagePoint[];
+  routers?: { id: string; name: string }[];
 };
 
 function bytes(value: number) {
@@ -137,6 +138,8 @@ export function ClientUsagePage({ kind }: { kind: "pppoe" | "hotspot" }) {
   const [report, setReport] = useState<UsageReport | null>(null);
   const [message, setMessage] = useState("");
   const [loading, setLoading] = useState(true);
+  const [routers, setRouters] = useState<{ id: string; name: string }[]>([]);
+  const [router, setRouter] = useState("");
   const [mode, setMode] = useState<ViewMode>("month");
   const [day, setDay] = useState(localDay());
   const [from, setFrom] = useState(localDay(-29));
@@ -159,18 +162,20 @@ export function ClientUsagePage({ kind }: { kind: "pppoe" | "hotspot" }) {
       if (!/^\d{4}$/.test(year)) return;
       params.set("year", year);
     }
+    if (router) params.set("router", router);
     const path = kind === "pppoe" ? "/api/pppoe/usage" : "/api/hotspot/usage";
     setLoading(true);
     apiRequest<UsageReport>(`${path}?${params.toString()}`)
       .then((body) => {
         setReport(body);
+        setRouters(body.routers ?? []);
         setMessage("");
       })
       .catch((error: unknown) => {
         setMessage(error instanceof Error ? error.message : `${label} usage could not be loaded.`);
       })
       .finally(() => setLoading(false));
-  }, [kind, label, mode, day, from, to, month, year]);
+  }, [kind, label, mode, day, from, to, month, year, router]);
 
   const peak = Math.max(1, ...(report?.clients.map((client) => client.bytesIn + client.bytesOut) ?? [1]));
 
@@ -193,6 +198,15 @@ export function ClientUsagePage({ kind }: { kind: "pppoe" | "hotspot" }) {
             <option value="period">Custom period</option>
             <option value="month">Month</option>
             <option value="year">Year</option>
+          </select>
+        </label>
+        <label className="grid gap-1.5 text-sm font-medium">
+          Router
+          <select className="field" value={router} onChange={(event) => setRouter(event.target.value)}>
+            <option value="">All routers</option>
+            {routers.map((item) => (
+              <option key={item.id} value={item.id}>{item.name}</option>
+            ))}
           </select>
         </label>
         {mode === "day" ? (
@@ -271,9 +285,11 @@ export function ClientUsagePage({ kind }: { kind: "pppoe" | "hotspot" }) {
             </div>
             {report.clients.length === 0 ? (
               <p className="mt-4 text-sm text-muted-foreground">
-                {kind === "hotspot"
-                  ? "No hotspot usage has been accounted yet — guest sessions appear here after their first login."
-                  : `No ${label} clients are registered yet.`}
+                {router
+                  ? `No ${label} usage was accounted on that router in this range.`
+                  : kind === "hotspot"
+                    ? "No hotspot usage has been accounted yet — guest sessions appear here after their first login."
+                    : `No ${label} clients are registered yet.`}
               </p>
             ) : (
               <ol className="mt-4 max-h-[30rem] divide-y divide-border overflow-y-auto pr-1">

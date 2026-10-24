@@ -3097,12 +3097,14 @@ class Handler(BaseHTTPRequestHandler):
             SELECT s.service, s.status, sub.expiry_date, d.tunnel_status,
                    (SELECT COUNT(*) FROM radacct a
                     WHERE a.username = s.pppoe_username AND a.acctstoptime IS NULL) AS open_sessions,
+                   (SELECT COUNT(*) FROM radacct a
+                    WHERE a.username = s.pppoe_username) AS any_sessions,
                    (SELECT e.action FROM pppoe_events e
                     WHERE e.subscriber_id = s.id ORDER BY e.created_at DESC LIMIT 1) AS last_action
             FROM pppoe_subscribers s
             LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
             LEFT JOIN isp_mikrotik_devices d ON d.id = s.router_id
-            WHERE s.client_id = %s
+            WHERE s.client_id = %s AND s.deleted = 0 AND s.service = 'pppoe'
             """,
             (client_id,),
         )
@@ -3114,40 +3116,78 @@ class Handler(BaseHTTPRequestHandler):
                     "status": item["status"],
                     "expiry_date": pppoe_store.as_day(item["expiry_date"]),
                     "open_sessions": item["open_sessions"],
+                    "any_sessions": item["any_sessions"],
                     "last_action": item["last_action"] or "",
                     "tunnel_status": item["tunnel_status"] or "unknown",
                 }
             )
+        now = datetime.now()
+        client_analysis = pppoe_service.tally_client_analysis(clients, now.date())
         cursor.execute(
             """
-            SELECT s.service,
-                   COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
-                   COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
-            FROM pppoe_subscribers s
-            LEFT JOIN radacct a ON a.username = s.pppoe_username AND a.acctstarttime >= CURDATE()
-            WHERE s.client_id = %s
-            GROUP BY s.service
+            SELECT h.status,
+                   (SELECT COUNT(*) FROM hotspot_vouchers v
+                    WHERE v.purchase_id = h.id AND v.status = 'used') AS used_vouchers,
+                   (SELECT MAX(TIMESTAMPADD(SECOND, v.seconds, v.used_at)) FROM hotspot_vouchers v
+                    WHERE v.purchase_id = h.id AND v.status = 'used' AND v.used_at IS NOT NULL) AS surf_until
+            FROM hotspot_purchases h
+            WHERE h.client_id = %s AND h.deleted = 0
             """,
             (client_id,),
         )
-        usage = {
-            "pppoe": {"bytesIn": 0, "bytesOut": 0},
-            "hotspot": {"bytesIn": 0, "bytesOut": 0},
-        }
-        for item in cursor.fetchall():
-            service = item["service"] if item["service"] in usage else "pppoe"
-            usage[service] = {"bytesIn": int(item["bytes_in"] or 0), "bytesOut": int(item["bytes_out"] or 0)}
+        client_analysis["hotspot"] = pppoe_service.tally_hotspot_analysis(cursor.fetchall(), now)
+        # radacct usernames that belong to hotspot guests — the paying device
+        # surfs under h.username and each redeemed voucher under v.username.
+        hotspot_ids = """
+            SELECT h.client_id, h.device_id, v.username
+            FROM hotspot_vouchers v
+            JOIN hotspot_purchases h ON h.id = v.purchase_id
+            WHERE h.deleted = 0
+            UNION ALL
+            SELECT h.client_id, h.device_id, h.username
+            FROM hotspot_purchases h
+            WHERE h.deleted = 0 AND h.username IS NOT NULL AND h.username <> ''
+        """
         cursor.execute(
             """
-            SELECT d.id, d.name, d.site, d.tunnel_status, s.service,
+            SELECT COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
+                   COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
+            FROM pppoe_subscribers s
+            LEFT JOIN radacct a ON a.username = s.pppoe_username AND a.acctstarttime >= CURDATE()
+            WHERE s.client_id = %s AND s.deleted = 0 AND s.service = 'pppoe'
+            """,
+            (client_id,),
+        )
+        pppoe_today = cursor.fetchone()
+        usage = {
+            "pppoe": {"bytesIn": int(pppoe_today["bytes_in"] or 0), "bytesOut": int(pppoe_today["bytes_out"] or 0)},
+            "hotspot": {"bytesIn": 0, "bytesOut": 0},
+        }
+        cursor.execute(
+            f"""
+            SELECT COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
+                   COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
+            FROM ({hotspot_ids}) ids
+            JOIN radacct a ON a.username = ids.username AND a.acctstarttime >= CURDATE()
+            WHERE ids.client_id = %s
+            """,
+            (client_id,),
+        )
+        hotspot_today = cursor.fetchone()
+        usage["hotspot"]["bytesIn"] += int(hotspot_today["bytes_in"] or 0)
+        usage["hotspot"]["bytesOut"] += int(hotspot_today["bytes_out"] or 0)
+        cursor.execute(
+            """
+            SELECT d.id, d.name, d.site, d.tunnel_status,
                    COUNT(DISTINCT s.id) AS subscribers,
                    COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
                    COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
             FROM isp_mikrotik_devices d
             LEFT JOIN pppoe_subscribers s ON s.router_id = d.id AND s.client_id = d.client_id
+                AND s.deleted = 0 AND s.service = 'pppoe'
             LEFT JOIN radacct a ON a.username = s.pppoe_username AND a.acctstarttime >= CURDATE()
             WHERE d.client_id = %s
-            GROUP BY d.id, d.name, d.site, d.tunnel_status, s.service
+            GROUP BY d.id, d.name, d.site, d.tunnel_status
             """,
             (client_id,),
         )
@@ -3162,19 +3202,20 @@ class Handler(BaseHTTPRequestHandler):
                     "tunnelStatus": item["tunnel_status"] or "unknown",
                     "subscribers": 0,
                     "openSessions": 0,
+                    "hotspotGuests": 0,
+                    "hotspotSessions": 0,
                     "pppoe": {"bytesIn": 0, "bytesOut": 0},
                     "hotspot": {"bytesIn": 0, "bytesOut": 0},
                 },
             )
-            entry["subscribers"] += int(item["subscribers"] or 0)
-            service = item["service"] if item["service"] in usage else "pppoe"
-            entry[service] = {"bytesIn": int(item["bytes_in"] or 0), "bytesOut": int(item["bytes_out"] or 0)}
+            entry["subscribers"] = int(item["subscribers"] or 0)
+            entry["pppoe"] = {"bytesIn": int(item["bytes_in"] or 0), "bytesOut": int(item["bytes_out"] or 0)}
         cursor.execute(
             """
             SELECT s.router_id, COUNT(*) AS open_sessions
             FROM pppoe_subscribers s
             JOIN radacct a ON a.username = s.pppoe_username AND a.acctstoptime IS NULL
-            WHERE s.client_id = %s
+            WHERE s.client_id = %s AND s.deleted = 0 AND s.service = 'pppoe'
             GROUP BY s.router_id
             """,
             (client_id,),
@@ -3183,6 +3224,50 @@ class Handler(BaseHTTPRequestHandler):
             entry = usage_by_router.get(item["router_id"])
             if entry is not None:
                 entry["openSessions"] = int(item["open_sessions"] or 0)
+        cursor.execute(
+            f"""
+            SELECT ids.device_id,
+                   COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
+                   COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
+            FROM ({hotspot_ids}) ids
+            JOIN radacct a ON a.username = ids.username AND a.acctstarttime >= CURDATE()
+            WHERE ids.client_id = %s
+            GROUP BY ids.device_id
+            """,
+            (client_id,),
+        )
+        for item in cursor.fetchall():
+            entry = usage_by_router.get(item["device_id"])
+            if entry is not None:
+                entry["hotspot"]["bytesIn"] += int(item["bytes_in"] or 0)
+                entry["hotspot"]["bytesOut"] += int(item["bytes_out"] or 0)
+        cursor.execute(
+            f"""
+            SELECT ids.device_id, COUNT(*) AS open_sessions
+            FROM ({hotspot_ids}) ids
+            JOIN radacct a ON a.username = ids.username AND a.acctstoptime IS NULL
+            WHERE ids.client_id = %s
+            GROUP BY ids.device_id
+            """,
+            (client_id,),
+        )
+        for item in cursor.fetchall():
+            entry = usage_by_router.get(item["device_id"])
+            if entry is not None:
+                entry["hotspotSessions"] = int(item["open_sessions"] or 0)
+        cursor.execute(
+            """
+            SELECT h.device_id, COUNT(*) AS guests
+            FROM hotspot_purchases h
+            WHERE h.client_id = %s AND h.deleted = 0
+            GROUP BY h.device_id
+            """,
+            (client_id,),
+        )
+        for item in cursor.fetchall():
+            entry = usage_by_router.get(item["device_id"])
+            if entry is not None:
+                entry["hotspotGuests"] = int(item["guests"] or 0)
         routers_usage = list(usage_by_router.values())
         for entry in routers_usage:
             entry["bytesIn"] = entry["pppoe"]["bytesIn"] + entry["hotspot"]["bytesIn"]
@@ -3204,7 +3289,7 @@ class Handler(BaseHTTPRequestHandler):
                 "healthy": max(0, total - unhealthy),
                 "unhealthy": unhealthy,
             },
-            "clients": pppoe_service.tally_client_analysis(clients, datetime.now().date()),
+            "clients": client_analysis,
             "usageToday": usage,
             "usageByRouter": routers_usage,
         }
@@ -5409,6 +5494,7 @@ class Handler(BaseHTTPRequestHandler):
                     "readOnly": bool(session_opened_by(cursor, token.get("isp_client_session"))),
                 },
                 "settings/check": lambda: gateway_precheck(cursor),
+                "fees": lambda: gateway_api.isp_fees(cursor),
                 "payments": lambda: gateway_api.isp_payments(cursor, client_id, query),
                 "payouts": lambda: gateway_api.isp_payouts(cursor, client_id, query),
                 "ledger": lambda: gateway_api.isp_ledger(cursor, client_id, query),

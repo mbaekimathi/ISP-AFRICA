@@ -138,30 +138,40 @@ function HeroStat({ label, value, icon, tint }: { label: string; value: number |
   );
 }
 
+type Filters = { router: string; package: string; status: string; billing: string; search: string };
+
+const EMPTY_FILTERS: Filters = { router: "", package: "", status: "", billing: "", search: "" };
+
 export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
   usePageMeta(kind === "pppoe" ? "PPPoE-clients — ISP CENTRIC" : "Hotspot-clients — ISP CENTRIC", "ISP subscriber records.");
   const { user } = useAuth();
   const [page, setPage] = useState<ListPage | null>(null);
+  const [options, setOptions] = useState<Pick<ListPage, "routers" | "packages">>({ routers: [], packages: [] });
   const [message, setMessage] = useState("");
-  const [router, setRouter] = useState("");
-  const [pkg, setPkg] = useState("");
-  const [status, setStatus] = useState("");
-  const [billing, setBilling] = useState("");
-  const [search, setSearch] = useState("");
+  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
+  const [applied, setApplied] = useState<Filters>(EMPTY_FILTERS);
   const label = kind === "pppoe" ? "PPPoE" : "Hotspot";
 
-  function load() {
+  const setField = (key: keyof Filters, value: string) => setFilters((current) => ({ ...current, [key]: value }));
+  const resetFilters = () => {
+    setFilters(EMPTY_FILTERS);
+    setApplied(EMPTY_FILTERS);
+  };
+  const filtered = Boolean(applied.router || applied.package || applied.status || applied.billing || applied.search.trim());
+
+  function load(active: Filters) {
     const params = new URLSearchParams();
-    if (router) params.set("router", router);
-    if (pkg) params.set("package", pkg);
-    if (status) params.set("status", status);
-    if (billing) params.set("billing", billing);
-    if (search.trim()) params.set("q", search.trim());
+    if (active.router) params.set("router", active.router);
+    if (active.package) params.set("package", active.package);
+    if (active.status) params.set("status", active.status);
+    if (active.billing) params.set("billing", active.billing);
+    if (active.search.trim()) params.set("q", active.search.trim());
     params.set("limit", "1000");
     const path = kind === "pppoe" ? "/api/pppoe/subscribers" : "/api/hotspot/subscribers";
     apiRequest<ListPage>(`${path}?${params.toString()}`)
       .then((body) => {
         setPage(body);
+        setOptions({ routers: body.routers, packages: body.packages });
         setMessage("");
       })
       .catch((error: unknown) => {
@@ -171,11 +181,11 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
 
   useEffect(() => {
     setPage(null);
-    load();
+    load(applied);
     // Poll while the tab is visible — paused in the background and cleaned
     // up when the page unmounts.
     const refreshIfVisible = () => {
-      if (document.visibilityState === "visible") load();
+      if (document.visibilityState === "visible") load(applied);
     };
     const timer = window.setInterval(refreshIfVisible, 10000);
     document.addEventListener("visibilitychange", refreshIfVisible);
@@ -183,7 +193,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", refreshIfVisible);
     };
-  }, [kind, router, pkg, status, billing]);
+  }, [kind, applied]);
 
   const home = (path: string) => (user ? clientPage(user, path) : path);
   const viewPath = (client: Subscriber) => home(kind === "hotspot" ? `/hotspot/${client.id}` : `/pppoe/${client.id}`);
@@ -233,51 +243,51 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
         className="toolbar mt-4 sm:grid-cols-2 lg:grid-cols-[1.5fr_1fr_1fr_1fr_1fr_auto] lg:items-end"
         onSubmit={(event) => {
           event.preventDefault();
-          load();
+          setApplied(filters);
         }}
       >
         <label className="grid gap-1.5 text-sm font-medium">
           Search
           <div className="relative">
             <Search className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" aria-hidden="true" />
-            <input className="field pl-9" value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Name, phone, username, serial" />
+            <input className="field pl-9" value={filters.search} onChange={(event) => setField("search", event.target.value)} placeholder="Name, phone, username, serial" />
           </div>
         </label>
         <label className="grid gap-1.5 text-sm font-medium">
           Router
-          <select className="field" value={router} onChange={(event) => setRouter(event.target.value)}>
+          <select className="field" value={filters.router} onChange={(event) => setField("router", event.target.value)}>
             <option value="">All routers</option>
-            {page?.routers.map((item) => (
+            {options.routers.map((item) => (
               <option key={item.id} value={item.id}>{item.name}</option>
             ))}
           </select>
         </label>
         <label className="grid gap-1.5 text-sm font-medium">
           Package
-          <select className="field" value={pkg} onChange={(event) => setPkg(event.target.value)}>
+          <select className="field" value={filters.package} onChange={(event) => setField("package", event.target.value)}>
             <option value="">All packages</option>
-            {page?.packages.map((item) => (
+            {options.packages.map((item) => (
               <option key={item.id} value={item.id}>{item.name}</option>
             ))}
           </select>
         </label>
         <label className="grid gap-1.5 text-sm font-medium">
           Status
-          <select className="field" value={status} onChange={(event) => setStatus(event.target.value)}>
+          <select className="field" value={filters.status} onChange={(event) => setField("status", event.target.value)}>
             <option value="">Any router status</option>
             <option value="surfing">Surfing</option>
-            <option value="connected">Connected</option>
+            {kind === "hotspot" ? <option value="connected">Connected</option> : null}
             <option value="not_surfing">Not surfing</option>
             <option value="expired">Expired</option>
-            <option value="suspended">Suspended</option>
-            <option value="disconnecting">Disconnecting</option>
+            {kind === "pppoe" ? <option value="suspended">Suspended</option> : null}
+            {kind === "pppoe" ? <option value="disconnecting">Disconnecting</option> : null}
             <option value="disconnected">Disconnected</option>
             <option value="pending_activation">Pending activation</option>
           </select>
         </label>
         <label className="grid gap-1.5 text-sm font-medium">
           Billing
-          <select className="field" value={billing} onChange={(event) => setBilling(event.target.value)}>
+          <select className="field" value={filters.billing} onChange={(event) => setField("billing", event.target.value)}>
             <option value="">Any billing</option>
             <option value="pending">Pending</option>
             <option value="paid">Paid</option>
@@ -287,7 +297,10 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
             {kind === "pppoe" ? <option value="cancelled">Cancelled</option> : null}
           </select>
         </label>
-        <PrimaryButton type="submit">Filter</PrimaryButton>
+        <div className="flex items-end gap-2">
+          <PrimaryButton type="submit">Filter</PrimaryButton>
+          <SecondaryButton type="button" onClick={resetFilters}>Reset</SecondaryButton>
+        </div>
       </form>
 
       <div className="table-wrap mt-4 hidden md:block">
@@ -412,7 +425,11 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
         ))}
       </div>
 
-      {page ? <p className="mt-3 text-xs text-muted-foreground">{page.total} clients · sorted by usage</p> : null}
+      {page ? (
+        <p className="mt-3 text-xs text-muted-foreground">
+          {page.total} clients{filtered ? " · filtered" : ""} · sorted by usage
+        </p>
+      ) : null}
     </div>
   );
 }

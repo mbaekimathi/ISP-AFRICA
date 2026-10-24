@@ -102,17 +102,17 @@ export function App() {
             <Route path="/:code/pppoe/:subscriberId" element={<PppoeCustomerPage />} />
             <Route path="/:code/pppoe/:subscriberId/transactions" element={<PppoeCustomerTransactionsPage />} />
             <Route path="/:code/pppoe/:subscriberId/remote-access" element={<PppoeRemoteAccessPage />} />
-            <Route path="/clients" element={<ClientsPage kind="pppoe" />} />
+            <Route path="/clients" element={<ClientsPage key="pppoe" kind="pppoe" />} />
             <Route path="/clients/payments" element={<WifiPaymentPage kind="pppoe" />} />
             <Route path="/clients/usage" element={<ClientUsagePage kind="pppoe" />} />
-            <Route path="/clients/hotspot" element={<ClientsPage kind="hotspot" />} />
+            <Route path="/clients/hotspot" element={<ClientsPage key="hotspot" kind="hotspot" />} />
             <Route path="/clients/hotspot/payments" element={<WifiPaymentPage kind="hotspot" />} />
             <Route path="/clients/hotspot/usage" element={<ClientUsagePage kind="hotspot" />} />
             <Route path="/hotspot/:purchaseId" element={<HotspotClientPage />} />
-            <Route path="/:code/clients" element={<ClientsPage kind="pppoe" />} />
+            <Route path="/:code/clients" element={<ClientsPage key="pppoe" kind="pppoe" />} />
             <Route path="/:code/clients/payments" element={<WifiPaymentPage kind="pppoe" />} />
             <Route path="/:code/clients/usage" element={<ClientUsagePage kind="pppoe" />} />
-            <Route path="/:code/clients/hotspot" element={<ClientsPage kind="hotspot" />} />
+            <Route path="/:code/clients/hotspot" element={<ClientsPage key="hotspot" kind="hotspot" />} />
             <Route path="/:code/clients/hotspot/payments" element={<WifiPaymentPage kind="hotspot" />} />
             <Route path="/:code/clients/hotspot/usage" element={<ClientUsagePage kind="hotspot" />} />
             <Route path="/:code/hotspot/:purchaseId" element={<HotspotClientPage />} />

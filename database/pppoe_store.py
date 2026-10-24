@@ -698,7 +698,7 @@ def mark_vouchers_used(cursor, usernames):
         UPDATE pppoe_vouchers v
         JOIN pppoe_subscribers s ON s.id = v.subscriber_id
         SET v.status = 'used', v.used_at = NOW()
-        WHERE v.status = 'issued' AND s.pppoe_username IN ({marks})
+        WHERE v.status = 'issued' AND s.service = 'pppoe' AND s.pppoe_username IN ({marks})
         """,
         names,
     )
@@ -974,7 +974,7 @@ def list_subscribers(cursor, client_id, query, service="pppoe"):
     if package:
         where.append("s.package_id = %s")
         args.append(package)
-    router_states = {"surfing", "not_surfing", "expired", "expired_online", "suspended", "suspended_online", "disconnecting", "disconnected", "pending_activation"}
+    router_states = {"surfing", "connected", "not_surfing", "expired", "expired_online", "suspended", "suspended_online", "disconnecting", "disconnected", "pending_activation"}
     if status in router_states or status in {"online", "offline", "unknown"}:
         pass
     elif status:
@@ -1542,8 +1542,11 @@ def usage_view(mode, start, finish, label):
 
 def general_usage(cursor, client_id, service, query):
     mode, start, finish, granularity, label = usage_window(query or {})
+    router = str((query.get("router") or [""])[0]).strip()
+    router_clause = " AND s.router_id = %s" if router else ""
+    router_args = [router] if router else []
     cursor.execute(
-        """
+        f"""
         SELECT s.id, s.first_name, s.last_name, s.pppoe_username, d.name AS router_name,
                COALESCE(SUM(a.acctinputoctets), 0) AS bytes_in,
                COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
@@ -1551,11 +1554,11 @@ def general_usage(cursor, client_id, service, query):
         LEFT JOIN isp_mikrotik_devices d ON d.id = s.router_id
         LEFT JOIN radacct a ON a.username = s.pppoe_username
             AND a.acctstarttime >= %s AND a.acctstarttime < %s
-        WHERE s.client_id = %s AND s.service = %s
+        WHERE s.client_id = %s AND s.service = %s{router_clause}
         GROUP BY s.id, s.first_name, s.last_name, s.pppoe_username, d.name
         ORDER BY (bytes_in + bytes_out) DESC, s.first_name, s.last_name
         """,
-        (start.isoformat(), finish.isoformat(), client_id, service),
+        (start.isoformat(), finish.isoformat(), client_id, service, *router_args),
     )
     clients = []
     range_in = 0
@@ -1582,11 +1585,11 @@ def general_usage(cursor, client_id, service, query):
                COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
         FROM radacct a
         JOIN pppoe_subscribers s ON s.pppoe_username = a.username
-        WHERE s.client_id = %s AND s.service = %s AND a.acctstarttime >= %s AND a.acctstarttime < %s
+        WHERE s.client_id = %s AND s.service = %s AND a.acctstarttime >= %s AND a.acctstarttime < %s{router_clause}
         GROUP BY {USAGE_BUCKETS[granularity]}
         ORDER BY bucket
         """,
-        (client_id, service, start.isoformat(), finish.isoformat()),
+        (client_id, service, start.isoformat(), finish.isoformat(), *router_args),
     )
     return {
         "service": service,
@@ -1596,6 +1599,7 @@ def general_usage(cursor, client_id, service, query):
         "rangeBytesIn": range_in,
         "rangeBytesOut": range_out,
         "series": usage_series(cursor.fetchall(), start, finish, granularity),
+        "routers": list_routers(cursor, client_id),
     }
 
 
@@ -1866,7 +1870,7 @@ def disconnect_router_clients(cursor, client_id, router_id, actor_id, reason):
         FROM pppoe_subscribers s
         LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
         LEFT JOIN isp_packages p ON p.id = s.package_id
-        WHERE s.client_id = %s AND s.router_id = %s
+        WHERE s.client_id = %s AND s.router_id = %s AND s.service = 'pppoe'
         """,
         (client_id, router_id),
     )
@@ -1897,7 +1901,7 @@ def reconcile(cursor, client_id):
         FROM pppoe_subscribers s
         LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
         LEFT JOIN isp_packages p ON p.id = s.package_id
-        WHERE s.client_id = %s AND s.deleted = 0
+        WHERE s.client_id = %s AND s.deleted = 0 AND s.service = 'pppoe'
         """,
         (client_id,),
     )
@@ -2919,6 +2923,9 @@ def hotspot_usage(cursor, client_id, query):
     phone, router, and voucher code shown on the report.
     """
     mode, start, finish, granularity, label = usage_window(query or {})
+    router = str((query.get("router") or [""])[0]).strip()
+    router_clause = " AND ids.device_id = %s" if router else ""
+    router_args = [router] if router else []
     identities = """
         SELECT h.client_id, h.device_id, h.phone, v.username, v.code
         FROM hotspot_vouchers v
@@ -2939,11 +2946,11 @@ def hotspot_usage(cursor, client_id, query):
         LEFT JOIN radacct a ON a.username = ids.username
             AND a.acctstarttime >= %s AND a.acctstarttime < %s
         LEFT JOIN isp_mikrotik_devices d ON d.id = ids.device_id
-        WHERE ids.client_id = %s
+        WHERE ids.client_id = %s{router_clause}
         GROUP BY ids.username, ids.code, ids.phone, d.name
         ORDER BY (bytes_in + bytes_out) DESC, ids.username
         """,
-        (start.isoformat(), finish.isoformat(), client_id),
+        (start.isoformat(), finish.isoformat(), client_id, *router_args),
     )
     clients = []
     range_in = 0
@@ -2971,11 +2978,11 @@ def hotspot_usage(cursor, client_id, query):
                COALESCE(SUM(a.acctoutputoctets), 0) AS bytes_out
         FROM radacct a
         JOIN ({identities}) ids ON ids.username = a.username
-        WHERE ids.client_id = %s AND a.acctstarttime >= %s AND a.acctstarttime < %s
+        WHERE ids.client_id = %s AND a.acctstarttime >= %s AND a.acctstarttime < %s{router_clause}
         GROUP BY {USAGE_BUCKETS[granularity]}
         ORDER BY bucket
         """,
-        (client_id, start.isoformat(), finish.isoformat()),
+        (client_id, start.isoformat(), finish.isoformat(), *router_args),
     )
     return {
         "service": "hotspot",
@@ -2985,6 +2992,7 @@ def hotspot_usage(cursor, client_id, query):
         "rangeBytesIn": range_in,
         "rangeBytesOut": range_out,
         "series": usage_series(cursor.fetchall(), start, finish, granularity),
+        "routers": list_routers(cursor, client_id),
     }
 
 

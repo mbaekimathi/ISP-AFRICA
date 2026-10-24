@@ -258,6 +258,10 @@ class MiniCursor:
                     for column, value in zip(columns, args):
                         r[column] = value
                     self.rowcount = 1
+        elif "FROM gateway_fee_bands" in flat:
+            rows = sorted(d.table("gateway_fee_bands"),
+                          key=lambda band: band.get("min_amount") or 0)
+            self._result = [_clone(row) for row in rows]
         elif "FROM gateway_notifications" in flat:
             rows = list(d.table("gateway_notifications"))
             if "audience = 'client'" in flat:
@@ -538,6 +542,30 @@ class CompanyGatewaySettingsTests(unittest.TestCase):
     def test_view_unconfigured(self):
         db = MiniDb()
         self.assertEqual(gateway_api.settings_view(db.cursor()), {"configured": False})
+
+    def test_isp_fees_shows_costs_without_secrets(self):
+        db = self.seed(
+            commission_percent=Decimal("2.50"), commission_flat=Decimal("10"),
+            payout_fee_estimate=Decimal("15"), max_payout_per_tx=Decimal("50000"),
+            txn_fees_enabled=1)
+        db.insert("gateway_fee_bands", id="fb-1", company_id="company",
+                  min_amount=Decimal("1"), max_amount=Decimal("1000"), fee=Decimal("5"))
+        db.insert("gateway_fee_bands", id="fb-2", company_id="company",
+                  min_amount=Decimal("1001"), max_amount=None, fee=Decimal("12"))
+        out = gateway_api.isp_fees(db.cursor())
+        self.assertTrue(out["configured"])
+        self.assertEqual(out["commissionPercent"], "2.50")
+        self.assertEqual(out["commissionFlat"], "10")
+        self.assertEqual(out["payoutFeeEstimate"], "15")
+        self.assertEqual(out["maxPayoutPerTx"], "50000")
+        self.assertTrue(out["txnFeesEnabled"])
+        self.assertEqual([band["fee"] for band in out["bands"]], ["5", "12"])
+        self.assertIsNone(out["bands"][1]["max"])
+        self.assertNotIn("enc", str(out))
+
+    def test_isp_fees_unconfigured(self):
+        db = MiniDb()
+        self.assertEqual(gateway_api.isp_fees(db.cursor()), {"configured": False})
 
     def test_kill_switch_toggle_is_audited(self):
         db = self.seed()

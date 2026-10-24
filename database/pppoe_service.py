@@ -420,9 +420,9 @@ def router_status(status, open_sessions, expiry_date, today, last_action="", tun
     return "not_surfing"
 
 
-def analysis_bucket(status, open_sessions, expiry_date, today, last_action="", tunnel_status="up"):
+def analysis_bucket(status, open_sessions, expiry_date, today, last_action="", tunnel_status="up", any_sessions=False):
     """Card groups: surfing, not surfing, expired, and disconnected."""
-    state = router_status(status, open_sessions, expiry_date, today, last_action, tunnel_status)
+    state = router_status(status, open_sessions, expiry_date, today, last_action, tunnel_status, any_sessions)
     if state in {"disconnecting", "disconnected", "suspended", "suspended_online"} or status in {"suspended", "disabled"}:
         return "disconnected"
     if state in {"expired", "expired_online"}:
@@ -436,14 +436,16 @@ def empty_client_analysis():
     return {"surfing": 0, "notSurfing": 0, "expired": 0, "disconnected": 0, "total": 0}
 
 
+ANALYSIS_FIELDS = {
+    "surfing": "surfing",
+    "not_surfing": "notSurfing",
+    "expired": "expired",
+    "disconnected": "disconnected",
+}
+
+
 def tally_client_analysis(rows, today):
     counts = {"pppoe": empty_client_analysis(), "hotspot": empty_client_analysis()}
-    fields = {
-        "surfing": "surfing",
-        "not_surfing": "notSurfing",
-        "expired": "expired",
-        "disconnected": "disconnected",
-    }
     for row in rows:
         service = row.get("service") if row.get("service") in counts else "pppoe"
         bucket = analysis_bucket(
@@ -453,9 +455,33 @@ def tally_client_analysis(rows, today):
             today,
             row.get("last_action") or "",
             row.get("tunnel_status") or "up",
+            int(row.get("any_sessions") or 0) > 0,
         )
-        counts[service][fields[bucket]] += 1
+        counts[service][ANALYSIS_FIELDS[bucket]] += 1
         counts[service]["total"] += 1
+    return counts
+
+
+def tally_hotspot_analysis(rows, now):
+    """Card counts for hotspot guests, tallied from their purchases.
+
+    Mirrors the fallback list_hotspot_clients uses when no live host is
+    visible: a paid guest with redeemed surf time left is surfing, a paid
+    guest who never redeemed a voucher is not surfing, a used-up purchase
+    is expired, and a failed purchase is disconnected."""
+    counts = empty_client_analysis()
+    for row in rows:
+        used = int(row.get("used_vouchers") or 0)
+        surf_until = row.get("surf_until")
+        surf_until = surf_until if isinstance(surf_until, datetime) else None
+        if row.get("status") == "paid":
+            bucket = "surfing" if used and (not surf_until or surf_until > now) else "expired" if used else "not_surfing"
+        elif row.get("status") == "pending":
+            bucket = "not_surfing"
+        else:
+            bucket = "disconnected"
+        counts[ANALYSIS_FIELDS[bucket]] += 1
+        counts["total"] += 1
     return counts
 
 

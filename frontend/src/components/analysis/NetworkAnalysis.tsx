@@ -26,6 +26,8 @@ type RouterUsage = {
   tunnelStatus: string;
   subscribers: number;
   openSessions: number;
+  hotspotGuests: number;
+  hotspotSessions: number;
   pppoe: Usage;
   hotspot: Usage;
   bytesIn: number;
@@ -150,7 +152,7 @@ function clientCards(counts: ClientCounts | undefined, home: (path: string) => s
     {
       label: "Disconnected",
       value: show(counts?.disconnected),
-      detail: "Suspended or a disconnect in progress",
+      detail: "Suspended or equipment unreachable",
       to: home(base),
       tone: "warn" as const,
     },
@@ -163,6 +165,7 @@ export function NetworkAnalysis() {
   const summary = data?.summary;
   const home = (path: string) => (user ? clientPage(user, path) : path);
   const routers = summary?.routers;
+  const healthPercent = routers && routers.total ? Math.round((routers.healthy / routers.total) * 100) : 0;
 
   return (
     <div className="mt-6 space-y-6">
@@ -195,8 +198,14 @@ export function NetworkAnalysis() {
           />
           <Metric
             label="Health"
-            value={routers ? String(routers.healthy) : "—"}
-            detail={routers ? `${routers.unhealthy} with an open health issue` : "Routers with no open health issue"}
+            value={routers ? `${healthPercent}%` : "—"}
+            detail={
+              routers
+                ? routers.total
+                  ? `${routers.healthy} of ${routers.total} routers healthy · ${routers.unhealthy} with an open health issue`
+                  : "No routers saved yet"
+                : "Routers with no open health issue"
+            }
             to={home("/mikrotiks")}
             tone="info"
           />
@@ -311,7 +320,12 @@ function RouterUsageList({
                   </div>
                   <p className="mt-0.5 text-xs text-muted-foreground">
                     {router.site ? `${router.site} · ` : ""}
-                    {router.subscribers} {router.subscribers === 1 ? "client" : "clients"} · {router.openSessions} surfing
+                    {router.subscribers} PPPoE {router.subscribers === 1 ? "client" : "clients"}
+                    {router.hotspotGuests
+                      ? ` · ${router.hotspotGuests} hotspot ${router.hotspotGuests === 1 ? "guest" : "guests"}`
+                      : ""}
+                    {" · "}
+                    {router.openSessions + router.hotspotSessions} surfing
                   </p>
                 </div>
                 <div className="text-right">

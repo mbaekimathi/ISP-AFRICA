@@ -1,4 +1,4 @@
-import { Check, Landmark, Loader2, LockKeyhole, Send, Smartphone, XCircle } from "lucide-react";
+import { Check, Landmark, Loader2, LockKeyhole, Plus, Receipt, Send, Smartphone, Timer, Trash2, XCircle } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
@@ -28,6 +28,38 @@ type PayoutSettings = {
   pending_change: string | null;
   pending_change_effective_at: string | null;
 };
+
+type GatewayFees = {
+  configured: boolean;
+  commissionPercent?: string;
+  commissionFlat?: string;
+  payoutFeeEstimate?: string;
+  minPayout?: string;
+  maxPayoutPerTx?: string;
+  txnFeesEnabled?: boolean;
+  bands?: { id: string; min: string; max: string | null; fee: string }[];
+};
+
+function kes(value: string | number | null | undefined) {
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return "—";
+  return new Intl.NumberFormat("en-KE", {
+    style: "currency",
+    currency: "KES",
+    minimumFractionDigits: 0,
+  }).format(amount);
+}
+
+const SCHEDULE_DAYS = [
+  { id: "daily", label: "Every day" },
+  { id: "monday", label: "Monday" },
+  { id: "tuesday", label: "Tuesday" },
+  { id: "wednesday", label: "Wednesday" },
+  { id: "thursday", label: "Thursday" },
+  { id: "friday", label: "Friday" },
+  { id: "saturday", label: "Saturday" },
+  { id: "sunday", label: "Sunday" },
+] as const;
 
 type PaymentDraft = {
   environment: "" | "sandbox" | "live";
@@ -562,10 +594,21 @@ function GatewaySettingsCard({ onModeChange }: { onModeChange?: (mode: GatewayMo
   const [loaded, setLoaded] = useState(false);
   const [checkState, setCheckState] = useState<"idle" | "checking" | "ok" | "failed">("idle");
   const [checks, setChecks] = useState<{ key: string; ok: boolean; detail: string }[]>([]);
+  const [fees, setFees] = useState<GatewayFees | null>(null);
+  const [settleMode, setSettleMode] = useState<SettlementMode>("immediate");
+  const [holdHours, setHoldHours] = useState("");
+  const [everyNTx, setEveryNTx] = useState("");
+  const [periods, setPeriods] = useState<{ day: string; time: string }[]>([]);
+  const [minPayout, setMinPayout] = useState("");
 
   const apply = useCallback((body: { settings: PayoutSettings; readOnly: boolean }) => {
     setSettings(body.settings);
     setReadOnly(body.readOnly);
+    setSettleMode(body.settings?.settlement_mode ?? "immediate");
+    setHoldHours(body.settings?.hold_hours ? String(body.settings.hold_hours) : "");
+    setEveryNTx(body.settings?.settle_every_n_tx ? String(body.settings.settle_every_n_tx) : "");
+    setPeriods(body.settings?.settle_schedule ?? []);
+    setMinPayout(body.settings?.min_payout_override ?? "");
     setLoaded(true);
   }, []);
 
@@ -576,6 +619,9 @@ function GatewaySettingsCard({ onModeChange }: { onModeChange?: (mode: GatewayMo
         setLoaded(true);
         setError(cause instanceof Error ? cause.message : "Gateway settings could not be loaded.");
       });
+    apiRequest<GatewayFees>("/api/gateway/fees")
+      .then(setFees)
+      .catch(() => undefined);
   }, [apply]);
 
   function save(body: Record<string, unknown>) {
@@ -638,6 +684,28 @@ function GatewaySettingsCard({ onModeChange }: { onModeChange?: (mode: GatewayMo
   const detectedPhone = /^(?:254[17]\d{8}|0[17]\d{8}|[17]\d{8})$/.test(destinationDigits);
   const needsShortcodeKind = Boolean(destinationDigits) && !detectedPhone;
 
+  const completePeriods = periods.filter((period) => period.day && period.time);
+  const needsEveryNTx = settleMode === "transactions" && !(Number(everyNTx) >= 1);
+  const needsPeriod = settleMode === "scheduled" && !completePeriods.length;
+
+  const feeRows: [string, string][] = [];
+  if (fees?.configured) {
+    const flat = Number(fees.commissionFlat || 0);
+    feeRows.push([
+      "Company commission",
+      `${fees.commissionPercent || "0"}%${flat ? ` + ${kes(flat)}` : ""} of each payout`,
+    ]);
+    if (Number(fees.payoutFeeEstimate) > 0) {
+      feeRows.push(["Payout fee", `about ${kes(fees.payoutFeeEstimate)} per M-Pesa transaction`]);
+    }
+    if (Number(fees.minPayout) > 0) {
+      feeRows.push(["Smallest payout", kes(fees.minPayout)]);
+    }
+    if (Number(fees.maxPayoutPerTx) > 0) {
+      feeRows.push(["Largest single payout", kes(fees.maxPayoutPerTx)]);
+    }
+  }
+
   return (
     <section className="form-card mt-6 max-w-2xl">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -696,6 +764,55 @@ function GatewaySettingsCard({ onModeChange }: { onModeChange?: (mode: GatewayMo
       ) : null}
 
       <div className="mt-4 grid gap-4">
+        {fees?.configured ? (
+          <div className="grid gap-3 rounded-xl border border-border bg-surface-muted/40 p-4">
+            <div className="flex items-center gap-2.5">
+              <span
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"
+                aria-hidden="true"
+              >
+                <Receipt className="h-4 w-4" />
+              </span>
+              <div className="grid gap-0.5">
+                <h3 className="text-sm font-semibold text-foreground">What the company gateway costs</h3>
+                <p className="text-sm text-muted-foreground">
+                  Deducted from your pooled collections before each payout.
+                </p>
+              </div>
+            </div>
+            <dl className="grid gap-1.5 text-sm">
+              {feeRows.map(([label, value]) => (
+                <div key={label} className="flex flex-wrap items-baseline justify-between gap-2">
+                  <dt className="text-muted-foreground">{label}</dt>
+                  <dd className="font-medium text-foreground">{value}</dd>
+                </div>
+              ))}
+            </dl>
+            {fees.txnFeesEnabled && fees.bands?.length ? (
+              <div className="grid gap-1.5">
+                <p className="text-caption font-semibold uppercase tracking-wide text-muted-foreground">
+                  Transaction charge per payout
+                </p>
+                <table className="w-full text-sm">
+                  <tbody>
+                    {fees.bands.map((band) => (
+                      <tr key={band.id} className="border-t border-border/60 first:border-0">
+                        <td className="py-1.5 pr-3 text-muted-foreground">
+                          {band.max
+                            ? `${kes(band.min)} – ${kes(band.max)}`
+                            : `${kes(band.min)} and above`}
+                        </td>
+                        <td className="py-1.5 text-right font-medium text-foreground">
+                          {kes(band.fee)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
         <div
           className={cn(
             "grid gap-3 rounded-xl border p-4",
@@ -816,6 +933,173 @@ function GatewaySettingsCard({ onModeChange }: { onModeChange?: (mode: GatewayMo
           </div>
         ) : null}
 
+        {pooled ? (
+          <div className="grid gap-4 border-t border-border pt-4">
+            <div className="flex items-center gap-2.5">
+              <span
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary"
+                aria-hidden="true"
+              >
+                <Timer className="h-4 w-4" />
+              </span>
+              <div className="grid gap-0.5">
+                <h3 className="text-sm font-semibold text-foreground">How often you're paid</h3>
+                <p className="text-sm text-muted-foreground">
+                  Choose when money collected by the company is sent to your destination.
+                </p>
+              </div>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <FormField id="gw-settle-mode" label="Payout frequency">
+                <select
+                  id="gw-settle-mode"
+                  className="field"
+                  value={settleMode}
+                  disabled={readOnly || pending}
+                  onChange={(event) => setSettleMode(event.target.value as SettlementMode)}
+                >
+                  <option value="immediate">As soon as money arrives</option>
+                  <option value="delayed">After a holding period</option>
+                  <option value="transactions">After a number of payments</option>
+                  <option value="scheduled">On a set schedule</option>
+                </select>
+              </FormField>
+              {settleMode === "delayed" ? (
+                <FormField
+                  id="gw-hold-hours"
+                  label="Hold collections for"
+                  hint="Each payment becomes payable this many hours after it confirms (1–720)."
+                >
+                  <div className="flex items-center gap-2">
+                    <input
+                      id="gw-hold-hours"
+                      className="field"
+                      inputMode="numeric"
+                      value={holdHours}
+                      disabled={readOnly || pending}
+                      onChange={(event) =>
+                        setHoldHours(event.target.value.replace(/\D/g, "").slice(0, 3))
+                      }
+                    />
+                    <span className="shrink-0 text-sm text-muted-foreground">hours</span>
+                  </div>
+                </FormField>
+              ) : null}
+              {settleMode === "transactions" ? (
+                <FormField
+                  id="gw-every-n"
+                  label="Pay out after every"
+                  hint="A payout runs once this many payments have been collected (1–10,000)."
+                >
+                  <div className="flex items-center gap-2">
+                    <input
+                      id="gw-every-n"
+                      className="field"
+                      inputMode="numeric"
+                      value={everyNTx}
+                      disabled={readOnly || pending}
+                      onChange={(event) =>
+                        setEveryNTx(event.target.value.replace(/\D/g, "").slice(0, 5))
+                      }
+                    />
+                    <span className="shrink-0 text-sm text-muted-foreground">payments</span>
+                  </div>
+                </FormField>
+              ) : null}
+              <FormField
+                id="gw-min-payout"
+                label="Minimum payout amount"
+                hint="Optional — wait until at least this much is due. Leave empty for the company minimum."
+              >
+                <input
+                  id="gw-min-payout"
+                  className="field"
+                  inputMode="decimal"
+                  placeholder={
+                    fees?.minPayout && Number(fees.minPayout) > 0
+                      ? `Company minimum ${kes(fees.minPayout)}`
+                      : "e.g. 500"
+                  }
+                  value={minPayout}
+                  disabled={readOnly || pending}
+                  onChange={(event) =>
+                    setMinPayout(event.target.value.replace(/[^\d.]/g, "").slice(0, 12))
+                  }
+                />
+              </FormField>
+            </div>
+            {settleMode === "scheduled" ? (
+              <div className="grid gap-2">
+                <p className="text-sm font-medium text-foreground">Payout times</p>
+                {periods.map((period, index) => (
+                  <div key={index} className="flex items-center gap-2">
+                    <select
+                      className="field flex-1"
+                      value={period.day}
+                      disabled={readOnly || pending}
+                      aria-label={`Payout day ${index + 1}`}
+                      onChange={(event) =>
+                        setPeriods((current) =>
+                          current.map((entry, i) =>
+                            i === index ? { ...entry, day: event.target.value } : entry,
+                          ),
+                        )
+                      }
+                    >
+                      {SCHEDULE_DAYS.map((day) => (
+                        <option key={day.id} value={day.id}>
+                          {day.label}
+                        </option>
+                      ))}
+                    </select>
+                    <input
+                      type="time"
+                      className="field w-32"
+                      value={period.time}
+                      disabled={readOnly || pending}
+                      aria-label={`Payout time ${index + 1}`}
+                      onChange={(event) =>
+                        setPeriods((current) =>
+                          current.map((entry, i) =>
+                            i === index ? { ...entry, time: event.target.value } : entry,
+                          ),
+                        )
+                      }
+                    />
+                    <button
+                      type="button"
+                      className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-surface-muted hover:text-destructive disabled:opacity-60"
+                      aria-label={`Remove payout time ${index + 1}`}
+                      disabled={readOnly || pending}
+                      onClick={() =>
+                        setPeriods((current) => current.filter((_, i) => i !== index))
+                      }
+                    >
+                      <Trash2 className="h-4 w-4" aria-hidden="true" />
+                    </button>
+                  </div>
+                ))}
+                <div>
+                  <SecondaryButton
+                    type="button"
+                    disabled={readOnly || pending || periods.length >= 24}
+                    onClick={() =>
+                      setPeriods((current) => [...current, { day: "daily", time: "09:00" }])
+                    }
+                  >
+                    <Plus className="h-4 w-4" aria-hidden="true" />
+                    Add a payout time
+                  </SecondaryButton>
+                </div>
+                <p className="text-caption text-muted-foreground">
+                  Money is sent at each listed time — for example every day at 09:00, or Fridays
+                  at 17:00.
+                </p>
+              </div>
+            ) : null}
+          </div>
+        ) : null}
+
         <div className="grid gap-4 rounded-xl border border-border bg-surface-muted/40 p-4">
           <div className="flex items-center gap-2.5">
             <span
@@ -825,7 +1109,8 @@ function GatewaySettingsCard({ onModeChange }: { onModeChange?: (mode: GatewayMo
               <LockKeyhole className="h-4 w-4" />
             </span>
             <p className="text-sm text-muted-foreground">
-              Confirm your account password to change the collection mode or payout destination.
+              Confirm your account password to change the collection mode, payout frequency, or
+              destination.
             </p>
           </div>
           <div className="flex flex-wrap items-end gap-3">
@@ -845,9 +1130,28 @@ function GatewaySettingsCard({ onModeChange }: { onModeChange?: (mode: GatewayMo
             {pooled ? (
               <PrimaryButton
                 type="button"
-                disabled={readOnly || pending || !password || (needsShortcodeKind && !shortcodeKind)}
+                disabled={
+                  readOnly ||
+                  pending ||
+                  !password ||
+                  (needsShortcodeKind && !shortcodeKind) ||
+                  needsEveryNTx ||
+                  needsPeriod
+                }
                 onClick={() => {
-                  const body: Record<string, unknown> = { settlementMode: "immediate" };
+                  const body: Record<string, unknown> = {
+                    settlementMode: settleMode,
+                    minPayoutOverride: minPayout.trim(),
+                  };
+                  if (settleMode === "delayed" && holdHours.trim()) {
+                    body.holdHours = holdHours.trim();
+                  }
+                  if (settleMode === "transactions") {
+                    body.settleEveryNTx = everyNTx.trim();
+                  }
+                  if (settleMode === "scheduled") {
+                    body.settleSchedule = completePeriods;
+                  }
                   if (destinationValue.trim()) {
                     body.destination = {
                       type: detectedPhone ? "phone" : shortcodeKind,

@@ -229,7 +229,7 @@ def identify(cursor, ip):
                 FROM pppoe_subscribers s
                 LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
                 LEFT JOIN isp_packages p ON p.id = s.package_id
-                WHERE s.pppoe_username = %s AND s.deleted = 0
+                WHERE s.pppoe_username = %s AND s.deleted = 0 AND s.service = 'pppoe'
                 LIMIT 1
                 """,
                 (name,),

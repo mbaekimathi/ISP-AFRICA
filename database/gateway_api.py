@@ -326,6 +326,33 @@ def isp_settings(cursor, client_id):
     return {"settings": gateway_store.isp_payout_settings_row(cursor, client_id)}
 
 
+def isp_fees(cursor):
+    """The fee side of the company gateway, safe to show a client deciding
+    whether to pool: commission, estimated payout fees, bounds, and the
+    banded charge table — numbers only, no credentials."""
+    row = gateway_store.company_gateway_row(cursor)
+    if not row:
+        return {"configured": False}
+    return {
+        "configured": True,
+        "commissionPercent": str(row.get("commission_percent") or ""),
+        "commissionFlat": str(row.get("commission_flat") or ""),
+        "payoutFeeEstimate": str(row.get("payout_fee_estimate") or ""),
+        "minPayout": str(row.get("min_payout") or ""),
+        "maxPayoutPerTx": str(row.get("max_payout_per_tx") or ""),
+        "txnFeesEnabled": bool(row.get("txn_fees_enabled")),
+        "bands": [
+            {
+                "id": band["id"],
+                "min": str(band["min_amount"]),
+                "max": None if band["max_amount"] is None else str(band["max_amount"]),
+                "fee": str(band["fee"]),
+            }
+            for band in gateway_store.fee_bands(cursor)
+        ],
+    }
+
+
 def isp_payments(cursor, client_id, query):
     limit, offset = _page(query)
     status = (query.get("status") or [None])[0]
@@ -418,7 +445,16 @@ def save_isp_settings(cursor, client_id, payload, actor_id):
     if fields.get("settlement_mode") == "scheduled" and not fields.get("settle_schedule"):
         return None, "Add at least one payout period."
     if "minPayoutOverride" in payload:
-        fields["min_payout_override"] = payload["minPayoutOverride"]
+        raw_override = payload["minPayoutOverride"]
+        if raw_override in (None, ""):
+            fields["min_payout_override"] = None
+        else:
+            try:
+                fields["min_payout_override"] = Decimal(str(raw_override))
+            except InvalidOperation:
+                return None, "minPayoutOverride must be a number."
+            if fields["min_payout_override"] < 0:
+                return None, "minPayoutOverride cannot be negative."
     if "destination" in payload:
         destination = payload["destination"] or {}
         fields["destination_type"] = destination.get("type")
