@@ -1,24 +1,24 @@
 import { useCallback, useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
+import {
+  CommunicationChannelFields,
+  CommunicationSummary,
+  draftFrom,
+  emptyDraft,
+  type Channel,
+  type CommunicationDraft,
+  type CommunicationRecord,
+} from "@/components/communication/CommunicationFields";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { LiveLoad } from "@/components/ui/LiveLoad";
 import { PageHeader } from "@/components/ui/DetailGrid";
-import { FormField, FormPicker } from "@/components/ui/FormField";
+import { FormPicker } from "@/components/ui/FormField";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { ApiRequestError, apiRequest } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useAuth } from "@/providers/AuthProvider";
 
-type Channel = "sms" | "whatsapp" | "email";
 type Source = "own" | "company";
-
-type CommunicationDraft = {
-  endpoint: string;
-  sender: string;
-  apiKey: string;
-};
-
-type CommunicationRecord = CommunicationDraft;
 
 type ChannelSettings = {
   mode: Source;
@@ -30,43 +30,30 @@ type CommunicationSettings = Record<Channel, ChannelSettings>;
 
 type ConnectionCheck = { state: "idle" | "checking" | "ok" | "failed"; reason: string };
 
-const emptyDraft: CommunicationDraft = { endpoint: "", sender: "", apiKey: "" };
 const idleCheck: ConnectionCheck = { state: "idle", reason: "" };
 
 const channels: {
   channel: Channel;
   title: string;
   label: string;
-  endpoint: string;
-  sender: string;
-  secret: string;
   action: string;
 }[] = [
   {
     channel: "sms",
     title: "SMS API",
     label: "SMS",
-    endpoint: "SMS API endpoint",
-    sender: "Sender ID",
-    secret: "API key",
     action: "Save SMS API",
   },
   {
     channel: "whatsapp",
     title: "WHATS APP API",
     label: "WhatsApp",
-    endpoint: "WhatsApp API endpoint",
-    sender: "Phone number ID",
-    secret: "Access token",
     action: "Save WhatsApp API",
   },
   {
     channel: "email",
     title: "EMAIL API",
     label: "email",
-    endpoint: "Email API endpoint",
-    sender: "From email",
-    secret: "API key",
     action: "Save email API",
   },
 ];
@@ -83,10 +70,6 @@ const sources: { source: Source; title: string; detail: string }[] = [
     detail: "Send with the communication API set up by the company instead.",
   },
 ];
-
-function draftFrom(record: CommunicationRecord | null): CommunicationDraft {
-  return record ? { endpoint: record.endpoint, sender: record.sender, apiKey: record.apiKey } : emptyDraft;
-}
 
 export function IspCommunicationsPage() {
   const { user, ready } = useAuth();
@@ -174,8 +157,8 @@ export function IspCommunicationsPage() {
     };
   }, [apply, user]);
 
-  function update(target: Channel, field: keyof CommunicationDraft, value: string) {
-    setDrafts((current) => ({ ...current, [target]: { ...current[target], [field]: value } }));
+  function update(target: Channel, patch: Partial<CommunicationDraft>) {
+    setDrafts((current) => ({ ...current, [target]: { ...current[target], ...patch } }));
   }
 
   function pickMode(target: Channel, source: Source) {
@@ -307,49 +290,14 @@ export function IspCommunicationsPage() {
                 {statusText}
               </p>
               {mode === "own" ? (
-                <div className="grid gap-4">
-                  <FormField id={`${item.channel}-endpoint`} label={item.endpoint}>
-                    <input
-                      id={`${item.channel}-endpoint`}
-                      className="field"
-                      inputMode="url"
-                      value={draft.endpoint}
-                      onChange={(event) => update(item.channel, "endpoint", event.target.value)}
-                    />
-                  </FormField>
-                  <FormField id={`${item.channel}-sender`} label={item.sender}>
-                    <input
-                      id={`${item.channel}-sender`}
-                      className="field"
-                      type={item.channel === "email" ? "email" : "text"}
-                      autoComplete="off"
-                      value={draft.sender}
-                      onChange={(event) => update(item.channel, "sender", event.target.value)}
-                    />
-                  </FormField>
-                  <FormField id={`${item.channel}-key`} label={item.secret}>
-                    <input
-                      id={`${item.channel}-key`}
-                      type="password"
-                      className="field"
-                      autoComplete="new-password"
-                      value={draft.apiKey}
-                      onChange={(event) => update(item.channel, "apiKey", event.target.value)}
-                    />
-                  </FormField>
-                </div>
+                <CommunicationChannelFields
+                  channel={item.channel}
+                  draft={draft}
+                  idPrefix={item.channel}
+                  onChange={(patch) => update(item.channel, patch)}
+                />
               ) : current.company ? (
-                <div className="grid gap-1 rounded-lg border border-border px-3 py-2 text-sm text-muted-foreground">
-                  <p>
-                    <span className="font-medium text-foreground">{item.endpoint}:</span> {current.company.endpoint}
-                  </p>
-                  <p>
-                    <span className="font-medium text-foreground">{item.sender}:</span> {current.company.sender}
-                  </p>
-                  <p>
-                    <span className="font-medium text-foreground">{item.secret}:</span> {current.company.apiKey}
-                  </p>
-                </div>
+                <CommunicationSummary channel={item.channel} record={current.company} />
               ) : (
                 <p className="notice" role="status">
                   The company has not set up this API yet.

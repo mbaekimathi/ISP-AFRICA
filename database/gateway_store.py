@@ -27,6 +27,7 @@ the unique keys above make a second attempt fail instead of double-crediting.
 
 import hashlib
 import json
+import os
 import secrets
 import uuid
 from decimal import Decimal, ROUND_HALF_UP
@@ -69,6 +70,7 @@ UNDO_STATEMENTS = [
     "ALTER TABLE company_daraja_settings DROP COLUMN last_known_balance",
     "ALTER TABLE company_daraja_settings DROP COLUMN last_balance_at",
     "ALTER TABLE company_daraja_settings DROP COLUMN txn_fees_enabled",
+    "ALTER TABLE company_daraja_settings DROP COLUMN public_base",
 ]
 
 
@@ -93,6 +95,7 @@ def ensure_schema(cursor):
         ("last_known_balance", "last_known_balance DECIMAL(14,2) NULL"),
         ("last_balance_at", "last_balance_at DATETIME NULL"),
         ("txn_fees_enabled", "txn_fees_enabled TINYINT NOT NULL DEFAULT 0"),
+        ("public_base", "public_base VARCHAR(255) NOT NULL DEFAULT ''"),
     ):
         cursor.execute("SHOW COLUMNS FROM company_daraja_settings LIKE %s", (column,))
         if cursor.fetchone() is None:
@@ -484,6 +487,32 @@ def callback_secret(cursor):
     row = cursor.fetchone()
     sealed = (row or {}).get("callback_secret_enc")
     return gateway_crypto.open_secret(sealed) if sealed else None
+
+
+def public_base(cursor):
+    """The public https base Daraja can reach this server on —
+    ISP_GATEWAY_PUBLIC_URL when set, otherwise the base remembered from a
+    director request through the public domain ('' when neither exists)."""
+    base = (os.environ.get("ISP_GATEWAY_PUBLIC_URL") or "").strip().rstrip("/")
+    if base:
+        return base
+    cursor.execute("SELECT public_base FROM company_daraja_settings WHERE id = 1")
+    return ((cursor.fetchone() or {}).get("public_base") or "").strip().rstrip("/")
+
+
+def remember_public_base(cursor, base):
+    """Persist the https base observed on a director's request. No-op while
+    ISP_GATEWAY_PUBLIC_URL overrides it; a blank base never clears a learned
+    value — a later https request on a different domain overwrites it."""
+    if (os.environ.get("ISP_GATEWAY_PUBLIC_URL") or "").strip():
+        return
+    base = (base or "").strip().rstrip("/")
+    if not base.startswith("https://"):
+        return
+    cursor.execute(
+        "UPDATE company_daraja_settings SET public_base = %s WHERE id = 1 AND public_base <> %s",
+        (base, base),
+    )
 
 
 def log_callback_event(cursor, endpoint, body):
@@ -1642,6 +1671,7 @@ _SEALED_SECRET_TABLES = {
     "isp_payment_settings": (("client_id", "scope"), ("consumer_secret", "passkey", "security_credential")),
     "company_other_gateway": (("id",), ("secret_key",)),
     "company_communication_settings": (("channel",), ("api_key",)),
+    "company_push_settings": (("id",), ("vapid_private",)),
     "isp_communication_settings": (("client_id", "channel"), ("api_key",)),
 }
 

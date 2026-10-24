@@ -23,6 +23,7 @@ type DarajaDraft = {
 type DarajaInfo = {
   callbackSecret: string;
   callbackBase: string;
+  callbackBaseSource: "" | "environment" | "learned";
   callbackUrls: Record<string, string>;
   updatedAt: string;
 };
@@ -114,11 +115,13 @@ export function CompanyPaymentsPage() {
   const apply = useCallback(
     (body: CompanyPayments) => {
       if (body.daraja) {
-        const { callbackSecret, callbackBase, callbackUrls, updatedAt, ...draft } = body.daraja;
+        const { callbackSecret, callbackBase, callbackBaseSource, callbackUrls, updatedAt, ...draft } =
+          body.daraja;
         setDaraja(draft);
         setDarajaInfo({
           callbackSecret: callbackSecret ?? "",
           callbackBase: callbackBase ?? "",
+          callbackBaseSource: callbackBaseSource ?? "",
           callbackUrls: callbackUrls ?? {},
           updatedAt: updatedAt ?? "",
         });
@@ -360,10 +363,17 @@ export function CompanyPaymentsPage() {
             </p>
             {darajaInfo.callbackBase ? null : (
               <p className="notice" role="status">
-                Set ISP_GATEWAY_PUBLIC_URL to this server’s public https address — the paths below only work
-                once Daraja can reach it.
+                The callback base is learned automatically from the domain this page is opened on — sign in
+                through the server’s public https address, or set ISP_GATEWAY_PUBLIC_URL on the server. The
+                paths below only work once Daraja can reach it.
               </p>
             )}
+            {darajaInfo.callbackBaseSource === "learned" ? (
+              <p className="text-caption text-muted-foreground">
+                Callback base learned automatically: {darajaInfo.callbackBase} — set
+                ISP_GATEWAY_PUBLIC_URL on the server to override it.
+              </p>
+            ) : null}
             <dl className="grid gap-2">
               {CALLBACK_ENDPOINTS.map((endpoint) => (
                 <div key={endpoint.key} className="grid gap-0.5">

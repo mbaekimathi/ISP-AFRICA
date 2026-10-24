@@ -37,6 +37,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, quote, urlparse
 
 import gateway_store
+import pppoe_service
 import pppoe_store
 import routeros_api
 
@@ -181,6 +182,19 @@ def esc(value):
 
 
 def identify(cursor, ip):
+    """The subscriber behind a captive request, via the session's framed IP.
+
+    Netmapped visitors arrive on a shared portal address — the router's
+    tunnel IP plus the client host octet identifies their session instead.
+    radacct stores the username exactly as dialed, while RADIUS auth accepts
+    'user@realm', 'DOMAIN\\user', and phone variants — resolve the same alias
+    set here or those customers are told they have no account. Subscription
+    and package rows stay optional: a customer missing either still needs the
+    recharge page, not "no active subscription".
+
+    A restricted session dies every RESTRICTED_SESSION_SECONDS and the CPE
+    redials — during that gap no open radacct row exists yet, so recently
+    stopped sessions on this framed IP are matched too."""
     mapped = routeros_api.portal_map_client(ip)
     if mapped:
         match, params = "r.nasipaddress = %s AND r.framedipaddress LIKE %s", (mapped[0], f"%.{mapped[1]}")
@@ -188,46 +202,42 @@ def identify(cursor, ip):
         match, params = "r.framedipaddress = %s", (ip,)
     cursor.execute(
         """
-        SELECT s.id AS subscriber_id, s.client_id, s.first_name, s.last_name, s.phone,
-               s.pppoe_username, s.status, s.router_id, s.package_id,
-               p.name AS package_name, p.download_mbps, p.upload_mbps,
-               p.simultaneous_devices AS package_devices,
-               sub.price, sub.billing_cycle, sub.cycle_days, sub.grace_days
+        SELECT r.username
         FROM radacct r
-        JOIN pppoe_subscribers s ON s.pppoe_username = r.username
-        JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
-        JOIN isp_packages p ON p.id = s.package_id
-        WHERE {match} AND r.acctstoptime IS NULL
-        ORDER BY r.acctstarttime DESC LIMIT 1
-        """.format(match=match),
-        params,
-    )
-    row = cursor.fetchone()
-    if row:
-        return row
-    # A restricted session dies every RESTRICTED_SESSION_SECONDS and the CPE
-    # redials — during that gap no open radacct row exists yet. Match the last
-    # session on this framed IP so the portal still shows their page instead
-    # of "no active subscription" while they are reconnecting.
-    cursor.execute(
-        """
-        SELECT s.id AS subscriber_id, s.client_id, s.first_name, s.last_name, s.phone,
-               s.pppoe_username, s.status, s.router_id, s.package_id,
-               p.name AS package_name, p.download_mbps, p.upload_mbps,
-               p.simultaneous_devices AS package_devices,
-               sub.price, sub.billing_cycle, sub.cycle_days, sub.grace_days
-        FROM radacct r
-        JOIN pppoe_subscribers s ON s.pppoe_username = r.username
-        JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
-        JOIN isp_packages p ON p.id = s.package_id
         WHERE {match}
-          AND r.acctstoptime IS NOT NULL
-          AND r.acctstoptime > DATE_SUB(NOW(), INTERVAL 15 MINUTE)
-        ORDER BY r.acctstoptime DESC LIMIT 1
+          AND (r.acctstoptime IS NULL
+               OR r.acctstoptime > DATE_SUB(NOW(), INTERVAL 15 MINUTE))
+        ORDER BY (r.acctstoptime IS NULL) DESC,
+                 COALESCE(r.acctstoptime, r.acctstarttime) DESC
+        LIMIT 5
         """.format(match=match),
         params,
     )
-    return cursor.fetchone()
+    tried = set()
+    for session in cursor.fetchall():
+        for name in pppoe_service.username_aliases(session["username"] or ""):
+            if name in tried:
+                continue
+            tried.add(name)
+            cursor.execute(
+                """
+                SELECT s.id AS subscriber_id, s.client_id, s.first_name, s.last_name, s.phone,
+                       s.pppoe_username, s.status, s.router_id, s.package_id,
+                       p.name AS package_name, p.download_mbps, p.upload_mbps,
+                       p.simultaneous_devices AS package_devices,
+                       sub.price, sub.billing_cycle, sub.cycle_days, sub.grace_days
+                FROM pppoe_subscribers s
+                LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
+                LEFT JOIN isp_packages p ON p.id = s.package_id
+                WHERE s.pppoe_username = %s AND s.deleted = 0
+                LIMIT 1
+                """,
+                (name,),
+            )
+            row = cursor.fetchone()
+            if row:
+                return row
+    return None
 
 
 def normalize_phone(value):
@@ -300,7 +310,7 @@ def gateway_callback_url(cursor):
     """Public STK callback for pooled pushes — the URL Safaricom must reach
     the API server on, with the company's callback secret in the path.
     Empty when the public base or the secret is not configured yet."""
-    base = (os.environ.get("ISP_GATEWAY_PUBLIC_URL") or "").strip().rstrip("/")
+    base = gateway_store.public_base(cursor)
     if not base:
         return ""
     secret = gateway_store.callback_secret(cursor)
@@ -492,12 +502,12 @@ def pppoe_offers(cursor, row):
     package itself is no longer on sale."""
     offers = pppoe_packages(cursor, row["client_id"], str(row.get("router_id") or ""))
     own = next((offer for offer in offers if str(offer["id"]) == str(row["package_id"])), None)
-    if own is None:
+    if own is None and row.get("package_id"):
         offers.insert(
             0,
             {
                 "id": row["package_id"],
-                "name": row["package_name"],
+                "name": row.get("package_name") or "Current package",
                 "price": row["price"],
                 "download_mbps": row["download_mbps"],
                 "upload_mbps": row["upload_mbps"],
@@ -538,7 +548,7 @@ def pppoe_pick(offer, checked):
 <span class=tick></span>
 {thumb}
 <span class=pd><span class="nm">{esc(offer['name'])}</span>
-<span class="sp">{int(offer['download_mbps'])} Mbps ↓ · {int(offer['upload_mbps'])} Mbps ↑ · {esc(offer['period'])}</span>
+<span class="sp">{int(offer['download_mbps'] or 0)} Mbps ↓ · {int(offer['upload_mbps'] or 0)} Mbps ↑ · {esc(offer['period'])}</span>
 <span class="sp">{esc(device_text)}</span></span>
 <span class="pr">KSh {esc(ksh(price))}</span></label>"""
 
@@ -1964,6 +1974,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                         {
                             "amount": format(request["amount"], ".2f"),
                             "mpesaReference": (receipt or checkout_id)[:40],
+                            "packageId": request.get("package_id"),
+                            "packagePrice": format(request["package_price"], ".2f") if request.get("package_price") is not None else None,
                         },
                     )
                     cursor.execute(

@@ -51,6 +51,7 @@ ALTER TABLE company_daraja_settings DROP COLUMN payout_fee_estimate;
 ALTER TABLE company_daraja_settings DROP COLUMN last_known_balance;
 ALTER TABLE company_daraja_settings DROP COLUMN last_balance_at;
 ALTER TABLE company_daraja_settings DROP COLUMN txn_fees_enabled;
+ALTER TABLE company_daraja_settings DROP COLUMN public_base;
 ```
 
 Re-apply by restarting `api.py` (or calling `gateway_store.ensure_schema`

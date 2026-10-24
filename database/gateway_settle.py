@@ -330,9 +330,7 @@ _balance_requested_at = 0.0
 def _callback_base(cursor):
     """(base, secret) for building callback URLs, or None when the gateway
     has no public HTTPS endpoint configured."""
-    import os
-
-    base = (os.environ.get("ISP_GATEWAY_PUBLIC_URL") or "").strip().rstrip("/")
+    base = gateway_store.public_base(cursor)
     secret = gateway_store.callback_secret(cursor)
     if not base or not secret or not base.startswith("https://"):
         return None
@@ -464,7 +462,7 @@ def check_payout_status(cursor, payout_id, actor_id="", client=None):
     same way — this only sends the query."""
     cb = _callback_base(cursor)
     if not cb:
-        return None, "No public callback URL is configured (ISP_GATEWAY_PUBLIC_URL)."
+        return None, "No public callback URL is configured (ISP_GATEWAY_PUBLIC_URL, or open the director payments page through the server's public https address)."
     base, secret = cb
     company = company_gateway_settings(cursor)
     if not company:

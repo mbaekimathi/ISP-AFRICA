@@ -252,6 +252,8 @@ def fulfil_stk_credit(cursor, checkout_id):
                 {
                     "amount": format(request["amount"], ".2f"),
                     "mpesaReference": (receipt or request.get("mpesa_code") or checkout_id)[:40],
+                    "packageId": request.get("package_id"),
+                    "packagePrice": format(request["package_price"], ".2f") if request.get("package_price") is not None else None,
                 },
             )
             cursor.execute(

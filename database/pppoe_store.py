@@ -1006,8 +1006,8 @@ def list_subscribers(cursor, client_id, query, service="pppoe"):
                   AND a.acctstarttime >= GREATEST(COALESCE(sub.start_date, '1970-01-01'), DATE_SUB(COALESCE(sub.expiry_date, CURDATE()), INTERVAL COALESCE(sub.cycle_days, 30) DAY))
                ) AS cycle_bytes
         FROM pppoe_subscribers s
-        JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
-        JOIN isp_packages p ON p.id = s.package_id
+        LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
+        LEFT JOIN isp_packages p ON p.id = s.package_id
         LEFT JOIN isp_mikrotik_devices d ON d.id = s.router_id
         WHERE {' AND '.join(where)}
     """
@@ -1050,14 +1050,14 @@ def cursor_packages(cursor, client_id):
 def require_owned(cursor, client_id, subscriber_id):
     cursor.execute(
         """
-        SELECT s.*, sub.billing_status, sub.expiry_date, sub.price, sub.next_due_date, sub.billing_cycle,
+        SELECT s.*, sub.id AS subscription_id, sub.billing_status, sub.expiry_date, sub.price, sub.next_due_date, sub.billing_cycle,
                sub.cycle_days, sub.grace_days, sub.auto_renew, sub.discount, sub.discount_reason, sub.start_date AS sub_start,
                p.name AS package_name, p.download_mbps, p.upload_mbps, p.simultaneous_devices AS package_devices,
                d.name AS router_name, d.tunnel_status, d.tunnel_ip, d.api_secret,
                (SELECT e.action FROM pppoe_events e WHERE e.subscriber_id = s.id ORDER BY e.created_at DESC LIMIT 1) AS last_action
         FROM pppoe_subscribers s
-        JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
-        JOIN isp_packages p ON p.id = s.package_id
+        LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
+        LEFT JOIN isp_packages p ON p.id = s.package_id
         LEFT JOIN isp_mikrotik_devices d ON d.id = s.router_id
         WHERE s.id = %s AND s.client_id = %s AND s.deleted = 0
         """,
@@ -1089,12 +1089,12 @@ def subscriber_detail(cursor, client_id, subscriber_id):
             "mtu": int(row["mtu"]),
             "startDate": stamp(row["start_date"]),
             "nextDueDate": stamp(row["next_due_date"]),
-            "graceDays": int(row["grace_days"]),
+            "graceDays": int(row["grace_days"] or 0),
             "autoRenew": bool(row["auto_renew"]),
-            "discount": format(Decimal(row["discount"]), ".2f"),
-            "discountReason": row["discount_reason"],
-            "billingCycle": row["billing_cycle"],
-            "rateLimit": f"{int(row['upload_mbps'])}M/{int(row['download_mbps'])}M",
+            "discount": format(Decimal(row["discount"] or 0), ".2f"),
+            "discountReason": row["discount_reason"] or "",
+            "billingCycle": row["billing_cycle"] or "monthly",
+            "rateLimit": f"{int(row['upload_mbps'] or 0)}M/{int(row['download_mbps'] or 0)}M",
         }
     )
     body["billing"] = billing_block(cursor, subscriber_id, row)
@@ -1718,6 +1718,12 @@ def effective_session_limit(session_limit, package_devices):
 
 def plan_from_saved(row, active):
     password = routeros_api.open_password(row["password_sealed"])
+    download = int(row["download_mbps"] or 0)
+    upload = int(row["upload_mbps"] or 0)
+    # A missing or rate-less package can never grant full access — the
+    # account stays on the restricted/expired address list until a real
+    # package is assigned.
+    active = bool(active) and bool(row.get("package_id")) and download > 0 and upload > 0
     return {
         "password": password,
         "status": row["status"],
@@ -1726,7 +1732,7 @@ def plan_from_saved(row, active):
         "expiryDate": stamp(row.get("expiry_date")),
         "staticIp": row["static_ip"] or None,
         "poolName": None if row["static_ip"] else "pppoe-pool",
-        "rateLimit": f"{int(row['upload_mbps'])}M/{int(row['download_mbps'])}M",
+        "rateLimit": f"{upload}M/{download}M",
         "groupName": f"pppoe-{row['package_id']}" if active else pppoe_service.RESTRICTED_GROUP,
     }
 
@@ -1735,6 +1741,9 @@ def subscription_can_surf(row, today):
     """A dialed session can use the internet only while the subscription is still active."""
     expiry = as_day(row.get("expiry_date"))
     if row.get("status") != "active":
+        return False
+    if row.get("billing_status") is None:
+        # No subscription row at all — nothing was ever credited to surf on.
         return False
     if row.get("billing_status") in ("suspended", "cancelled"):
         return False
@@ -1752,8 +1761,8 @@ def sync_router_access(cursor, client_id, router_id):
                s.static_ip, sub.expiry_date, sub.billing_status, p.download_mbps, p.upload_mbps,
                p.simultaneous_devices AS package_devices
         FROM pppoe_subscribers s
-        JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
-        JOIN isp_packages p ON p.id = s.package_id
+        LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
+        LEFT JOIN isp_packages p ON p.id = s.package_id
         WHERE s.client_id = %s AND s.router_id = %s
         """,
         (client_id, router_id),
@@ -1855,8 +1864,8 @@ def disconnect_router_clients(cursor, client_id, router_id, actor_id, reason):
                s.static_ip, s.router_id, sub.expiry_date, p.download_mbps, p.upload_mbps,
                p.simultaneous_devices AS package_devices
         FROM pppoe_subscribers s
-        JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
-        JOIN isp_packages p ON p.id = s.package_id
+        LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
+        LEFT JOIN isp_packages p ON p.id = s.package_id
         WHERE s.client_id = %s AND s.router_id = %s
         """,
         (client_id, router_id),
@@ -1886,8 +1895,8 @@ def reconcile(cursor, client_id):
                s.static_ip, s.router_id, sub.expiry_date, sub.billing_status, sub.next_due_date,
                p.download_mbps, p.upload_mbps, p.simultaneous_devices AS package_devices
         FROM pppoe_subscribers s
-        JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
-        JOIN isp_packages p ON p.id = s.package_id
+        LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
+        LEFT JOIN isp_packages p ON p.id = s.package_id
         WHERE s.client_id = %s AND s.deleted = 0
         """,
         (client_id,),
@@ -1993,6 +2002,37 @@ def renew(cursor, client_id, subscriber_id, payload):
     if amount is None or amount <= 0:
         raise PppoeError(400, "Enter the verified payment amount before renewal.")
     reference = str(payload.get("mpesaReference") or "").strip()[:40]
+    sub_missing = row.get("subscription_id") is None
+    if sub_missing:
+        # The billing row was never written (or was lost) — a paid recharge
+        # must still credit, so rebuild the pricing fields the math below
+        # needs. The paid package wins over the stored one; with no usable
+        # price anywhere the payment itself prices one 30-day cycle.
+        package_id = str(payload.get("packageId") or row.get("package_id") or "")
+        if not package_id:
+            raise PppoeError(400, "Assign a package to this account before renewal.")
+        package = load_package(cursor, client_id, package_id)
+        price = (
+            Decimal(package["price"])
+            if package
+            else pppoe_service.money(payload.get("packagePrice"), "package price") or Decimal("0")
+        )
+        if price <= 0:
+            price = amount
+        row["package_id"] = package_id
+        row["price"] = price
+        row["cycle_days"] = 30
+        row["billing_cycle"] = "monthly"
+        row["grace_days"] = 3
+        row["next_due_date"] = None
+        row["expiry_date"] = None
+        row["sub_start"] = None
+        row["billing_status"] = "pending"
+        if package:
+            row["package_name"] = package["name"]
+            row["download_mbps"] = package["downloadMbps"]
+            row["upload_mbps"] = package["uploadMbps"]
+            row["package_devices"] = package["devices"]
     price = Decimal(row["price"] or 0)
     period = int(row["cycle_days"] or 30)
     if price <= 0 or period <= 0:
@@ -2024,6 +2064,30 @@ def renew(cursor, client_id, subscriber_id, payload):
     try:
         invoice_id = create_invoice(cursor, client_id, subscriber_id, format(amount, ".2f"), "renewal", "paid", reference)
         create_payment(cursor, client_id, subscriber_id, invoice_id, format(amount, ".2f"), "manual", reference)
+        if sub_missing:
+            cursor.execute(
+                """
+                INSERT INTO pppoe_subscriptions (
+                  id, subscriber_id, package_id, price, billing_cycle, cycle_days,
+                  start_date, next_due_date, expiry_date, grace_days, auto_renew,
+                  billing_status, discount, discount_reason
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, NULL, NULL, %s, 1, 'pending', 0, '')
+                """,
+                (
+                    str(uuid.uuid4()),
+                    subscriber_id,
+                    row["package_id"],
+                    format(Decimal(row["price"]), ".2f"),
+                    row["billing_cycle"],
+                    int(row["cycle_days"]),
+                    as_day(row.get("start_date")),
+                    int(row["grace_days"]),
+                ),
+            )
+            cursor.execute(
+                "UPDATE pppoe_subscribers SET package_id = %s WHERE id = %s",
+                (row["package_id"], subscriber_id),
+            )
         cursor.execute(
             """
             UPDATE pppoe_subscriptions
@@ -2079,10 +2143,10 @@ def upgrade(cursor, client_id, subscriber_id, payload):
     credit = Decimal("0.00")
     if payload.get("prorate"):
         credit = pppoe_service.prorate_credit(
-            row["price"],
+            row["price"] or 0,
             as_day(row["next_due_date"]),
             date.today(),
-            int(row["cycle_days"]),
+            int(row["cycle_days"] or 30),
         )
     begin(cursor)
     try:
@@ -2099,7 +2163,7 @@ def upgrade(cursor, client_id, subscriber_id, payload):
         row["package_id"] = package["id"]
         row["upload_mbps"] = package["uploadMbps"]
         row["download_mbps"] = package["downloadMbps"]
-        plan = apply_plan(cursor, row, row["status"] == "active")
+        plan = apply_plan(cursor, row, subscription_can_surf(row, date.today()))
         log_event(cursor, client_id, subscriber_id, client_id, "upgrade", package["name"])
         finish(cursor)
     except Exception as error:
@@ -2139,7 +2203,7 @@ def migrate(cursor, client_id, subscriber_id, payload):
         row["static_ip"] = None
         row["upload_mbps"] = package["uploadMbps"]
         row["download_mbps"] = package["downloadMbps"]
-        apply_plan(cursor, row, row["status"] == "active")
+        apply_plan(cursor, row, subscription_can_surf(row, date.today()))
         log_event(cursor, client_id, subscriber_id, client_id, "migrate", router["name"])
         finish(cursor)
     except Exception as error:

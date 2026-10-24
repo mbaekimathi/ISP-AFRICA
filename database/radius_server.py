@@ -534,10 +534,7 @@ def authenticate(cursor, packet, source_ip):
     if not username:
         return build_response(ACCESS_REJECT, packet["id"], packet["auth"], secret, b"", True)
     roots = _username_roots(username)
-    candidates = list(roots)
-    candidates += sorted(
-        alias for root in roots for alias in pppoe_service.phone_variants(root) if alias not in candidates
-    )
+    candidates = pppoe_service.username_aliases(username)
     marks = ", ".join(["%s"] * len(candidates))
     cursor.execute(f"SELECT username, attribute, value FROM radcheck WHERE username IN ({marks})", candidates)
     by_user = {}
@@ -689,8 +686,8 @@ def accounting(cursor, packet, source_ip):
         # A live accounting session means the subscriber is surfing — spend
         # any single-use voucher their last payment issued.
         try:
-            pppoe_store.mark_vouchers_used(cursor, _username_roots(username))
-            pppoe_store.mark_hotspot_vouchers_used(cursor, _username_roots(username))
+            pppoe_store.mark_vouchers_used(cursor, pppoe_service.username_aliases(username))
+            pppoe_store.mark_hotspot_vouchers_used(cursor, pppoe_service.username_aliases(username))
         except Exception:
             pass
     return build_response(ACCOUNTING_RESPONSE, packet["id"], packet["auth"], secret, b"", True)

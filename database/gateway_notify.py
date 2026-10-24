@@ -70,12 +70,27 @@ def notice(audience, kind, subject, detail="", client_id=None):
     }
 
 
+_on_send = None
+
+
+def on_send(callback):
+    """Register a callback fired after each delivered notice — api.py hooks
+    this to wake the push dispatcher without a module import cycle."""
+    global _on_send
+    _on_send = callback
+
+
 def send(cursor, item, channels=None):
     """Deliver a notice through the given channels (in-app by default)."""
     delivered = []
     for channel in channels or [InAppNotificationChannel()]:
         channel.send(cursor, item)
         delivered.append(channel.name)
+    if _on_send:
+        try:
+            _on_send()
+        except Exception:
+            pass
     return delivered
 
 

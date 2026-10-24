@@ -84,7 +84,10 @@ class MiniCursor:
         elif flat.startswith("UPDATE company_daraja_settings"):
             rows = d.table("company_daraja_settings")
             if rows:
-                rows[0]["last_known_balance"] = args[0]
+                if "public_base" in flat:
+                    rows[0]["public_base"] = args[0]
+                else:
+                    rows[0]["last_known_balance"] = args[0]
             self.rowcount = 1
         elif "WHERE gateway_mode = 'company_gateway'" in flat:
             self._result = [
@@ -803,6 +806,44 @@ class CheckStatusTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertTrue(error)
         self.secret.start()
+
+
+class PublicBaseTests(unittest.TestCase):
+    def setUp(self):
+        os.environ.pop("ISP_GATEWAY_PUBLIC_URL", None)
+
+    def tearDown(self):
+        os.environ.pop("ISP_GATEWAY_PUBLIC_URL", None)
+
+    def test_env_wins_over_stored(self):
+        db = seed_db()
+        db.table("company_daraja_settings")[0]["public_base"] = "https://learned.example.com"
+        with patch.dict(os.environ, {"ISP_GATEWAY_PUBLIC_URL": "https://env.example.com/"}):
+            self.assertEqual(
+                gateway_store.public_base(db.cursor()), "https://env.example.com")
+
+    def test_stored_base_used_when_env_missing(self):
+        db = seed_db()
+        db.table("company_daraja_settings")[0]["public_base"] = "https://learned.example.com/"
+        self.assertEqual(
+            gateway_store.public_base(db.cursor()), "https://learned.example.com")
+
+    def test_remember_stores_and_overwrites(self):
+        db = seed_db()
+        row = db.table("company_daraja_settings")[0]
+        gateway_store.remember_public_base(db.cursor(), "https://one.example.com/")
+        self.assertEqual(row["public_base"], "https://one.example.com")
+        gateway_store.remember_public_base(db.cursor(), "https://two.example.com")
+        self.assertEqual(row["public_base"], "https://two.example.com")
+
+    def test_remember_ignores_blank_and_env_override(self):
+        db = seed_db()
+        row = db.table("company_daraja_settings")[0]
+        gateway_store.remember_public_base(db.cursor(), "")
+        self.assertNotIn("public_base", row)
+        with patch.dict(os.environ, {"ISP_GATEWAY_PUBLIC_URL": "https://env.example.com"}):
+            gateway_store.remember_public_base(db.cursor(), "https://learned.example.com")
+        self.assertNotIn("public_base", row)
 
 
 class ManualFailTests(unittest.TestCase):

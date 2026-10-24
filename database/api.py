@@ -34,6 +34,7 @@ import portal_server
 import radius_server
 import router_jobs
 import routeros_api
+import webpush
 
 import pymysql
 from pymysql.cursors import DictCursor
@@ -64,6 +65,11 @@ LOCKS = {}
 RATE_HITS = {}
 RATE_LOCK = threading.Lock()
 TRUSTED_PROXIES = {"127.0.0.1", "::1"}
+# Public DNS names only — at least one dot, valid labels, no port. Learned
+# callback bases never come from IPs, localhost, or intranet names.
+PUBLIC_HOSTNAME = re.compile(
+    r"[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?(\.[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?)+"
+)
 RATE_RULES = {
     "auth": (30, 60),
     "api": (240, 60),
@@ -537,7 +543,7 @@ def gateway_precheck(cursor):
         checks.append({"key": "daraja", "ok": False, "detail": "Skipped — no credentials to test."})
 
     callbacks_ready = bool(
-        (os.environ.get("ISP_GATEWAY_PUBLIC_URL") or "").strip()
+        gateway_store.public_base(cursor)
         and gateway_store.callback_secret(cursor)
     )
     checks.append({
@@ -583,35 +589,102 @@ def clean_communication_sender(channel, value):
     return text
 
 
+def clean_smtp_host(value):
+    text = str(value or "").strip().lower()
+    if (
+        not text
+        or len(text) > 253
+        or "." not in text
+        or any(ord(character) < 32 or character.isspace() for character in text)
+        or not all(character.isalnum() or character in ".-_" for character in text)
+    ):
+        raise ApiError(400, "Enter the SMTP host, e.g. mail.example.com.")
+    return text
+
+
+def clean_smtp_port(value, fallback):
+    text = str(value or "").strip()
+    if not text:
+        return fallback or 587
+    if not text.isdigit() or not 1 <= int(text) <= 65535:
+        raise ApiError(400, "Enter the SMTP port — 587 for TLS or 465 for SSL.")
+    return int(text)
+
+
+def clean_optional_digits(value, message):
+    text = str(value or "").strip()
+    if text and (not text.isdigit() or not 6 <= len(text) <= 32):
+        raise ApiError(400, message)
+    return text
+
+
+def communication_details(raw):
+    try:
+        parsed = json.loads(raw or "")
+    except (TypeError, ValueError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
 def clean_communication(payload, existing):
     channel = str(payload.get("channel", "")).strip()
     if channel not in {"sms", "whatsapp", "email"}:
         raise ApiError(400, "Choose the SMS, WhatsApp, or email API.")
     previous = existing or {}
+    previous_details = communication_details(previous.get("details"))
     secret_label = {
         "sms": "Enter the SMS API key.",
         "whatsapp": "Enter the WhatsApp access token.",
-        "email": "Enter the email API key.",
+        "email": "Enter the SMTP password.",
     }[channel]
-    return {
+    fields = {
         "channel": channel,
-        "endpoint": clean_endpoint(payload.get("endpoint")),
-        "sender": clean_communication_sender(channel, payload.get("sender")),
         "api_key": keep_or_clean(payload.get("apiKey"), previous.get("api_key"), secret_label, 8, 255),
     }
+    details = {"enabled": bool(payload.get("enabled", previous_details.get("enabled", True)))}
+    if channel == "email":
+        fields["endpoint"] = clean_smtp_host(payload.get("endpoint"))
+        details["port"] = clean_smtp_port(payload.get("port"), previous_details.get("port"))
+        details["username"] = optional_text(payload.get("username"), "Enter the SMTP username.", 160)
+        details["fromName"] = optional_text(payload.get("fromName"), "Enter the from name.", 80)
+        details["useTls"] = bool(payload.get("useTls", previous_details.get("useTls", True)))
+        fields["sender"] = clean_communication_sender(channel, payload.get("sender") or details["username"])
+    elif channel == "whatsapp":
+        fields["endpoint"] = clean_endpoint(payload.get("endpoint"))
+        fields["sender"] = clean_communication_sender(channel, payload.get("sender"))
+        details["apiVersion"] = optional_text(payload.get("apiVersion"), "Enter the WhatsApp API version.", 20)
+        details["businessAccountId"] = clean_optional_digits(
+            payload.get("businessAccountId"), "Enter the WhatsApp business account ID."
+        )
+    else:
+        fields["endpoint"] = clean_endpoint(payload.get("endpoint"))
+        fields["sender"] = clean_communication_sender(channel, payload.get("sender"))
+        details["username"] = optional_text(
+            payload.get("username"), "Enter the SMS API username or account ID.", 120
+        )
+    fields["details"] = json.dumps(details)
+    return fields
 
 
 def public_communication(row):
     if not row:
         return None
+    details = communication_details(row.get("details"))
     return {
+        "enabled": bool(details.get("enabled", True)),
         "endpoint": row["endpoint"],
         "sender": row["sender"],
         "apiKey": masked_secret(row["api_key"]),
+        "username": details.get("username") or "",
+        "port": details.get("port") or "",
+        "fromName": details.get("fromName") or "",
+        "useTls": bool(details.get("useTls", True)),
+        "apiVersion": details.get("apiVersion") or "",
+        "businessAccountId": details.get("businessAccountId") or "",
     }
 
 
-def probe_endpoint(endpoint):
+def probe_endpoint(endpoint, headers=None, reject_codes=()):
     import ipaddress
     import urllib.error
     import urllib.request
@@ -626,15 +699,126 @@ def probe_endpoint(endpoint):
         return {"connected": False, "reason": "The API endpoint host could not be resolved."}
     if address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified:
         return {"connected": False, "reason": "The API endpoint must be a public or LAN host."}
-    request = urllib.request.Request(text, headers={"User-Agent": "isp-centric-connectivity-check/1.0"})
+    request = urllib.request.Request(
+        text,
+        headers={"User-Agent": "isp-centric-connectivity-check/1.0", **(headers or {})},
+    )
     try:
         with urllib.request.urlopen(request, timeout=8) as response:
             code = response.status
     except urllib.error.HTTPError as error:
+        if error.code in reject_codes:
+            return {
+                "connected": False,
+                "reason": f"The API rejected the saved credentials or sender ID (HTTP {error.code}).",
+            }
         return {"connected": True, "reason": f"The API endpoint answered with HTTP {error.code}."}
     except (urllib.error.URLError, OSError, ValueError) as error:
         return {"connected": False, "reason": f"The API endpoint could not be reached: {getattr(error, 'reason', error)}."}
     return {"connected": True, "reason": f"The API endpoint answered with HTTP {code}."}
+
+
+def probe_smtp(host, port, username, password, use_tls):
+    import ipaddress
+    import smtplib
+
+    host = str(host or "").strip()
+    if not host:
+        return {"connected": False, "reason": "Save the SMTP host first."}
+    try:
+        address = ipaddress.ip_address(socket.gethostbyname(host))
+    except (OSError, ValueError):
+        return {"connected": False, "reason": "The SMTP host could not be resolved."}
+    if address.is_loopback or address.is_link_local or address.is_multicast or address.is_unspecified:
+        return {"connected": False, "reason": "The SMTP host must be a public or LAN host."}
+    port = int(port or 465)
+    try:
+        if port == 465:
+            server = smtplib.SMTP_SSL(host, port, timeout=8)
+        else:
+            server = smtplib.SMTP(host, port, timeout=8)
+    except (OSError, smtplib.SMTPException) as error:
+        return {"connected": False, "reason": f"The SMTP server could not be reached: {error}."}
+    try:
+        server.ehlo()
+        if use_tls and port != 465:
+            try:
+                server.starttls()
+                server.ehlo()
+            except (OSError, smtplib.SMTPException) as error:
+                return {"connected": False, "reason": f"The SMTP server refused STARTTLS: {error}."}
+        if not username and not password:
+            return {"connected": True, "reason": "The SMTP server answered."}
+        try:
+            server.login(username or "", password or "")
+        except smtplib.SMTPAuthenticationError:
+            return {"connected": False, "reason": "The SMTP server rejected the username or password."}
+        except smtplib.SMTPException as error:
+            return {"connected": False, "reason": f"SMTP login failed: {error}."}
+        return {"connected": True, "reason": "SMTP login succeeded."}
+    finally:
+        try:
+            server.quit()
+        except (OSError, smtplib.SMTPException):
+            pass
+
+
+def probe_communication(channel, row):
+    row = row or {}
+    details = communication_details(row.get("details"))
+    if channel == "email":
+        return probe_smtp(
+            row.get("endpoint"),
+            details.get("port"),
+            details.get("username") or row.get("sender") or "",
+            open_secret(row.get("api_key") or ""),
+            bool(details.get("useTls", True)),
+        )
+    if channel == "whatsapp":
+        endpoint = str(row.get("endpoint") or "").strip()
+        token = open_secret(row.get("api_key") or "")
+        version = str(details.get("apiVersion") or "").strip()
+        sender = str(row.get("sender") or "").strip()
+        if version and sender and endpoint:
+            target = f"{endpoint.rstrip('/')}/{version}/{sender}"
+            return probe_endpoint(
+                target,
+                headers={"Authorization": f"Bearer {token}"} if token else None,
+                reject_codes=(400, 401, 403),
+            )
+        return probe_endpoint(endpoint)
+    return probe_endpoint(row.get("endpoint"))
+
+
+def vapid_keys(cursor):
+    """The company's Web Push identity — generated once, then reused so
+    subscriptions keep working across restarts."""
+    cursor.execute("SELECT vapid_public, vapid_private FROM company_push_settings WHERE id = 1")
+    row = cursor.fetchone() or {}
+    private = open_secret(row.get("vapid_private") or "")
+    if row.get("vapid_public") and private:
+        return row["vapid_public"], private
+    public, private = webpush.generate_vapid_keys()
+    cursor.execute(
+        """
+        INSERT INTO company_push_settings (id, vapid_public, vapid_private)
+        VALUES (1, %s, %s)
+        ON DUPLICATE KEY UPDATE
+          vapid_public = VALUES(vapid_public),
+          vapid_private = VALUES(vapid_private)
+        """,
+        (public, seal_secret(private)),
+    )
+    return public, private
+
+
+def push_contact(cursor):
+    contact = (os.environ.get("ISP_PUSH_CONTACT") or "").strip()
+    if contact:
+        return contact
+    cursor.execute("SELECT email FROM company_profile_settings WHERE id = 1")
+    email = str((cursor.fetchone() or {}).get("email") or "").strip()
+    return f"mailto:{email}" if "@" in email else "mailto:alerts@localhost"
 
 
 NOTIFICATION_TOGGLES = {
@@ -1436,6 +1620,7 @@ def ensure_schema():
                   endpoint VARCHAR(255) NOT NULL,
                   sender VARCHAR(120) NOT NULL,
                   api_key VARCHAR(255) NOT NULL,
+                  details TEXT NULL,
                   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                 )
                 """
@@ -1465,6 +1650,47 @@ def ensure_schema():
                   communications_failed TINYINT NOT NULL DEFAULT 1,
                   payments_failed TINYINT NOT NULL DEFAULT 1,
                   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS company_push_settings (
+                  id TINYINT NOT NULL PRIMARY KEY,
+                  vapid_public VARCHAR(255) NOT NULL,
+                  vapid_private VARCHAR(512) NOT NULL,
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS employee_push_subscriptions (
+                  endpoint VARCHAR(500) NOT NULL PRIMARY KEY,
+                  employee_id CHAR(36) NOT NULL,
+                  p256dh VARCHAR(255) NOT NULL,
+                  auth VARCHAR(64) NOT NULL,
+                  user_agent VARCHAR(255) NOT NULL DEFAULT '',
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS company_push_dispatches (
+                  item_id VARCHAR(96) NOT NULL PRIMARY KEY,
+                  sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS employee_notification_reads (
+                  employee_id CHAR(36) NOT NULL,
+                  item_id VARCHAR(96) NOT NULL,
+                  read_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  PRIMARY KEY (employee_id, item_id)
                 )
                 """
             )
@@ -1573,6 +1799,7 @@ def ensure_schema():
                   endpoint VARCHAR(255) NOT NULL,
                   sender VARCHAR(120) NOT NULL,
                   api_key VARCHAR(255) NOT NULL,
+                  details TEXT NULL,
                   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
                   PRIMARY KEY (client_id, channel)
                 )
@@ -1590,6 +1817,10 @@ def ensure_schema():
                 "ALTER TABLE isp_communication_settings MODIFY COLUMN api_key VARCHAR(512) NOT NULL",
             ):
                 cursor.execute(statement)
+            for table in ("company_communication_settings", "isp_communication_settings"):
+                cursor.execute(f"SHOW COLUMNS FROM {table} LIKE 'details'")
+                if cursor.fetchone() is None:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN details TEXT NULL")
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS isp_communication_preferences (
@@ -2142,6 +2373,102 @@ class PreviewPage:
         self.html = html
 
 
+def gateway_feed_items(cursor, audience, client_id=None):
+    """Gateway notices merged into the existing feeds — same item shape."""
+    items = []
+    for row in gateway_notify.feed_items(cursor, audience, client_id=client_id, limit=50):
+        items.append(
+            {
+                "id": f"gateway-{row['id']}",
+                "kind": "gateway",
+                "subject": row["subject"],
+                "detail": row["detail"],
+                "at": stamp(row["created_at"]),
+                "open": False,
+            }
+        )
+    return items
+
+
+def company_notification_items(cursor):
+    """The company feed as data — shared by the notifications page and the
+    push dispatcher, which diffs it to find genuinely new events."""
+    cursor.execute("SELECT * FROM company_notification_settings WHERE id = 1")
+    prefs = public_notification_settings(cursor.fetchone(), NOTIFICATION_TOGGLES)
+    items = []
+    if prefs["ispRegistered"]:
+        cursor.execute(
+            """
+            SELECT id, first_name, last_name, status, created_at
+            FROM isp_clients
+            ORDER BY created_at DESC
+            LIMIT 20
+            """
+        )
+        for row in cursor.fetchall():
+            name = f"{row['first_name']} {row['last_name']}".strip()
+            items.append(
+                {
+                    "id": f"client-{row['id']}",
+                    "kind": "ispRegistered",
+                    "subject": "New ISP registered",
+                    "detail": f"{name} signed up — status {row['status']}.",
+                    "at": stamp(row["created_at"]),
+                    "open": row["status"] == "pending",
+                }
+            )
+    if prefs["mikrotikAdded"]:
+        cursor.execute(
+            """
+            SELECT d.id, d.name, d.created_at, c.first_name, c.last_name
+            FROM isp_mikrotik_devices d
+            JOIN isp_clients c ON c.id = d.client_id
+            ORDER BY d.created_at DESC
+            LIMIT 20
+            """
+        )
+        for row in cursor.fetchall():
+            owner = f"{row['first_name']} {row['last_name']}".strip()
+            items.append(
+                {
+                    "id": f"device-{row['id']}",
+                    "kind": "mikrotikAdded",
+                    "subject": "New MikroTik added",
+                    "detail": f"{row['name']} was added by {owner}.",
+                    "at": stamp(row["created_at"]),
+                    "open": False,
+                }
+            )
+    if prefs["mikrotikUnreachable"]:
+        cursor.execute(
+            """
+            SELECT e.id, e.subject, e.reason, e.started_at, e.ended_at,
+                   d.name AS device_name, c.first_name, c.last_name
+            FROM isp_mikrotik_health_events e
+            JOIN isp_mikrotik_devices d ON d.id = e.device_id
+            JOIN isp_clients c ON c.id = e.client_id
+            ORDER BY e.started_at DESC
+            LIMIT 30
+            """
+        )
+        for row in cursor.fetchall():
+            ended = row["ended_at"] is not None
+            owner = f"{row['first_name']} {row['last_name']}".strip()
+            items.append(
+                {
+                    "id": f"health-{row['id']}",
+                    "kind": "mikrotikUnreachable",
+                    "subject": row["subject"],
+                    "detail": f"{row['device_name']} ({owner}): {row['reason']}" + ("" if ended else " — still down."),
+                    "at": stamp(row["started_at"]),
+                    "open": not ended,
+                }
+            )
+    items += gateway_feed_items(cursor, "company")
+    items.sort(key=lambda item: item["at"] or "", reverse=True)
+    return items
+
+
 class ApiServer(ThreadingHTTPServer):
     """Refuses to share its port: without SO_EXCLUSIVEADDRUSE a second
     api.py instance can bind the same TCP port on Windows and silently
@@ -2333,6 +2660,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.save_company_notifications(cursor, payload, token.get("isp_employee_session")), None
         if method == "GET" and path == "/api/employee/company/notifications/feed":
             return self.company_notification_feed(cursor, token.get("isp_employee_session")), None
+        if method == "GET" and path == "/api/employee/company/notifications/push":
+            return self.read_company_push(cursor, token.get("isp_employee_session")), None
+        if method == "POST" and path == "/api/employee/company/notifications/push/subscribe":
+            return self.save_company_push_subscription(cursor, payload, token.get("isp_employee_session")), None
+        if method == "POST" and path == "/api/employee/company/notifications/push/unsubscribe":
+            return self.delete_company_push_subscription(cursor, payload, token.get("isp_employee_session")), None
+        if method == "POST" and path == "/api/employee/company/notifications/push/test":
+            return self.test_company_push(cursor, payload, token.get("isp_employee_session")), None
+        if method == "POST" and path == "/api/employee/company/notifications/read":
+            return self.mark_company_notifications_read(cursor, payload, token.get("isp_employee_session")), None
         if method == "POST" and path == "/api/director/clients/enter":
             require_reviewer(cursor, token.get("isp_employee_session"))
             employee_id = session_account_id(cursor, token.get("isp_employee_session"), "employee")
@@ -2538,6 +2875,7 @@ class Handler(BaseHTTPRequestHandler):
                     fields["photo"],
                 ),
             )
+            notify_push_now()
             cursor.execute("SELECT * FROM isp_clients WHERE id = %s", (account_id,))
             return public_client(cursor.fetchone())
         cursor.execute(
@@ -2753,7 +3091,7 @@ class Handler(BaseHTTPRequestHandler):
                    (SELECT e.action FROM pppoe_events e
                     WHERE e.subscriber_id = s.id ORDER BY e.created_at DESC LIMIT 1) AS last_action
             FROM pppoe_subscribers s
-            JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
+            LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
             LEFT JOIN isp_mikrotik_devices d ON d.id = s.router_id
             WHERE s.client_id = %s
             """,
@@ -3247,6 +3585,7 @@ class Handler(BaseHTTPRequestHandler):
             (routeros_api.seal_password(private_key), device_id),
         )
         publish_tunnel_peers(cursor)
+        notify_push_now()
         device = self.mikrotik_row(cursor, device_id, client_id)
         device["privateKey"] = private_key
         return device
@@ -4116,6 +4455,7 @@ class Handler(BaseHTTPRequestHandler):
                     """,
                     (str(uuid.uuid4()), client_id, device_id, subject, str(reason)[:160]),
                 )
+                notify_push_now()
             elif reason is None and open_event:
                 cursor.execute(
                     "UPDATE isp_mikrotik_health_events SET ended_at = CURRENT_TIMESTAMP WHERE id = %s",
@@ -4193,7 +4533,7 @@ class Handler(BaseHTTPRequestHandler):
     def communication_rows(self, cursor, client_id):
         cursor.execute(
             """
-            SELECT channel, endpoint, sender, api_key
+            SELECT channel, endpoint, sender, api_key, details
             FROM isp_communication_settings
             WHERE client_id = %s
             """,
@@ -4235,14 +4575,15 @@ class Handler(BaseHTTPRequestHandler):
             fields = clean_communication(payload, rows.get(channel))
             cursor.execute(
                 """
-                INSERT INTO isp_communication_settings (client_id, channel, endpoint, sender, api_key)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO isp_communication_settings (client_id, channel, endpoint, sender, api_key, details)
+                VALUES (%s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                   endpoint = VALUES(endpoint),
                   sender = VALUES(sender),
-                  api_key = VALUES(api_key)
+                  api_key = VALUES(api_key),
+                  details = VALUES(details)
                 """,
-                (client_id, fields["channel"], fields["endpoint"], fields["sender"], seal_secret(open_secret(fields["api_key"]))),
+                (client_id, fields["channel"], fields["endpoint"], fields["sender"], seal_secret(open_secret(fields["api_key"])), fields["details"]),
             )
         cursor.execute(
             """
@@ -4268,7 +4609,7 @@ class Handler(BaseHTTPRequestHandler):
             row = self.communication_rows(cursor, client_id).get(channel)
         # Probe the saved endpoint only — an arbitrary URL here would make the
         # server an unauthenticated network-reachability oracle.
-        return probe_endpoint((row or {}).get("endpoint", ""))
+        return probe_communication(channel, row)
 
     def require_notification_client(self, cursor, token):
         client_id = session_account_id(cursor, token, "client")
@@ -4378,25 +4719,9 @@ class Handler(BaseHTTPRequestHandler):
                         "open": not ended,
                     }
                 )
-        items += self._gateway_feed_items(cursor, "client", client_id=client_id)
+        items += gateway_feed_items(cursor, "client", client_id=client_id)
         items.sort(key=lambda item: item["at"] or "", reverse=True)
         return {"notifications": items[:50]}
-
-    def _gateway_feed_items(self, cursor, audience, client_id=None):
-        """Gateway notices merged into the existing feeds — same item shape."""
-        items = []
-        for row in gateway_notify.feed_items(cursor, audience, client_id=client_id, limit=50):
-            items.append(
-                {
-                    "id": f"gateway-{row['id']}",
-                    "kind": "gateway",
-                    "subject": row["subject"],
-                    "detail": row["detail"],
-                    "at": stamp(row["created_at"]),
-                    "open": False,
-                }
-            )
-        return items
 
     def require_company_client(self, cursor, token):
         client_id = session_account_id(cursor, token, "client")
@@ -4842,15 +5167,24 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_company_payments(self, cursor, token):
         require_director(cursor, token, "company payments")
+        # Learning the public base is deliberately director-only: a
+        # lower-privileged session must never steer callback URLs — and the
+        # callback secret they carry — toward a forged Host.
+        gateway_store.remember_public_base(cursor, self.learned_public_base())
         daraja = public_payment(self.company_daraja_row(cursor))
         if daraja is not None:
             # The callback secret is shown only here — the only endpoint a
             # director can reach — never on any other settings read.
             secret = gateway_store.ensure_callback_secret(cursor)
-            base = (os.environ.get("ISP_GATEWAY_PUBLIC_URL") or "").strip().rstrip("/")
+            base = gateway_store.public_base(cursor)
             prefix = f"{base}/api/daraja/{secret}" if base else ""
             daraja["callbackSecret"] = secret
             daraja["callbackBase"] = base
+            daraja["callbackBaseSource"] = (
+                "environment"
+                if (os.environ.get("ISP_GATEWAY_PUBLIC_URL") or "").strip()
+                else "learned" if base else ""
+            )
             daraja["callbackUrls"] = {
                 name: f"{prefix}/{path}" if prefix else ""
                 for name, path in (
@@ -5104,7 +5438,7 @@ class Handler(BaseHTTPRequestHandler):
         raise ApiError(404, "Not found.")
 
     def company_communication_rows(self, cursor):
-        cursor.execute("SELECT channel, endpoint, sender, api_key FROM company_communication_settings")
+        cursor.execute("SELECT channel, endpoint, sender, api_key, details FROM company_communication_settings")
         return {row["channel"]: row for row in cursor.fetchall()}
 
     def read_company_communications(self, cursor, token):
@@ -5123,14 +5457,15 @@ class Handler(BaseHTTPRequestHandler):
         fields = clean_communication(payload, rows.get(channel) if channel in rows else None)
         cursor.execute(
             """
-            INSERT INTO company_communication_settings (channel, endpoint, sender, api_key)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO company_communication_settings (channel, endpoint, sender, api_key, details)
+            VALUES (%s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
               endpoint = VALUES(endpoint),
               sender = VALUES(sender),
-              api_key = VALUES(api_key)
+              api_key = VALUES(api_key),
+              details = VALUES(details)
             """,
-            (fields["channel"], fields["endpoint"], fields["sender"], seal_secret(open_secret(fields["api_key"]))),
+            (fields["channel"], fields["endpoint"], fields["sender"], seal_secret(open_secret(fields["api_key"])), fields["details"]),
         )
         return self.read_company_communications(cursor, token)
 
@@ -5140,7 +5475,7 @@ class Handler(BaseHTTPRequestHandler):
         if channel not in {"sms", "whatsapp", "email"}:
             raise ApiError(400, "Choose the SMS, WhatsApp, or email API.")
         row = self.company_communication_rows(cursor).get(channel)
-        return probe_endpoint((row or {}).get("endpoint", ""))
+        return probe_communication(channel, row)
 
     def company_profile_row(self, cursor):
         cursor.execute(
@@ -5221,80 +5556,108 @@ class Handler(BaseHTTPRequestHandler):
         return self.read_company_notifications(cursor, token)
 
     def company_notification_feed(self, cursor, token):
+        employee_id = self.require_company_employee(cursor, token, "company notifications")
+        items = company_notification_items(cursor)
+        cursor.execute(
+            "SELECT item_id FROM employee_notification_reads WHERE employee_id = %s",
+            (employee_id,),
+        )
+        read = {row["item_id"] for row in cursor.fetchall()}
+        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat(sep=" ")
+        visible = []
+        for item in items:
+            item["read"] = item["id"] in read
+            # Today's items always show; older ones only stay while unread.
+            if not item["read"] or (item["at"] or "") >= today:
+                visible.append(item)
+        return {"notifications": visible[:80]}
+
+    def mark_company_notifications_read(self, cursor, payload, token):
+        employee_id = self.require_company_employee(cursor, token, "company notifications")
+        if payload.get("all"):
+            ids = [item["id"] for item in company_notification_items(cursor)]
+        else:
+            ids = [str(item or "")[:96] for item in (payload.get("itemIds") or []) if str(item or "")]
+        for item_id in ids[:200]:
+            cursor.execute(
+                "INSERT IGNORE INTO employee_notification_reads (employee_id, item_id) VALUES (%s, %s)",
+                (employee_id, item_id),
+            )
+        return self.company_notification_feed(cursor, token)
+
+    def read_company_push(self, cursor, token):
+        employee_id = self.require_company_employee(cursor, token, "company notifications")
+        public, _ = vapid_keys(cursor)
+        cursor.execute(
+            "SELECT COUNT(*) AS devices FROM employee_push_subscriptions WHERE employee_id = %s",
+            (employee_id,),
+        )
+        return {
+            "push": {
+                "vapidPublicKey": public,
+                "devices": int((cursor.fetchone() or {}).get("devices") or 0),
+            }
+        }
+
+    def save_company_push_subscription(self, cursor, payload, token):
+        employee_id = self.require_company_employee(cursor, token, "company notifications")
+        endpoint = str(payload.get("endpoint", "")).strip()
+        keys = payload.get("keys") or {}
+        p256dh = str(keys.get("p256dh", "")).strip()
+        auth = str(keys.get("auth", "")).strip()
+        if not endpoint.startswith("https://") or len(endpoint) > 500:
+            raise ApiError(400, "The push subscription endpoint is not valid.")
+        if not p256dh or len(p256dh) > 255 or not auth or len(auth) > 64:
+            raise ApiError(400, "The push subscription keys are not valid.")
+        cursor.execute(
+            """
+            INSERT INTO employee_push_subscriptions (endpoint, employee_id, p256dh, auth, user_agent)
+            VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+              employee_id = VALUES(employee_id),
+              p256dh = VALUES(p256dh),
+              auth = VALUES(auth),
+              user_agent = VALUES(user_agent)
+            """,
+            (endpoint, employee_id, p256dh, auth, str(payload.get("userAgent", ""))[:250]),
+        )
+        return self.read_company_push(cursor, token)
+
+    def delete_company_push_subscription(self, cursor, payload, token):
         self.require_company_employee(cursor, token, "company notifications")
-        prefs = public_notification_settings(self.company_notification_row(cursor), NOTIFICATION_TOGGLES)
-        items = []
-        if prefs["ispRegistered"]:
-            cursor.execute(
-                """
-                SELECT id, first_name, last_name, status, created_at
-                FROM isp_clients
-                ORDER BY created_at DESC
-                LIMIT 20
-                """
-            )
-            for row in cursor.fetchall():
-                name = f"{row['first_name']} {row['last_name']}".strip()
-                items.append(
-                    {
-                        "id": f"client-{row['id']}",
-                        "kind": "ispRegistered",
-                        "subject": "New ISP registered",
-                        "detail": f"{name} signed up — status {row['status']}.",
-                        "at": stamp(row["created_at"]),
-                        "open": row["status"] == "pending",
-                    }
-                )
-        if prefs["mikrotikAdded"]:
-            cursor.execute(
-                """
-                SELECT d.id, d.name, d.created_at, c.first_name, c.last_name
-                FROM isp_mikrotik_devices d
-                JOIN isp_clients c ON c.id = d.client_id
-                ORDER BY d.created_at DESC
-                LIMIT 20
-                """
-            )
-            for row in cursor.fetchall():
-                owner = f"{row['first_name']} {row['last_name']}".strip()
-                items.append(
-                    {
-                        "id": f"device-{row['id']}",
-                        "kind": "mikrotikAdded",
-                        "subject": "New MikroTik added",
-                        "detail": f"{row['name']} was added by {owner}.",
-                        "at": stamp(row["created_at"]),
-                        "open": False,
-                    }
-                )
-        if prefs["mikrotikUnreachable"]:
-            cursor.execute(
-                """
-                SELECT e.id, e.subject, e.reason, e.started_at, e.ended_at,
-                       d.name AS device_name, c.first_name, c.last_name
-                FROM isp_mikrotik_health_events e
-                JOIN isp_mikrotik_devices d ON d.id = e.device_id
-                JOIN isp_clients c ON c.id = e.client_id
-                ORDER BY e.started_at DESC
-                LIMIT 30
-                """
-            )
-            for row in cursor.fetchall():
-                ended = row["ended_at"] is not None
-                owner = f"{row['first_name']} {row['last_name']}".strip()
-                items.append(
-                    {
-                        "id": f"health-{row['id']}",
-                        "kind": "mikrotikUnreachable",
-                        "subject": row["subject"],
-                        "detail": f"{row['device_name']} ({owner}): {row['reason']}" + ("" if ended else " — still down."),
-                        "at": stamp(row["started_at"]),
-                        "open": not ended,
-                    }
-                )
-        items += self._gateway_feed_items(cursor, "company")
-        items.sort(key=lambda item: item["at"] or "", reverse=True)
-        return {"notifications": items[:50]}
+        endpoint = str(payload.get("endpoint", "")).strip()
+        if endpoint:
+            cursor.execute("DELETE FROM employee_push_subscriptions WHERE endpoint = %s", (endpoint,))
+        return self.read_company_push(cursor, token)
+
+    def test_company_push(self, cursor, payload, token):
+        self.require_company_employee(cursor, token, "company notifications")
+        endpoint = str(payload.get("endpoint", "")).strip()
+        cursor.execute(
+            "SELECT p256dh, auth FROM employee_push_subscriptions WHERE endpoint = %s",
+            (endpoint,),
+        )
+        sub = cursor.fetchone()
+        if not sub:
+            raise ApiError(404, "This gadget is not subscribed for sound alerts yet.")
+        public, private = vapid_keys(cursor)
+        message = json.dumps(
+            {
+                "title": "Test alert",
+                "body": "Sound alerts are working on this device.",
+                "tag": "test-alert",
+                "url": "/employee/company-settings/notifications",
+            }
+        )
+        code, detail = webpush.send_push(
+            endpoint, sub["p256dh"], sub["auth"], message, public, private, push_contact(cursor)
+        )
+        if code in (404, 410):
+            cursor.execute("DELETE FROM employee_push_subscriptions WHERE endpoint = %s", (endpoint,))
+            raise ApiError(410, "This gadget's subscription expired — turn alerts off and on again.")
+        if code is None or code >= 400:
+            raise ApiError(502, f"The push service could not be reached ({detail or 'network error'}).")
+        return {"test": {"connected": True, "reason": "The push service accepted the test alert."}}
 
     def public_package_clients(self, cursor):
         cursor.execute(
@@ -5731,6 +6094,24 @@ class Handler(BaseHTTPRequestHandler):
             return False
         return (self.headers.get("X-Forwarded-Proto") or "").strip().lower() == "https"
 
+    def learned_public_base(self):
+        """The https origin this request arrived on through the trusted
+        proxy — the public domain the dashboard was reached through, or ''.
+        Only the Host header is trusted (nginx sets it from the connection);
+        X-Forwarded-Host would pass client-supplied values straight through."""
+        if not self.secure_transport():
+            return ""
+        host = (self.headers.get("Host") or "").strip().lower().rstrip(".")
+        if (
+            not host
+            or len(host) > 253
+            or ":" in host
+            or all(part.isdigit() for part in host.split("."))
+            or not PUBLIC_HOSTNAME.fullmatch(host)
+        ):
+            return ""
+        return f"https://{host}"
+
     def send_json(self, status, body, cookie=None):
         encoded = json.dumps(body).encode("utf-8")
         self.send_response(status)
@@ -5900,6 +6281,86 @@ def gateway_settlement_loop():
             print(f"event=gateway-settle error={error}", flush=True)
 
 
+_BOOT_STAMP = datetime.now().isoformat(sep=" ", timespec="seconds")
+
+
+def dispatch_company_pushes():
+    """Diff the company feed against sent items and push fresh ones to every
+    subscribed gadget. The first run seeds older rows silently — only events
+    newer than this process are pushed, so a restart never spams old news."""
+    with connect() as db:
+        with db.cursor() as cursor:
+            items = company_notification_items(cursor)
+            if not items:
+                return
+            cursor.execute("SELECT COUNT(*) AS seen FROM company_push_dispatches")
+            seeded = bool((cursor.fetchone() or {}).get("seen"))
+            fresh = []
+            for item in reversed(items):
+                cursor.execute(
+                    "INSERT IGNORE INTO company_push_dispatches (item_id) VALUES (%s)",
+                    (item["id"],),
+                )
+                if cursor.rowcount == 1 and (seeded or (item["at"] or "") >= _BOOT_STAMP):
+                    fresh.append(item)
+            if not fresh:
+                return
+            cursor.execute("SELECT endpoint, p256dh, auth FROM employee_push_subscriptions")
+            subscriptions = list(cursor.fetchall())
+            if not subscriptions:
+                return
+            public, private = vapid_keys(cursor)
+            subject = push_contact(cursor)
+            for item in fresh[-3:]:
+                message = json.dumps(
+                    {
+                        "title": item["subject"],
+                        "body": item.get("detail") or "",
+                        "tag": item["id"],
+                        "url": "/employee/company-settings/notifications",
+                    }
+                )
+                for sub in subscriptions:
+                    try:
+                        code, detail = webpush.send_push(
+                            sub["endpoint"], sub["p256dh"], sub["auth"],
+                            message, public, private, subject,
+                        )
+                    except Exception as error:
+                        print(f"event=push item={item['id']} error={error}", flush=True)
+                        continue
+                    if code in (404, 410):
+                        cursor.execute(
+                            "DELETE FROM employee_push_subscriptions WHERE endpoint = %s",
+                            (sub["endpoint"],),
+                        )
+                    elif code is None or code >= 400:
+                        print(f"event=push item={item['id']} status={code} detail={detail}", flush=True)
+
+
+_push_wake = threading.Event()
+
+
+def notify_push_now():
+    """Wake the push dispatcher immediately — called by producers right after
+    writing a notification-worthy row so alerts go out on trigger, not on the
+    next sweep."""
+    _push_wake.set()
+
+
+def push_dispatch_loop():
+    """Event-driven dispatcher: producers set _push_wake for instant delivery;
+    the interval is only a safety net for writers that don't signal."""
+    interval = max(15, int(os.environ.get("ISP_PUSH_DISPATCH_SECONDS", "30")))
+    while True:
+        _push_wake.wait(interval)
+        _push_wake.clear()
+        try:
+            dispatch_company_pushes()
+        except Exception as error:
+            print(f"event=push-dispatch error={error}", flush=True)
+
+
 def reconcile_all(connect):
     with connect() as db:
         with db.cursor() as cursor:
@@ -6057,12 +6518,14 @@ def main():
     import wg_host
 
     wg_host.ensure_server()
+    gateway_notify.on_send(notify_push_now)
     threading.Thread(target=publish_tunnel_peers_later, daemon=True).start()
     threading.Thread(target=pppoe_sweep_loop, daemon=True, name="pppoe-sweep").start()
     threading.Thread(target=reconcile_loop, daemon=True, name="reconcile").start()
     threading.Thread(target=radius_sweep_loop, daemon=True, name="radius-sweep").start()
     threading.Thread(target=gateway_sweep_loop, daemon=True, name="gateway-sweep").start()
     threading.Thread(target=gateway_settlement_loop, daemon=True, name="gateway-settle").start()
+    threading.Thread(target=push_dispatch_loop, daemon=True, name="push-dispatch").start()
     router_jobs.start_worker(connect)
     radius_server.start(connect)
     try:

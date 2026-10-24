@@ -48,6 +48,27 @@ def phone_variants(value):
     return set()
 
 
+def username_aliases(username):
+    """Every stored username a dialed login can map to.
+
+    Auth accepts 'user@realm', 'DOMAIN\\user', and phone variants of the
+    registered username, so radacct can file a session under a different
+    spelling. Keep this the single resolver — wherever auth accepts an alias,
+    lookups keyed by the dialed name must try the same set."""
+    roots = [username]
+    for root in (username.split("@", 1)[0], username.rsplit("\\", 1)[-1]):
+        if root and root not in roots:
+            roots.append(root)
+    candidates = list(roots)
+    candidates += sorted(
+        alias
+        for root in roots
+        for alias in phone_variants(root)
+        if alias not in candidates
+    )
+    return candidates
+
+
 def generate_password(length=10):
     count = 10 if not isinstance(length, int) else min(12, max(8, length))
     return "".join(secrets.choice(PASSWORD_ALPHABET) for _ in range(count))

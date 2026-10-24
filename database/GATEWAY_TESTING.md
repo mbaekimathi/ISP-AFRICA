@@ -21,6 +21,14 @@ database. It skips automatically when MySQL is unreachable.
 
 ## Public HTTPS for Daraja callbacks (development)
 
+The callback base is learned automatically: when a director opens the
+company payments page through the server's public https domain (behind the
+nginx proxy — never a direct or plain-http connection), `api.py` remembers
+`https://<host>` in `company_daraja_settings.public_base` and every
+callback URL builds from it. `ISP_GATEWAY_PUBLIC_URL` still overrides the
+learned value when set — use it for tunnels whose URL the dashboard isn't
+reached through.
+
 B2C, B2B, Transaction Status, and Account Balance all deliver results only
 to public `ResultURL`/`QueueTimeOutURL` endpoints — polling is **not** a full
 fallback for payouts, so sandbox end-to-end needs a public URL that reaches

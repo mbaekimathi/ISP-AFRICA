@@ -49,6 +49,24 @@ def sock_with(rows=None, count=80):
     return ScriptedSocket(replies)
 
 
+def rule_sock(rules):
+    """Replies !re rows to every command whose sentence contains the marker."""
+
+    class RuleSocket(ScriptedSocket):
+        def __init__(self):
+            super().__init__([])
+            self.rules = [(marker.encode(), words) for marker, words in rules]
+
+        def sendall(self, payload):
+            self.sent.append(payload)
+            for marker, words in self.rules:
+                if marker in payload:
+                    self.incoming += sentence("!re", *words)
+            self.incoming += sentence("!done")
+
+    return RuleSocket()
+
+
 class FakeCursor:
     def __init__(self, rows):
         self.rows = rows
@@ -231,6 +249,9 @@ class HotspotRouterTests(unittest.TestCase):
             def execute(self, sql, params):
                 self.calls.append((sql, params))
 
+            def fetchall(self):
+                return []
+
             def fetchone(self):
                 return None
 
@@ -241,6 +262,98 @@ class HotspotRouterTests(unittest.TestCase):
         cursor = Cursor()
         portal_server.identify(cursor, "10.10.0.37")
         self.assertEqual(cursor.calls[0][1], ("10.10.0.37",))
+
+    def test_pppoe_off_hardens_gate_and_drops_ipv6(self):
+        # The dhcp-portal must not leave free paths open: an empty-password
+        # hotspot user, a bypassed ip-binding, and an accept-all walled garden
+        # all have to go, and IPv6 on the captive interface must be dropped —
+        # the RouterOS hotspot only intercepts IPv4.
+        sock = rule_sock(
+            [
+                ("/interface/print", ("=name=ether2", "=type=ether", "=comment=PPPoE")),
+                ("/ip/hotspot/profile/print", ("=name=hsprof1", "=.id=*4", "=login-by=http-pap,trial")),
+                ("/ip/hotspot/user/print", ("=name=admin", "=.id=*2")),
+                ("/ip/hotspot/ip-binding/print", ("=address=10.10.0.9", "=type=bypassed", "=.id=*7")),
+                ("/ip/hotspot/walled-garden/ip/print", ("=action=accept", "=dst-address=0.0.0.0/0", "=.id=*9")),
+            ]
+        )
+        report = routeros_api.apply_pppoe_enforcement(
+            "10.88.0.5", "secret-password", False, opener=lambda _address, _timeout: sock
+        )
+        self.assertTrue(report["applied"])
+        sent = b"".join(sock.sent)
+        self.assertIn(b"/ip/hotspot/add", sent)
+        self.assertIn(b"dhcp-portal", sent)
+        self.assertIn(b"/ip/hotspot/user/remove", sent)
+        self.assertIn(b"/ip/hotspot/ip-binding/remove", sent)
+        self.assertIn(b"/ip/hotspot/walled-garden/ip/remove", sent)
+        self.assertIn(b"=login-by=http-pap", sent)
+        self.assertNotIn(b"trial", sent)
+        self.assertIn(b"/ipv6/firewall/filter/add", sent)
+        self.assertIn(b"isp-centric-hotspot-drop-v6", sent)
+
+    def test_pppoe_off_refuses_when_device_mode_blocks_hotspot(self):
+        sock = rule_sock(
+            [
+                ("/interface/print", ("=name=ether2", "=type=ether", "=comment=PPPoE")),
+                ("/system/device-mode/print", ("=hotspot=no",)),
+            ]
+        )
+        with self.assertRaises(routeros_api.RouterError) as raised:
+            routeros_api.apply_pppoe_enforcement(
+                "10.88.0.5", "secret-password", False, opener=lambda _address, _timeout: sock
+            )
+        self.assertIn("device-mode", str(raised.exception))
+        self.assertNotIn(b"/ip/hotspot/add", b"".join(sock.sent))
+
+    def test_port_plan_hotspot_use_hardens_and_drops_ipv6(self):
+        sock = rule_sock(
+            [
+                ("/interface/print", ("=name=ether3", "=type=ether")),
+                ("/interface/bridge/port/print", ("=interface=ether3", "=bridge=bridge1", "=.id=*1")),
+                ("/ip/hotspot/user/print", ("=name=admin", "=.id=*2")),
+            ]
+        )
+        report = routeros_api.apply_port_uses(
+            "10.88.0.5", "secret-password", {"ether3": ["hotspot"]}, opener=lambda _address, _timeout: sock
+        )
+        self.assertTrue(report["applied"])
+        sent = b"".join(sock.sent)
+        self.assertIn(b"/ip/hotspot/add", sent)
+        self.assertIn(b"=interface=bridge1", sent)
+        self.assertIn(b"/ip/hotspot/user/remove", sent)
+        self.assertIn(b"/ipv6/firewall/filter/add", sent)
+        self.assertIn(b"isp-centric-hotspot-drop-v6", sent)
+
+    def test_port_plan_without_hotspot_clears_the_v6_drop(self):
+        sock = rule_sock(
+            [
+                ("/interface/print", ("=name=ether3", "=type=ether")),
+                (
+                    "/ipv6/firewall/filter/print",
+                    ("=chain=forward", "=action=drop", "=in-interface=ether3",
+                     "=comment=isp-centric-hotspot-drop-v6", "=.id=*5"),
+                ),
+            ]
+        )
+        report = routeros_api.apply_port_uses(
+            "10.88.0.5", "secret-password", {"ether3": ["lan"]}, opener=lambda _address, _timeout: sock
+        )
+        self.assertTrue(report["applied"])
+        sent = b"".join(sock.sent)
+        self.assertIn(b"/ipv6/firewall/filter/remove", sent)
+        self.assertNotIn(b"/ipv6/firewall/filter/add", sent)
+
+    def test_hotspot_off_keeps_ipv6_blocked(self):
+        sock = sock_with(("=name=ether3", "=type=ether", "=comment=Hotspot"))
+        report = routeros_api.apply_hotspot_access(
+            "10.88.0.5", "secret-password", False, opener=lambda _address, _timeout: sock
+        )
+        self.assertTrue(report["applied"])
+        sent = b"".join(sock.sent)
+        self.assertIn(b"isp-centric-hotspot-block", sent)
+        self.assertIn(b"/ipv6/firewall/filter/add", sent)
+        self.assertIn(b"isp-centric-hotspot-drop-v6", sent)
 
     def test_authorize_writes_user_and_logs_in(self):
         sock = sock_with()
@@ -505,6 +618,144 @@ class HotspotVoucherTests(unittest.TestCase):
     def test_thankyou_hotspot_page_handles_unknown_purchase(self):
         body = portal_server.thankyou_hotspot_page(None).decode()
         self.assertIn("Thank you for your payment", body)
+
+
+class IdentifyCursor:
+    """Serves the radacct session + subscriber lookups portal_server.identify runs."""
+
+    def __init__(self, sessions, subscribers):
+        self.sessions = sessions
+        self.subscribers = subscribers
+        self.asked = []
+        self.queries = []
+        self._all = []
+        self._one = None
+
+    def execute(self, sql, args=None):
+        flat = " ".join(sql.split())
+        self.queries.append(flat)
+        self._all = []
+        self._one = None
+        if flat.startswith("SELECT r.username FROM radacct"):
+            self._all = list(self.sessions)
+        elif "FROM pppoe_subscribers s" in flat:
+            self.asked.append(args[0])
+            row = self.subscribers.get(args[0])
+            self._one = dict(row) if row else None
+
+    def fetchall(self):
+        return list(self._all)
+
+    def fetchone(self):
+        return self._one
+
+
+def captive_row(**extra):
+    row = {
+        "subscriber_id": "sub-1",
+        "client_id": "client-1",
+        "first_name": "Amina",
+        "last_name": "Wanjiku",
+        "phone": "0712345678",
+        "pppoe_username": "amina-home",
+        "status": "active",
+        "router_id": "router-1",
+        "package_id": "pkg-1",
+        "package_name": "Home 10",
+        "download_mbps": 10,
+        "upload_mbps": 5,
+        "package_devices": 2,
+        "price": "500.00",
+        "billing_cycle": "monthly",
+        "cycle_days": 30,
+        "grace_days": 3,
+    }
+    row.update(extra)
+    return row
+
+
+class PortalIdentifyTests(unittest.TestCase):
+    def test_identify_finds_subscriber_missing_billing_rows(self):
+        # A subscriber with no pppoe_subscriptions or isp_packages row still
+        # owns the session — the recharge page needs them found, not lost to
+        # the INNER JOINs that used to hide them.
+        row = captive_row(
+            package_name=None,
+            download_mbps=None,
+            upload_mbps=None,
+            package_devices=None,
+            price=None,
+            billing_cycle=None,
+            cycle_days=None,
+            grace_days=None,
+        )
+        cursor = IdentifyCursor([{"username": "amina-home"}], {"amina-home": row})
+        found = portal_server.identify(cursor, "10.10.0.9")
+        self.assertEqual(found["subscriber_id"], "sub-1")
+        self.assertIsNone(found["price"])
+        joined = " ".join(cursor.queries)
+        self.assertIn("LEFT JOIN pppoe_subscriptions", joined)
+        self.assertIn("LEFT JOIN isp_packages", joined)
+
+    def test_identify_resolves_dialed_aliases(self):
+        subscribers = {
+            "amina-home": captive_row(pppoe_username="amina-home"),
+            "0712345678": captive_row(subscriber_id="sub-2", pppoe_username="0712345678"),
+        }
+        for dialed, wanted in (
+            ("amina-home@isp", "amina-home"),
+            ("HOME\\amina-home", "amina-home"),
+            ("254712345678", "0712345678"),
+            ("712345678", "0712345678"),
+        ):
+            cursor = IdentifyCursor([{"username": dialed}], subscribers)
+            found = portal_server.identify(cursor, "10.10.0.9")
+            self.assertIsNotNone(found, dialed)
+            self.assertEqual(found["pppoe_username"], wanted, dialed)
+
+    def test_identify_returns_none_for_unknown_ip(self):
+        cursor = IdentifyCursor([], {})
+        self.assertIsNone(portal_server.identify(cursor, "10.10.9.9"))
+
+    def test_identify_tries_recent_sessions_until_a_match(self):
+        cursor = IdentifyCursor(
+            [{"username": "ghost-user"}, {"username": "amina-home"}],
+            {"amina-home": captive_row()},
+        )
+        found = portal_server.identify(cursor, "10.10.0.9")
+        self.assertEqual(found["subscriber_id"], "sub-1")
+        self.assertIn("amina-home", cursor.asked)
+
+
+class PayPageMissingRowsTests(unittest.TestCase):
+    def test_pay_page_renders_without_subscription_or_package(self):
+        row = captive_row(price=None, cycle_days=None, package_name=None)
+        offers = [
+            {
+                "id": "pkg-2",
+                "name": "Home 20",
+                "price": "800.00",
+                "download_mbps": 20,
+                "upload_mbps": 10,
+                "simultaneous_devices": 3,
+                "image_data_url": None,
+                "period": "1 month",
+            }
+        ]
+        html = portal_server.pay_page(row, offers, {"account_type": "paybill", "short_code": "123456"}).decode()
+        self.assertIn("Pay with M-Pesa", html)
+        self.assertIn("Home 20", html)
+        self.assertIn("800", html)
+
+    def test_pppoe_offers_keeps_own_package_when_row_is_gone(self):
+        # The subscriber's stored package no longer resolves (deleted or never
+        # existed) — it is still offered so the page has something to bill.
+        row = captive_row(package_id="pkg-gone", package_name=None, price=None, cycle_days=None)
+        offers = portal_server.pppoe_offers(FakeCursor([]), row)
+        self.assertEqual(len(offers), 1)
+        self.assertEqual(offers[0]["id"], "pkg-gone")
+        self.assertEqual(offers[0]["name"], "Current package")
+        self.assertEqual(offers[0]["period"], "30 days")
 
 
 if __name__ == "__main__":

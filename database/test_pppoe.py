@@ -2,6 +2,7 @@ import sys
 import unittest
 from datetime import date
 from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -448,6 +449,167 @@ class DarajaCallbackTests(unittest.TestCase):
         self.assertEqual(code, 1032)
         self.assertEqual(receipt, "")
         self.assertIn("cancelled", desc)
+
+
+class RenewConn:
+    def __init__(self):
+        self.commits = 0
+        self.rollbacks = 0
+
+    def begin(self):
+        return None
+
+    def commit(self):
+        self.commits += 1
+
+    def rollback(self):
+        self.rollbacks += 1
+
+
+class RenewCursor:
+    """Serves just the reads renew() runs and records every write."""
+
+    def __init__(self, subscriber, package=None):
+        self.subscriber = subscriber
+        self.package = package
+        self.statements = []
+        self._one = None
+        self.connection = RenewConn()
+
+    def execute(self, sql, args=None):
+        flat = " ".join(sql.split())
+        self.statements.append((flat, list(args or [])))
+        self._one = None
+        if flat.startswith("SELECT s.*, sub.id AS subscription_id"):
+            self._one = dict(self.subscriber)
+        elif flat.startswith("SELECT COUNT(*) AS open_sessions"):
+            self._one = {"open_sessions": 0}
+        elif flat.startswith("SELECT COUNT(*) AS any_sessions"):
+            self._one = {"any_sessions": 1}
+        elif flat.startswith("SELECT id, name, price, download_mbps"):
+            self._one = dict(self.package) if self.package else None
+
+    def fetchone(self):
+        return self._one
+
+    def fetchall(self):
+        return []
+
+    def ran(self, prefix):
+        return [args for flat, args in self.statements if flat.startswith(prefix)]
+
+
+def subless_row(**extra):
+    """require_owned output for a subscriber with no pppoe_subscriptions row."""
+    row = {
+        "id": "sub-1",
+        "client_id": "client-1",
+        "pppoe_username": "amina-home",
+        "status": "active",
+        "package_id": "pkg-1",
+        "start_date": date(2026, 9, 1),
+        "password_sealed": "",
+        "session_limit": 1,
+        "static_ip": None,
+        "router_id": "router-1",
+        "subscription_id": None,
+        "billing_status": None,
+        "expiry_date": None,
+        "price": None,
+        "next_due_date": None,
+        "billing_cycle": None,
+        "cycle_days": None,
+        "grace_days": None,
+        "auto_renew": None,
+        "discount": None,
+        "discount_reason": None,
+        "sub_start": None,
+        "package_name": None,
+        "download_mbps": None,
+        "upload_mbps": None,
+        "package_devices": None,
+        "router_name": "Router",
+        "tunnel_status": "up",
+        "tunnel_ip": "10.88.0.5",
+        "api_secret": "sealed",
+        "last_action": "",
+    }
+    row.update(extra)
+    return row
+
+
+PACKAGE = {
+    "id": "pkg-1",
+    "name": "Home 10",
+    "price": "500.00",
+    "download_mbps": 10,
+    "upload_mbps": 5,
+    "status": "active",
+    "availability_routers": "[]",
+    "simultaneous_devices": 2,
+}
+
+
+class RenewHealTests(unittest.TestCase):
+    def test_renew_recreates_a_missing_subscription_row(self):
+        cursor = RenewCursor(subless_row(), PACKAGE)
+        with patch("pppoe_store.apply_plan", return_value={}) as plan, patch(
+            "pppoe_store.coa_for", return_value="queued"
+        ), patch("pppoe_store.subscriber_detail", return_value={"id": "sub-1"}):
+            body = pppoe_store.renew(
+                cursor,
+                "client-1",
+                "sub-1",
+                {"amount": "500.00", "mpesaReference": "TJK4H2ABCD", "packageId": "pkg-1"},
+            )
+        inserts = cursor.ran("INSERT INTO pppoe_subscriptions")
+        self.assertEqual(len(inserts), 1)
+        self.assertEqual(inserts[0][1], "sub-1")
+        self.assertEqual(inserts[0][2], "pkg-1")
+        self.assertEqual(inserts[0][3], "500.00")
+        updates = cursor.ran("UPDATE pppoe_subscriptions SET next_due_date")
+        self.assertEqual(len(updates), 1)
+        self.assertEqual(cursor.ran("UPDATE pppoe_subscribers SET status = 'active'"), [["sub-1"]])
+        # A full-price payment on a healed 30-day cycle buys 30 days.
+        self.assertEqual(body["daysPurchased"], 30)
+        plan.assert_called_once()
+        self.assertTrue(plan.call_args[0][2])
+        self.assertEqual(cursor.connection.commits, 1)
+
+    def test_renew_without_any_package_is_rejected(self):
+        cursor = RenewCursor(subless_row(package_id=None))
+        with patch("pppoe_store.apply_plan"), patch("pppoe_store.coa_for"), patch("pppoe_store.subscriber_detail"):
+            with self.assertRaises(pppoe_store.PppoeError) as raised:
+                pppoe_store.renew(cursor, "client-1", "sub-1", {"amount": "500.00"})
+        self.assertIn("package", str(raised.exception).lower())
+        self.assertEqual(cursor.ran("INSERT INTO pppoe_subscriptions"), [])
+
+    def test_renew_falls_back_to_the_paid_price(self):
+        # The isp_packages row is gone too — the amount paid prices the cycle
+        # so a received payment is never stranded.
+        cursor = RenewCursor(subless_row(package_id="pkg-gone"))
+        with patch("pppoe_store.apply_plan", return_value={}), patch(
+            "pppoe_store.coa_for", return_value="queued"
+        ), patch("pppoe_store.subscriber_detail", return_value={"id": "sub-1"}):
+            body = pppoe_store.renew(
+                cursor,
+                "client-1",
+                "sub-1",
+                {"amount": "300.00", "packageId": "pkg-gone", "packagePrice": "300.00"},
+            )
+        inserts = cursor.ran("INSERT INTO pppoe_subscriptions")
+        self.assertEqual(inserts[0][2], "pkg-gone")
+        self.assertEqual(inserts[0][3], "300.00")
+        self.assertEqual(body["daysPurchased"], 30)
+
+    def test_require_owned_uses_left_joins(self):
+        cursor = RenewCursor(subless_row())
+        row = pppoe_store.require_owned(cursor, "client-1", "sub-1")
+        self.assertEqual(row["id"], "sub-1")
+        self.assertIsNone(row["subscription_id"])
+        joined = " ".join(flat for flat, _ in cursor.statements)
+        self.assertIn("LEFT JOIN pppoe_subscriptions", joined)
+        self.assertIn("LEFT JOIN isp_packages", joined)
 
 
 if __name__ == "__main__":

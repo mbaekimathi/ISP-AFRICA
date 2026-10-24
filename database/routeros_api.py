@@ -1471,6 +1471,11 @@ def _disable_pppoe(sock, reader, iface, shared=False):
         )
     _hotspot_profile(sock, reader, DHCP_PORTAL_PROFILE, PPPOE_LOCAL, DHCP_PORTAL_DNS)
     _hotspot_server(sock, reader, DHCP_PORTAL_NAME, iface, PPPOE_POOL, DHCP_PORTAL_PROFILE)
+    try:
+        _harden_hotspot_gate(sock, reader)
+    except RouterError:
+        pass
+    _hotspot_v6_drop(sock, reader, iface)
     _captive_portal(sock, reader)
 
 
@@ -1528,10 +1533,28 @@ def apply_pppoe_enforcement(host, password, enforced, timeout=12, port=API_PORT,
         iface = _bridge_target(bridges, iface)
         kinds = {row.get("name") or "": row.get("type") or "" for row in interfaces}
         shared = kinds.get(iface) == "bridge" or iface in lan
+        blocked = []
+        if not enforced and not shared:
+            # Disabling PPPoE stands up the dhcp-portal hotspot — it needs the
+            # device-mode hotspot and fetch permissions just like the hotspot
+            # toggle does, or clients hit RouterOS's own login page instead of
+            # the pay page.
+            blocked = _device_mode_gate(sock, reader)
+            if "hotspot" in blocked:
+                raise RouterError(
+                    "RouterOS device-mode does not allow hotspot. The change was queued — "
+                    "press the router's reset button (or power-cycle it) to confirm, then push again."
+                )
         if enforced:
             _enable_pppoe(sock, reader, iface, servers, radius, shared=shared, heal=heal)
         else:
             _disable_pppoe(sock, reader, iface, shared=shared)
+        if not enforced and "fetch" in blocked:
+            return {
+                "applied": True,
+                "message": "Updated on the router. Press the reset button or power-cycle it once "
+                           "to finish enabling 'fetch' — until then the pay pages cannot be downloaded.",
+            }
     finally:
         sock.close()
     return {"applied": True, "message": "Updated on the router."}
@@ -1729,7 +1752,16 @@ def _configure_port(sock, reader, target, uses):
                     f"=dns-server={hotspot['local']}",
                 ],
             )
+        try:
+            _harden_hotspot_gate(sock, reader)
+        except RouterError:
+            pass
+        _hotspot_v6_drop(sock, reader, target)
         _captive_portal(sock, reader)
+    else:
+        # The port no longer serves a hotspot — drop our captive v6 block so a
+        # repurposed interface is not left filtering traffic it should pass.
+        _hotspot_v6_drop(sock, reader, target, present=False)
 
 
 def apply_port_uses(host, password, plan, timeout=12, port=API_PORT, opener=None):
@@ -1763,6 +1795,14 @@ def apply_port_uses(host, password, plan, timeout=12, port=API_PORT, opener=None
         interfaces = talk(sock, reader, ["/interface/print"])
         known = {row.get("name"): row for row in interfaces if row.get("name")}
         bridges = talk(sock, reader, ["/interface/bridge/port/print"])
+        blocked = []
+        if any("hotspot" in uses for uses in chosen.values()):
+            blocked = _device_mode_gate(sock, reader)
+            if "hotspot" in blocked:
+                raise RouterError(
+                    "RouterOS device-mode does not allow hotspot. The change was queued — "
+                    "press the router's reset button (or power-cycle it) to confirm, then push again."
+                )
         for iface, uses in chosen.items():
             row = known.get(iface)
             if not row:
@@ -1772,6 +1812,12 @@ def apply_port_uses(host, password, plan, timeout=12, port=API_PORT, opener=None
             if _row_id(row):
                 talk(sock, reader, ["/interface/set", f"=.id={_row_id(row)}", f"=comment={comment}"])
             _configure_port(sock, reader, target, uses)
+        if "fetch" in blocked:
+            return {
+                "applied": True,
+                "message": "Updated on the router. Press the reset button or power-cycle it once "
+                           "to finish enabling 'fetch' — until then the pay pages cannot be downloaded.",
+            }
     finally:
         sock.close()
     return {"applied": True, "message": "Updated on the router."}
@@ -1825,6 +1871,45 @@ PORTAL_PAGE_NAMES = ("login.html", "status.html", "error.html")
 DHCP_PORTAL_NAME = "dhcp-portal"
 DHCP_PORTAL_PROFILE = "dhcp-portal-profile"
 DHCP_PORTAL_DNS = "portal.local"
+HOTSPOT_V6_DROP = "isp-centric-hotspot-drop-v6"
+
+
+def _hotspot_v6_drop(sock, reader, iface, present=True):
+    """The RouterOS hotspot only intercepts IPv4 — without a forward drop an
+    IPv6-capable uplink lets unpaid gadgets bypass the paywall entirely.
+    Best-effort: routers without the IPv6 package just skip it."""
+    try:
+        rows = talk(sock, reader, ["/ipv6/firewall/filter/print"])
+    except RouterError:
+        return
+    ours = [
+        row
+        for row in rows
+        if row.get("comment") == HOTSPOT_V6_DROP and row.get("in-interface") == iface and _row_id(row)
+    ]
+    if not present:
+        for row in ours:
+            try:
+                talk(sock, reader, ["/ipv6/firewall/filter/remove", f"=.id={_row_id(row)}"])
+            except RouterError:
+                pass
+        return
+    if ours:
+        return
+    try:
+        talk(
+            sock,
+            reader,
+            [
+                "/ipv6/firewall/filter/add",
+                "=chain=forward",
+                "=action=drop",
+                f"=in-interface={iface}",
+                f"=comment={HOTSPOT_V6_DROP}",
+            ],
+        )
+    except RouterError:
+        pass
 
 
 def _hotspot_profile(sock, reader, name, address, dns):
@@ -2160,6 +2245,7 @@ def _enable_hotspot(sock, reader, iface, spots):
         _harden_hotspot_gate(sock, reader)
     except RouterError:
         pass
+    _hotspot_v6_drop(sock, reader, iface)
     _captive_portal(sock, reader)
 
 
@@ -2196,6 +2282,9 @@ def _disable_hotspot(sock, reader, iface):
                 f"=comment={HOTSPOT_BLOCK_INPUT}",
             ],
         )
+    # The v4 drops above close the port — v6 must close too or a disabled
+    # hotspot would still pass traffic on an IPv6-capable uplink.
+    _hotspot_v6_drop(sock, reader, iface)
 
 
 def _device_mode_gate(sock, reader):
