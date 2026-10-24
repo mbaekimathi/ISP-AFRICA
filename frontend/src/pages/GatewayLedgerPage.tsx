@@ -189,16 +189,17 @@ export function GatewayLedgerPage() {
       if (paymentsOffset === 0) setPayments(null);
       const params = new URLSearchParams({ limit: "500", offset: String(paymentsOffset) });
       if (paymentStatus !== "all") params.set("status", paymentStatus);
-      apiRequest<{ payments: PaymentRow[] }>(`/api/gateway/payments?${params}`)
+      apiRequest<{ payments?: PaymentRow[] }>(`/api/gateway/payments?${params}`)
         .then((b) => {
-          setPayments((rows) => (paymentsOffset === 0 ? b.payments : [...(rows ?? []), ...b.payments]));
-          setPaymentsMore(b.payments.length >= 500);
+          const batch = b.payments ?? [];
+          setPayments((rows) => (paymentsOffset === 0 ? batch : [...(rows ?? []), ...batch]));
+          setPaymentsMore(batch.length >= 500);
         })
         .catch(fail);
     }
-    if (tab === "payouts") apiRequest<{ payouts: PayoutRow[] }>("/api/gateway/payouts").then((b) => setPayouts(b.payouts)).catch(fail);
-    if (tab === "ledger") apiRequest<{ entries: LedgerRow[] }>("/api/gateway/ledger").then((b) => setEntries(b.entries)).catch(fail);
-    if (tab === "notices") apiRequest<{ notifications: NoticeRow[] }>("/api/gateway/notifications").then((b) => setNotices(b.notifications)).catch(fail);
+    if (tab === "payouts") apiRequest<{ payouts?: PayoutRow[] }>("/api/gateway/payouts").then((b) => setPayouts(b.payouts ?? [])).catch(fail);
+    if (tab === "ledger") apiRequest<{ entries?: LedgerRow[] }>("/api/gateway/ledger").then((b) => setEntries(b.entries ?? [])).catch(fail);
+    if (tab === "notices") apiRequest<{ notifications?: NoticeRow[] }>("/api/gateway/notifications").then((b) => setNotices(b.notifications ?? [])).catch(fail);
   }, [tab, paymentStatus, paymentsOffset]);
 
   const pooled = summary?.mode === "company_gateway";

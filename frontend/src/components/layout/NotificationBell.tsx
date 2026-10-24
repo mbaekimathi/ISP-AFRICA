@@ -24,9 +24,9 @@ export function NotificationBell({
     if (!enabled) return;
     let stopped = false;
     const load = () => {
-      apiRequest<{ notifications: NotificationItem[] }>(feedPath)
+      apiRequest<{ notifications?: NotificationItem[] }>(feedPath)
         .then((body) => {
-          if (!stopped) setItems(body.notifications);
+          if (!stopped) setItems(body.notifications ?? []);
         })
         .catch(() => {});
     };

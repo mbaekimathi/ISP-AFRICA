@@ -2785,10 +2785,14 @@ def list_transactions(cursor, client_id, query):
 
 
 def list_hotspot_clients(cursor, client_id, query):
-    """Hotspot guests: one row per purchase, status derived from its vouchers.
+    """Hotspot devices: one row per paying device, latest payment first.
 
     Hotspot buyers never become pppoe_subscribers rows — they exist only as
     purchases and single-use vouchers, so the clients page reads from them.
+    Every M-Pesa prompt writes its own purchase row, so a device that pays
+    every week would otherwise repeat in the list. Purchases group by the
+    buyer's MAC (phone when the MAC was not captured) and the newest purchase
+    carries the row — opening it shows every transaction for that device.
     """
     where = ["h.client_id = %s", "h.deleted = 0"]
     args = [client_id]
@@ -2838,15 +2842,30 @@ def list_hotspot_clients(cursor, client_id, query):
         args,
     )
     items = cursor.fetchall()
-    # One /ip/hotspot/host scan per reachable router — it lists every device
-    # associated to the hotspot, so a registered device shows "connected" even
-    # before its voucher is redeemed.
+    # Group the purchases into devices — items arrive newest first, so each
+    # group's lead purchase is that device's latest payment and the group
+    # order is already latest-payment-first.
+    groups = []
+    by_key = {}
     router_macs = {}
     for item in items:
-        macs = {str(item["mac"] or "").upper()} | {m.strip().upper() for m in (item.get("device_macs") or "").split(",") if m.strip()}
-        macs.discard("")
-        if macs and item.get("tunnel_ip") and item.get("api_secret"):
-            router_macs.setdefault(str(item["device_id"]), set()).update(macs)
+        mac = str(item["mac"] or "").strip().upper()
+        phone = str(item["phone"] or "").strip()
+        key = f"mac:{mac}" if mac else f"phone:{phone}" if phone else f"purchase:{item['id']}"
+        group = by_key.get(key)
+        if group is None:
+            group = {"lead": item, "items": [], "macs": set()}
+            by_key[key] = group
+            groups.append(group)
+        group["items"].append(item)
+        item_macs = {mac} | {m.strip().upper() for m in (item.get("device_macs") or "").split(",") if m.strip()}
+        item_macs.discard("")
+        group["macs"] |= item_macs
+        # One /ip/hotspot/host scan per reachable router — it lists every
+        # device associated to the hotspot, so a registered device shows
+        # "connected" even before its voucher is redeemed.
+        if item_macs and item.get("tunnel_ip") and item.get("api_secret"):
+            router_macs.setdefault(str(item["device_id"]), set()).update(item_macs)
     live_hosts = {}
     for device_id, macs in router_macs.items():
         source = next((item for item in items if str(item["device_id"]) == device_id), None)
@@ -2861,34 +2880,40 @@ def list_hotspot_clients(cursor, client_id, query):
             continue
     rows = []
     now = datetime.now()
-    for item in items:
-        used = int(item["used_vouchers"] or 0)
-        surf_until = item["surf_until"] if isinstance(item["surf_until"], datetime) else None
-        macs = {str(item["mac"] or "").upper()} | {m.strip().upper() for m in (item.get("device_macs") or "").split(",") if m.strip()}
-        hosts = [live_hosts[mac] for mac in macs if mac in live_hosts]
+    for group in groups:
+        item = group["lead"]
+        hosts = [live_hosts[mac] for mac in group["macs"] if mac in live_hosts]
         granted = any(host["authorized"] or host.get("bypassed") for host in hosts)
-        if item["status"] == "paid":
-            if granted:
-                router_status = "surfing"
-            elif hosts:
-                router_status = "connected"
-            else:
-                router_status = "surfing" if used and (not surf_until or surf_until > now) else "expired" if used else "not_surfing"
+        used = sum(int(entry["used_vouchers"] or 0) for entry in group["items"])
+        surf_until = max(
+            (entry["surf_until"] for entry in group["items"] if isinstance(entry["surf_until"], datetime)),
+            default=None,
+        )
+        used_pct = max(
+            (int(entry["used_pct"]) for entry in group["items"] if entry["used_pct"] is not None),
+            default=None,
+        )
+        has_time = bool(surf_until and surf_until > now)
+        if granted:
+            router_status = "surfing"
+        elif hosts:
+            router_status = "connected"
+        elif item["status"] == "paid" or has_time:
+            # A still-valid voucher on an earlier purchase keeps the device
+            # surfing even when its newest prompt is pending or failed.
+            router_status = "surfing" if used and (not surf_until or has_time) else "expired" if used else "not_surfing"
         elif item["status"] == "pending":
-            router_status = "surfing" if granted else "connected" if hosts else "pending_activation"
+            router_status = "pending_activation"
         else:
-            # An unpaid purchase can still show authorized/bypassed on the
-            # router (leftover session, MAC-cookie login, ip-binding) — surf
-            # it as surfing so the failed-but-online case is visible instead
-            # of looking like a device that merely joined the Wi-Fi.
-            router_status = "surfing" if granted else "connected" if hosts else "disconnected"
+            router_status = "disconnected"
+        codes = ", ".join(entry["codes"] for entry in group["items"] if entry.get("codes")) or item["mac"]
         rows.append(
             {
                 "id": item["id"],
                 "firstName": "Hotspot",
                 "lastName": "guest",
                 "phone": item["phone"],
-                "username": item["codes"] or item["mac"],
+                "username": codes,
                 "routerName": item.get("router_name") or "",
                 "routerTunnelStatus": item.get("tunnel_status") or "unknown",
                 "packageName": item.get("package_name") or "",
@@ -2898,11 +2923,14 @@ def list_hotspot_clients(cursor, client_id, query):
                 "billingStatus": item["status"],
                 "expiry": stamp(surf_until) if surf_until else stamp(item["paid_at"] or item["created_at"]),
                 "price": format(Decimal(item["amount"]), ".2f"),
-                "usedPercent": int(item["used_pct"]) if item["used_pct"] is not None else None,
-                "usedDetail": "of voucher time" if item["used_pct"] is not None else "",
+                "payments": len(group["items"]),
+                "totalPaid": format(
+                    sum(Decimal(entry["amount"]) for entry in group["items"] if entry["status"] == "paid"), ".2f"
+                ),
+                "usedPercent": used_pct,
+                "usedDetail": "of voucher time" if used_pct is not None else "",
             }
         )
-    rows.sort(key=lambda row: (-1 if row["usedPercent"] is None else -row["usedPercent"]))
     router_states = {"surfing", "connected", "not_surfing", "expired", "suspended", "disconnecting", "disconnected", "pending_activation"}
     if status in router_states:
         rows = [row for row in rows if row["routerStatus"] == status]
@@ -3081,6 +3109,41 @@ def radacct_for_usernames(cursor, usernames, sql, extra_args=()):
         return []
     marks = ", ".join(["%s"] * len(usernames))
     cursor.execute(sql.format(marks=marks), [*usernames, *extra_args])
+    return cursor.fetchall()
+
+
+def hotspot_device_purchases(cursor, client_id, row):
+    """Every purchase the same device made — the transactions list.
+
+    Devices are keyed the same way list_hotspot_clients groups them: buyer
+    MAC, phone when the MAC was not captured, the row itself otherwise.
+    """
+    mac = str(row.get("mac") or "").strip().upper()
+    phone = str(row.get("phone") or "").strip()
+    if mac:
+        clause, args = "UPPER(h.mac) = %s", [mac]
+    elif phone:
+        clause, args = "h.mac = '' AND h.phone = %s", [phone]
+    else:
+        clause, args = "h.id = %s", [str(row["id"])]
+    cursor.execute(
+        f"""
+        SELECT h.id, h.phone, h.amount, h.checkout_id, h.mpesa_code, h.mac, h.ip,
+               h.devices, h.periods, h.status, h.authorized, h.paid_at, h.created_at,
+               h.ended_at, h.deleted,
+               COALESCE(p.name, c.name, 'Wi-Fi bundle') AS package_name,
+               d.name AS router_name,
+               (SELECT COUNT(*) FROM hotspot_vouchers v WHERE v.purchase_id = h.id) AS vouchers,
+               (SELECT COUNT(*) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used') AS vouchers_used
+        FROM hotspot_purchases h
+        LEFT JOIN isp_packages p ON p.id = h.package_id
+        LEFT JOIN company_packages c ON c.id = p.company_package_id
+        LEFT JOIN isp_mikrotik_devices d ON d.id = h.device_id
+        WHERE h.client_id = %s AND {clause} AND (h.deleted = 0 OR h.id = %s)
+        ORDER BY h.created_at DESC
+        """,
+        [client_id, *args, str(row["id"])],
+    )
     return cursor.fetchall()
 
 
@@ -3273,6 +3336,31 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
         "usage": usage,
         "sessions": session_rows_out,
         "timeline": timeline,
+        "transactions": [
+            {
+                "id": purchase["id"],
+                "phone": purchase["phone"],
+                "amount": format(Decimal(purchase["amount"]), ".2f"),
+                "status": purchase["status"],
+                "mpesaCode": purchase.get("mpesa_code") or "",
+                "checkoutId": purchase["checkout_id"],
+                "mac": purchase.get("mac") or "",
+                "ip": purchase.get("ip") or "",
+                "packageName": purchase["package_name"],
+                "routerName": purchase.get("router_name") or "",
+                "devices": int(purchase["devices"] or 1),
+                "periods": int(purchase["periods"] or 1),
+                "vouchers": int(purchase["vouchers"] or 0),
+                "vouchersUsed": int(purchase["vouchers_used"] or 0),
+                "authorized": bool(purchase["authorized"]),
+                "paidAt": stamp(purchase["paid_at"]),
+                "createdAt": stamp(purchase["created_at"]),
+                "endedAt": stamp(purchase.get("ended_at")),
+                "deleted": bool(purchase.get("deleted")),
+                "current": purchase["id"] == row["id"],
+            }
+            for purchase in hotspot_device_purchases(cursor, client_id, row)
+        ],
     }
 
 

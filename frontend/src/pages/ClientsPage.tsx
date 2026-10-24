@@ -24,6 +24,8 @@ type Subscriber = {
   expiry: string | null;
   usedPercent: number | null;
   usedDetail: string;
+  payments?: number;
+  totalPaid?: string;
 };
 
 type ListPage = {
@@ -226,7 +228,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
           ) : null}
         </div>
         <div className="grid grid-cols-2 gap-x-6 gap-y-4 border-t border-primary-foreground/15 px-5 py-4 sm:grid-cols-4 sm:px-7">
-          <HeroStat label="Clients" value={page?.total ?? "…"} icon={<Users className="h-4 w-4" />} tint="bg-primary-foreground/15" />
+          <HeroStat label={kind === "hotspot" ? "Devices" : "Clients"} value={page?.total ?? "…"} icon={<Users className="h-4 w-4" />} tint="bg-primary-foreground/15" />
           <HeroStat label="Surfing" value={surfing} icon={<Wifi className="h-4 w-4" />} tint="bg-success/80" />
           <HeroStat label="Idle" value={idle} icon={<WifiOff className="h-4 w-4" />} tint="bg-warning/80" />
           <HeroStat label="Expired / off" value={lapsed} icon={<Clock className="h-4 w-4" />} tint="bg-destructive/70" />
@@ -361,6 +363,9 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
                   <div className="grid w-max gap-1.5">
                     {billingBadge(client.billingStatus)}
                     <span className="text-xs">{client.expiry ?? "—"}</span>
+                    {kind === "hotspot" && (client.payments ?? 0) > 1 ? (
+                      <span className="text-[11px] text-muted-foreground">{client.payments} payments</span>
+                    ) : null}
                   </div>
                 </td>
                 <td className="px-4 py-3 text-right">
@@ -410,7 +415,10 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
                 <dt className="text-muted-foreground">Billing / expiry</dt>
                 <dd className="flex items-center gap-1.5 font-medium">
                   {billingBadge(client.billingStatus)}
-                  <span className="truncate">{client.expiry ?? "—"}</span>
+                  <span className="truncate">
+                    {client.expiry ?? "—"}
+                    {kind === "hotspot" && (client.payments ?? 0) > 1 ? ` · ${client.payments} payments` : ""}
+                  </span>
                 </dd>
               </div>
             </dl>
@@ -427,7 +435,8 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
 
       {page ? (
         <p className="mt-3 text-xs text-muted-foreground">
-          {page.total} clients{filtered ? " · filtered" : ""} · sorted by usage
+          {page.total} {kind === "hotspot" ? "devices" : "clients"}{filtered ? " · filtered" : ""} ·{" "}
+          {kind === "hotspot" ? "latest payment first" : "sorted by usage"}
         </p>
       ) : null}
     </div>

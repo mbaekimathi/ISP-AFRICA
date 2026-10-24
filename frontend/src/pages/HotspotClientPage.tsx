@@ -102,9 +102,33 @@ type GuestClient = {
   connection: "online" | "connected" | "offline";
 };
 
+type GuestTransaction = {
+  id: string;
+  phone: string;
+  amount: string;
+  status: string;
+  mpesaCode: string;
+  checkoutId: string;
+  mac: string;
+  ip: string;
+  packageName: string;
+  routerName: string;
+  devices: number;
+  periods: number;
+  vouchers: number;
+  vouchersUsed: number;
+  authorized: boolean;
+  paidAt: string | null;
+  createdAt: string | null;
+  endedAt: string | null;
+  deleted: boolean;
+  current: boolean;
+};
+
 type GuestDetail = {
   client: GuestClient;
   vouchers: Voucher[];
+  transactions: GuestTransaction[];
   usage: {
     bytesIn: number;
     bytesOut: number;
@@ -204,7 +228,7 @@ function ActionDialog({
   );
 }
 
-type HistoryTab = "vouchers" | "sessions" | "timeline";
+type HistoryTab = "payments" | "vouchers" | "sessions" | "timeline";
 
 function TrendChart({
   data,
@@ -323,7 +347,7 @@ export function HotspotClientPage() {
   const [detail, setDetail] = useState<GuestDetail | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
-  const [tab, setTab] = useState<HistoryTab>("vouchers");
+  const [tab, setTab] = useState<HistoryTab>("payments");
   const [dialog, setDialog] = useState<"recharge" | "end" | "delete" | null>(null);
   const [voucherCount, setVoucherCount] = useState(1);
   const [rechargePeriods, setRechargePeriods] = useState(1);
@@ -438,6 +462,7 @@ export function HotspotClientPage() {
   const timeLeft = firstLive?.sessionTimeLeft || "—";
   const usedVouchers = detail.vouchers.filter((voucher) => voucher.status === "used").length;
   const historyTabs: { id: HistoryTab; label: string; count: number }[] = [
+    { id: "payments", label: "Payments", count: detail.transactions.length },
     { id: "vouchers", label: "Vouchers", count: detail.vouchers.length },
     { id: "sessions", label: "Sessions", count: detail.sessions.length },
     { id: "timeline", label: "Timeline", count: detail.timeline.length },
@@ -617,7 +642,13 @@ export function HotspotClientPage() {
           icon={<Wallet className="h-4 w-4" />}
           label="Paid"
           value={money(client.amount)}
-          hint={client.mpesaCode ? `Receipt ${client.mpesaCode}` : client.status}
+          hint={
+            client.mpesaCode
+              ? `Receipt ${client.mpesaCode}${detail.transactions.length > 1 ? ` · ${detail.transactions.length} payments` : ""}`
+              : detail.transactions.length > 1
+                ? `${detail.transactions.length} payments`
+                : client.status
+          }
         />
       </div>
 
@@ -757,7 +788,71 @@ export function HotspotClientPage() {
               </div>
             </CardHeader>
             <div className="px-5 pb-5 pt-4" role="tabpanel">
-              {tab === "vouchers" ? (
+              {tab === "payments" ? (
+                detail.transactions.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No payments recorded for this device yet.</p>
+                ) : (
+                  <div className="overflow-x-auto">
+                    <table className="data-table min-w-[56rem]">
+                      <thead className="border-b border-border text-xs text-muted-foreground">
+                        <tr>
+                          <th className="px-2 py-2 font-medium">Requested</th>
+                          <th className="px-2 py-2 font-medium">Package</th>
+                          <th className="px-2 py-2 font-medium">Amount</th>
+                          <th className="px-2 py-2 font-medium">Status</th>
+                          <th className="px-2 py-2 font-medium">Receipt</th>
+                          <th className="px-2 py-2 font-medium">Covers</th>
+                          <th className="px-2 py-2 font-medium">Vouchers</th>
+                          <th className="px-2 py-2 font-medium"><span className="sr-only">Open</span></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.transactions.map((tx) => (
+                          <tr key={tx.id} className={cn("border-b border-border last:border-0", tx.current && "bg-surface-muted/50")}>
+                            <td className="px-2 py-2">
+                              <div>{tx.createdAt ?? "—"}</div>
+                              <div className="text-xs text-muted-foreground">
+                                {tx.paidAt ? `Paid ${tx.paidAt}` : tx.status === "pending" ? "Awaiting M-Pesa" : "Not paid"}
+                              </div>
+                            </td>
+                            <td className="px-2 py-2">
+                              <div className="font-medium">{tx.packageName}</div>
+                              <div className="text-xs text-muted-foreground">{tx.routerName || "—"}</div>
+                            </td>
+                            <td className="px-2 py-2">
+                              <div className="font-medium">{money(tx.amount)}</div>
+                              <div className="text-xs text-muted-foreground">{tx.phone || "—"}</div>
+                            </td>
+                            <td className="px-2 py-2">
+                              <StatusBadge tone={statusTone[tx.status] ?? "neutral"}>{tx.status}</StatusBadge>
+                              {tx.deleted ? <span className="ml-1.5 text-xs text-muted-foreground">deleted</span> : null}
+                            </td>
+                            <td className="px-2 py-2 font-mono text-xs" title={tx.checkoutId || undefined}>
+                              {tx.mpesaCode || (tx.checkoutId ? `${tx.checkoutId.slice(0, 12)}…` : "—")}
+                            </td>
+                            <td className="px-2 py-2 text-xs">
+                              {tx.devices} device{tx.devices === 1 ? "" : "s"} × {tx.periods} period{tx.periods === 1 ? "" : "s"}
+                            </td>
+                            <td className="px-2 py-2 text-xs">{tx.vouchers ? `${tx.vouchersUsed}/${tx.vouchers} used` : "—"}</td>
+                            <td className="px-2 py-2 text-right">
+                              {tx.current ? (
+                                <span className="text-xs font-medium text-muted-foreground">This page</span>
+                              ) : (
+                                <Link to={home(`/hotspot/${tx.id}`)} className="text-xs font-semibold text-primary hover:underline">
+                                  Open
+                                </Link>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Every M-Pesa prompt from this device — open another payment to see its own vouchers and sessions.
+                    </p>
+                  </div>
+                )
+              ) : tab === "vouchers" ? (
                 detail.vouchers.length === 0 ? (
                   <p className="text-sm text-muted-foreground">No vouchers issued for this purchase.</p>
                 ) : (
