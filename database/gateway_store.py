@@ -1370,10 +1370,12 @@ def isp_gateway_summary(cursor, client_id):
         "settlement": {
             "mode": settings.get("settlement_mode"),
             "holdHours": settings.get("hold_hours"),
-            "minPayoutOverride": settings.get("min_payout_override"),
+            "minPayoutOverride": None
+            if settings.get("min_payout_override") is None
+            else str(settings["min_payout_override"]),
             "settleEveryNTx": settings.get("settle_every_n_tx"),
             "settleSchedule": _parse_schedule(settings.get("settle_schedule")),
-            "lastSettledAt": settings.get("last_settled_at"),
+            "lastSettledAt": _iso_or_none(settings.get("last_settled_at")),
         },
         "destination": {
             "type": destination.get("destination_type"),
@@ -1381,8 +1383,12 @@ def isp_gateway_summary(cursor, client_id):
             "accountReference": destination.get("account_reference"),
         },
         "pendingChange": destination.get("pending_change"),
-        "pendingChangeEffectiveAt": destination.get("pending_change_effective_at"),
+        "pendingChangeEffectiveAt": _iso_or_none(destination.get("pending_change_effective_at")),
     }
+
+
+def _iso_or_none(value):
+    return value.isoformat(sep=" ") if hasattr(value, "isoformat") else value
 
 
 def isp_payout_settings_row(cursor, client_id):
@@ -1397,10 +1403,31 @@ def isp_payout_settings_row(cursor, client_id):
         (client_id,),
     )
     row = cursor.fetchone()
-    if row and row.get("destination_type") == "phone":
+    if not row:
+        # Clients signed up after the startup backfill have no row yet —
+        # answer with the column defaults instead of null so callers and the
+        # settings page always get a usable settings object.
+        row = {
+            "gateway_mode": "none",
+            "settlement_mode": "immediate",
+            "hold_hours": 24,
+            "destination_type": None,
+            "destination_value": "",
+            "account_reference": "",
+            "min_payout_override": None,
+            "pending_change": None,
+            "pending_change_effective_at": None,
+            "settle_every_n_tx": None,
+            "settle_schedule": "[]",
+            "last_settled_at": None,
+        }
+    if row.get("destination_type") == "phone":
         row["destination_value"] = mask_msisdn(row["destination_value"])
-    if row:
-        row["settle_schedule"] = _parse_schedule(row.get("settle_schedule"))
+    row["settle_schedule"] = _parse_schedule(row.get("settle_schedule"))
+    override = row.get("min_payout_override")
+    row["min_payout_override"] = None if override is None else str(override)
+    row["pending_change_effective_at"] = _iso_or_none(row.get("pending_change_effective_at"))
+    row["last_settled_at"] = _iso_or_none(row.get("last_settled_at"))
     return row
 
 

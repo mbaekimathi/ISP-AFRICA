@@ -200,7 +200,7 @@ export function IspPaymentsPage() {
       });
     apiRequest<{ settings: PayoutSettings }>("/api/gateway/settings")
       .then((body) => {
-        if (stopped) return;
+        if (stopped || !body.settings) return;
         setGatewayMode(body.settings.gateway_mode);
         if (body.settings.gateway_mode === "company_gateway") setView("company");
       })
@@ -633,8 +633,10 @@ function GatewaySettingsCard({ onModeChange }: { onModeChange?: (mode: GatewayMo
       body: JSON.stringify({ ...body, password }),
     })
       .then((result) => {
-        setSettings((current) => (current ? { ...current, ...result.settings } : result.settings));
-        onModeChange?.(result.settings.gateway_mode);
+        if (result.settings) {
+          setSettings((current) => (current ? { ...current, ...result.settings } : result.settings));
+          onModeChange?.(result.settings.gateway_mode);
+        }
         setPassword("");
         setDestinationValue("");
         setShortcodeKind("");

@@ -3085,11 +3085,16 @@ class Handler(BaseHTTPRequestHandler):
         offline = int(row["tunnel_down"] or 0) + int(row["tunnel_unknown"] or 0)
         cursor.execute(
             """
-            SELECT COUNT(DISTINCT device_id) AS unhealthy
-            FROM isp_mikrotik_health_events
-            WHERE client_id = %s AND ended_at IS NULL
+            SELECT COUNT(*) AS unhealthy
+            FROM (
+                SELECT device_id FROM isp_mikrotik_health_events
+                WHERE client_id = %s AND ended_at IS NULL
+                UNION
+                SELECT id FROM isp_mikrotik_devices
+                WHERE client_id = %s AND tunnel_status = 'down'
+            ) flagged
             """,
-            (client_id,),
+            (client_id, client_id),
         )
         unhealthy = int(cursor.fetchone()["unhealthy"] or 0)
         cursor.execute(
@@ -3617,6 +3622,12 @@ class Handler(BaseHTTPRequestHandler):
                     "UPDATE isp_mikrotik_devices SET tunnel_status = 'down' WHERE id = %s AND client_id = %s",
                     (device_id, client_id),
                 )
+                self.sync_router_health(
+                    cursor,
+                    client_id,
+                    device_id,
+                    [("Management tunnel", "The management tunnel did not answer.")],
+                )
             return unknown
 
     def read_job(self, cursor, job_id, token):
@@ -3792,6 +3803,10 @@ class Handler(BaseHTTPRequestHandler):
             WHERE id = %s AND client_id = %s
             """,
             (version, device_id, client_id),
+        )
+        cursor.execute(
+            "UPDATE isp_mikrotik_health_events SET ended_at = CURRENT_TIMESTAMP WHERE client_id = %s AND device_id = %s AND subject = 'Management tunnel' AND ended_at IS NULL",
+            (client_id, device_id),
         )
 
     def mark_mikrotik_waiting(self, cursor, device_id, token, payload):
@@ -6480,11 +6495,25 @@ def _mark_tunnel(connect, device, status):
                     "UPDATE isp_mikrotik_devices SET tunnel_status = 'up', last_seen_at = CURRENT_TIMESTAMP WHERE id = %s AND client_id = %s AND tunnel_status <> 'up'",
                     (device["id"], device["client_id"]),
                 )
+                if cursor.rowcount:
+                    cursor.execute(
+                        "UPDATE isp_mikrotik_health_events SET ended_at = CURRENT_TIMESTAMP WHERE client_id = %s AND device_id = %s AND subject = 'Management tunnel' AND ended_at IS NULL",
+                        (device["client_id"], device["id"]),
+                    )
             else:
                 cursor.execute(
-                    "UPDATE isp_mikrotik_devices SET tunnel_status = 'down' WHERE id = %s AND client_id = %s AND tunnel_status = 'up'",
+                    "UPDATE isp_mikrotik_devices SET tunnel_status = 'down' WHERE id = %s AND client_id = %s AND tunnel_status <> 'down'",
                     (device["id"], device["client_id"]),
                 )
+                if cursor.rowcount:
+                    cursor.execute(
+                        """
+                        INSERT INTO isp_mikrotik_health_events (id, client_id, device_id, subject, reason, started_at)
+                        VALUES (%s, %s, %s, 'Management tunnel', 'The management tunnel did not answer.', CURRENT_TIMESTAMP)
+                        """,
+                        (str(uuid.uuid4()), device["client_id"], device["id"]),
+                    )
+                    notify_push_now()
 
 
 _PROBE_FAILURES = {}

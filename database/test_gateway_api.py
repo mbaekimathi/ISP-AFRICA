@@ -567,6 +567,17 @@ class CompanyGatewaySettingsTests(unittest.TestCase):
         db = MiniDb()
         self.assertEqual(gateway_api.isp_fees(db.cursor()), {"configured": False})
 
+    def test_isp_settings_defaults_when_no_payout_row(self):
+        # A client who signed up after the startup backfill has no
+        # isp_payout_settings row — the settings page must still get a
+        # usable object, never null.
+        db = MiniDb()
+        out = gateway_api.isp_settings(db.cursor(), "new-client")
+        self.assertEqual(out["settings"]["gateway_mode"], "none")
+        self.assertEqual(out["settings"]["settlement_mode"], "immediate")
+        self.assertIsNone(out["settings"]["min_payout_override"])
+        self.assertEqual(out["settings"]["settle_schedule"], [])
+
     def test_kill_switch_toggle_is_audited(self):
         db = self.seed()
         result, error = gateway_api.save_company_gateway(
