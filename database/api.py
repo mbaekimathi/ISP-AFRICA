@@ -5544,7 +5544,7 @@ class Handler(BaseHTTPRequestHandler):
             INSERT INTO company_notification_settings (
               id, server_unreachable, mikrotik_unreachable, mikrotik_added, isp_registered,
               communications_failed, payments_failed
-            ) VALUES (1, %s, %s, %s, %s, %s, %s, %s)
+            ) VALUES (1, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
               server_unreachable = VALUES(server_unreachable),
               mikrotik_unreachable = VALUES(mikrotik_unreachable),
