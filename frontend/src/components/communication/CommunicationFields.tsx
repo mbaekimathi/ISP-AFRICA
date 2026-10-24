@@ -38,7 +38,7 @@ export function draftFrom(record: CommunicationRecord | null): CommunicationDraf
   return {
     ...emptyDraft,
     ...record,
-    port: record.port === "" ? "" : String(record.port),
+    port: record.port === "" || record.port == null ? "" : String(record.port),
   };
 }
 

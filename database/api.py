@@ -2551,9 +2551,17 @@ class Handler(BaseHTTPRequestHandler):
             payload = self.read_json() if method == "POST" else {}
             token = self.cookies()
             query = parse_qs(urlparse(self.path).query)
-            with connect() as db:
-                with db.cursor() as cursor:
-                    body, cookie = self.dispatch(cursor, method, path, payload, token, query)
+            # A pooled connection can die between its ping and the query —
+            # retry reads once on a fresh connection so a blip is not a 500.
+            for attempt in range(2 if method == "GET" else 1):
+                try:
+                    with connect() as db:
+                        with db.cursor() as cursor:
+                            body, cookie = self.dispatch(cursor, method, path, payload, token, query)
+                    break
+                except pymysql.err.OperationalError:
+                    if attempt:
+                        raise
             status = 200
             if isinstance(body, PreviewPage):
                 self.send_html(200, body.html.encode("utf-8"))
@@ -2571,7 +2579,8 @@ class Handler(BaseHTTPRequestHandler):
             if error.details:
                 body.update(error.details)
             self.send_json(status, body)
-        except pymysql.MySQLError:
+        except pymysql.MySQLError as error:
+            print(f"event=db-error method={method} path={path} error={error}", flush=True)
             self.send_json(status, {"error": "The account database could not be reached."})
         except gateway_crypto.GatewayCryptoError as error:
             status = 503

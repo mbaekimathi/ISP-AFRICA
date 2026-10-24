@@ -38,6 +38,21 @@ function vapidBytes(value: string) {
   return Uint8Array.from(raw, (character) => character.charCodeAt(0));
 }
 
+async function subscribePush(registration: ServiceWorkerRegistration, publicKey: string) {
+  const options = { userVisibleOnly: true, applicationServerKey: vapidBytes(publicKey) };
+  try {
+    return (await registration.pushManager.getSubscription()) ?? (await registration.pushManager.subscribe(options));
+  } catch {
+    // A stale subscription or an inactive worker can wedge the browser's push
+    // channel — clear it, refresh the worker, and retry once.
+    const stale = await registration.pushManager.getSubscription();
+    if (stale) await stale.unsubscribe().catch(() => {});
+    await registration.update().catch(() => {});
+    await navigator.serviceWorker.ready;
+    return registration.pushManager.subscribe(options);
+  }
+}
+
 function playChime(context: AudioContext | null) {
   if (!context) return;
   [0, 0.18].forEach((offset, index) => {
@@ -80,6 +95,7 @@ export function CompanyNotificationsPage() {
         seenRef.current = fresh;
         setItems(body.notifications);
         setLoaded(true);
+        setError("");
       })
       .catch((cause: unknown) => {
         setLoaded(true);
@@ -124,15 +140,11 @@ export function CompanyNotificationsPage() {
         return;
       }
       const registration = await navigator.serviceWorker.register("/push-sw.js");
+      await navigator.serviceWorker.ready;
       const { push } = await apiRequest<{ push: { vapidPublicKey: string; devices: number } }>(
         "/api/employee/company/notifications/push",
       );
-      const subscription =
-        (await registration.pushManager.getSubscription()) ??
-        (await registration.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: vapidBytes(push.vapidPublicKey),
-        }));
+      const subscription = await subscribePush(registration, push.vapidPublicKey);
       await apiRequest("/api/employee/company/notifications/push/subscribe", {
         method: "POST",
         body: JSON.stringify({
@@ -148,7 +160,13 @@ export function CompanyNotificationsPage() {
       setPushState("on");
       setPushNote("Sound alerts are on for this device — they keep ringing even after you sign out.");
     } catch (cause: unknown) {
-      setPushNote(cause instanceof Error ? cause.message : "Sound alerts could not be turned on.");
+      setPushNote(
+        cause instanceof DOMException
+          ? "This browser could not register with its push service — check VPN/firewall access, or try another browser."
+          : cause instanceof Error
+            ? cause.message
+            : "Sound alerts could not be turned on.",
+      );
     } finally {
       setPushBusy(false);
     }

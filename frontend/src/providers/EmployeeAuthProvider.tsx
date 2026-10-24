@@ -37,7 +37,9 @@ export function EmployeeAuthProvider({ children }: { children: ReactNode }) {
     const sync = () => {
       readEmployeeSession().then((account) => {
         if (cancelled || activePortal() === "client") return;
-        setEmployee(account);
+        setEmployee((current) =>
+          JSON.stringify(current) === JSON.stringify(account) ? current : account,
+        );
       });
     };
     readEmployeeSession().then((account) => {
