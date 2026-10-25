@@ -34,6 +34,7 @@ export function IspAdvertsPage() {
     "Register advertising partners and enable or disable their adverts.",
   );
   const [adverts, setAdverts] = useState<Advert[]>([]);
+  const [defaultAdverts, setDefaultAdverts] = useState<Advert[]>([]);
   const [draft, setDraft] = useState<AdvertDraft>(emptyDraft);
   const [editingId, setEditingId] = useState("");
   const [loaded, setLoaded] = useState(false);
@@ -45,10 +46,11 @@ export function IspAdvertsPage() {
   useEffect(() => {
     if (!user || user.status !== "approved" || !user.advertsEnabled) return;
     let stopped = false;
-    apiRequest<{ adverts: Advert[] }>("/api/adverts")
+    apiRequest<{ adverts: Advert[]; defaultAdverts: Advert[] }>("/api/adverts")
       .then((body) => {
         if (!stopped) {
           setAdverts(body.adverts);
+          setDefaultAdverts(body.defaultAdverts ?? []);
           setLoaded(true);
         }
       })
@@ -67,11 +69,14 @@ export function IspAdvertsPage() {
     setDraft((current) => ({ ...current, [field]: value }));
   }
 
-  function changeAdvert(advert: Advert, action: string) {
+  function changeAdvert(advert: Advert & { isDefault?: boolean }, action: string) {
     setBusyId(advert.id);
     setError("");
     setNotice("");
-    apiRequest<{ advert?: Advert }>(`/api/adverts/${advert.id}/${action}`, {
+    const path = advert.isDefault
+      ? `/api/adverts/default/${advert.id}/${action}`
+      : `/api/adverts/${advert.id}/${action}`;
+    apiRequest<{ advert?: Advert }>(path, {
       method: "POST",
       body: "{}",
     })
@@ -84,7 +89,13 @@ export function IspAdvertsPage() {
           }
           setNotice(`${advert.name} was removed.`);
         } else if (body.advert) {
-          setAdverts((current) => current.map((item) => (item.id === advert.id ? body.advert! : item)));
+          const replace = (current: Advert[]) =>
+            current.map((item) => (item.id === advert.id ? body.advert! : item));
+          if (advert.isDefault) {
+            setDefaultAdverts(replace);
+          } else {
+            setAdverts(replace);
+          }
           setNotice(
             body.advert.enabled ? `${advert.name} is enabled.` : `${advert.name} is disabled.`,
           );
@@ -112,11 +123,16 @@ export function IspAdvertsPage() {
     return <Navigate to={clientPage(user, "/account/settings")} replace />;
   }
 
+  const partnerAdverts = [
+    ...defaultAdverts.map((advert) => ({ ...advert, isDefault: true })),
+    ...adverts.map((advert) => ({ ...advert, isDefault: false })),
+  ].sort((a, b) => a.name.localeCompare(b.name));
+
   return (
     <div className="page-shell py-8">
       <PageHeader
         title="Adverts"
-        description="Register advertising partners with their website links, and enable or disable their adverts."
+        description="Register advertising partners, and choose which default and partner adverts run on your portals."
       />
       {error ? (
         <p className="mt-4 notice" role="alert">
@@ -244,11 +260,11 @@ export function IspAdvertsPage() {
         </h2>
         {!loaded && !error ? (
           <p className="mt-4 text-sm text-muted-foreground">Loading adverts…</p>
-        ) : adverts.length === 0 ? (
+        ) : partnerAdverts.length === 0 ? (
           <p className="panel mt-4 p-5 text-sm text-muted-foreground">No partners are registered yet.</p>
         ) : (
           <div className="mt-4 grid gap-4">
-            {adverts.map((advert) => (
+            {partnerAdverts.map((advert) => (
               <article key={advert.id} className="card p-5">
                 <div className="flex flex-wrap items-center justify-between gap-4">
                   <div className="flex min-w-0 items-center gap-4">
@@ -266,6 +282,7 @@ export function IspAdvertsPage() {
                     <div className="min-w-0">
                       <div className="flex flex-wrap items-center gap-2">
                         <h3 className="text-base font-semibold">{advert.name}</h3>
+                        {advert.isDefault ? <StatusBadge tone="neutral">Default</StatusBadge> : null}
                         <StatusBadge tone={advert.enabled ? "active" : "disabled"}>
                           {advert.enabled ? "Enabled" : "Disabled"}
                         </StatusBadge>
@@ -282,16 +299,18 @@ export function IspAdvertsPage() {
                     </div>
                   </div>
                   <div className="flex flex-wrap items-center gap-2">
-                    <SecondaryButton
-                      type="button"
-                      disabled={busyId === advert.id}
-                      onClick={() => {
-                        setEditingId(advert.id);
-                        setDraft({ name: advert.name, website: advert.website, imageDataUrl: advert.imageDataUrl });
-                      }}
-                    >
-                      Edit
-                    </SecondaryButton>
+                    {advert.isDefault ? null : (
+                      <SecondaryButton
+                        type="button"
+                        disabled={busyId === advert.id}
+                        onClick={() => {
+                          setEditingId(advert.id);
+                          setDraft({ name: advert.name, website: advert.website, imageDataUrl: advert.imageDataUrl });
+                        }}
+                      >
+                        Edit
+                      </SecondaryButton>
+                    )}
                     <SecondaryButton
                       type="button"
                       disabled={busyId === advert.id}
@@ -299,13 +318,15 @@ export function IspAdvertsPage() {
                     >
                       {advert.enabled ? "Disable" : "Enable"}
                     </SecondaryButton>
-                    <DestructiveButton
-                      type="button"
-                      disabled={busyId === advert.id}
-                      onClick={() => changeAdvert(advert, "delete")}
-                    >
-                      Delete
-                    </DestructiveButton>
+                    {advert.isDefault ? null : (
+                      <DestructiveButton
+                        type="button"
+                        disabled={busyId === advert.id}
+                        onClick={() => changeAdvert(advert, "delete")}
+                      >
+                        Delete
+                      </DestructiveButton>
+                    )}
                   </div>
                 </div>
               </article>

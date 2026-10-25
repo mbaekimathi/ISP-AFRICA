@@ -788,10 +788,13 @@ def advert_rows(cursor, client_id):
     adverts = list(cursor.fetchall())
     cursor.execute(
         """
-        SELECT partner_name, website, image_data_url FROM company_adverts
-        WHERE enabled = 1
-        ORDER BY partner_name
-        """
+        SELECT c.partner_name, c.website, c.image_data_url FROM company_adverts c
+        LEFT JOIN isp_client_advert_overrides o
+          ON o.advert_id = c.id AND o.client_id = %s
+        WHERE c.enabled = 1 AND (o.enabled IS NULL OR o.enabled = 1)
+        ORDER BY c.partner_name
+        """,
+        (client_id,),
     )
     return adverts + cursor.fetchall()
 

@@ -1932,6 +1932,17 @@ def ensure_schema():
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_client_advert_overrides (
+                  client_id CHAR(36) NOT NULL,
+                  advert_id CHAR(36) NOT NULL,
+                  enabled TINYINT NOT NULL DEFAULT 1,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                  PRIMARY KEY (client_id, advert_id)
+                )
+                """
+            )
             router_jobs.ensure_tables(cursor)
             pppoe_store.ensure_schema(cursor)
             gateway_store.ensure_schema(cursor)
@@ -4850,7 +4861,25 @@ class Handler(BaseHTTPRequestHandler):
             "SELECT * FROM isp_client_adverts WHERE client_id = %s ORDER BY partner_name",
             (client_id,),
         )
-        return {"adverts": [public_advert(row) for row in cursor.fetchall()]}
+        adverts = [public_advert(row) for row in cursor.fetchall()]
+        cursor.execute(
+            """
+            SELECT c.*, o.enabled AS client_enabled
+            FROM company_adverts c
+            LEFT JOIN isp_client_advert_overrides o
+              ON o.advert_id = c.id AND o.client_id = %s
+            WHERE c.enabled = 1
+            ORDER BY c.partner_name
+            """,
+            (client_id,),
+        )
+        defaults = []
+        for row in cursor.fetchall():
+            advert = public_advert(row)
+            if row.get("client_enabled") is not None:
+                advert["enabled"] = bool(row["client_enabled"])
+            defaults.append(advert)
+        return {"adverts": adverts, "defaultAdverts": defaults}
 
     def create_advert(self, cursor, payload, token):
         client_id = self.require_advert_client(cursor, token)
@@ -4867,6 +4896,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def change_advert(self, cursor, advert_path, payload, token):
         client_id = self.require_advert_client(cursor, token)
+        if advert_path.startswith("default/"):
+            return self.change_default_advert(cursor, advert_path.removeprefix("default/"), client_id)
         advert_id, _, action = advert_path.partition("/")
         self.isp_advert_row(cursor, client_id, advert_id)
         if action == "edit":
@@ -4893,6 +4924,29 @@ class Handler(BaseHTTPRequestHandler):
             )
             return {"ok": True}, None
         raise ApiError(404, "That account request was not found.")
+
+    def change_default_advert(self, cursor, advert_path, client_id):
+        advert_id, _, action = advert_path.partition("/")
+        if action not in ("enable", "disable"):
+            raise ApiError(404, "That account request was not found.")
+        cursor.execute(
+            "SELECT * FROM company_adverts WHERE id = %s AND enabled = 1",
+            (advert_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise ApiError(404, "That partner advert was not found.")
+        cursor.execute(
+            """
+            INSERT INTO isp_client_advert_overrides (client_id, advert_id, enabled)
+            VALUES (%s, %s, %s)
+            ON DUPLICATE KEY UPDATE enabled = VALUES(enabled)
+            """,
+            (client_id, advert_id, 1 if action == "enable" else 0),
+        )
+        advert = public_advert(row)
+        advert["enabled"] = action == "enable"
+        return {"advert": advert}, None
 
     def require_notification_client(self, cursor, token):
         client_id = session_account_id(cursor, token, "client")
