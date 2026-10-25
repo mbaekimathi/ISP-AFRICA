@@ -182,8 +182,6 @@ def _verify_stk(settings, checkout_id):
 
 
 def _credit_stk(connect, checkout_id, receipt, amount, msisdn, raw):
-    pending = None
-    vouchers = []
     with connect() as db:
         with db.cursor() as cursor:
             outcome = gateway_store.confirm_collection(
@@ -203,10 +201,12 @@ def _credit_stk(connect, checkout_id, receipt, amount, msisdn, raw):
                 db.commit()
                 _notify_unmatched(connect, checkout_id, "amount-mismatch")
                 return
-            pending, vouchers = fulfil_stk_credit(cursor, checkout_id)
+            fulfil_stk_credit(cursor, checkout_id)
             db.commit()
-    if pending:
-        _authorize_hotspot(connect, pending, vouchers)
+    # The buying device stays captive until its Done click calls
+    # /hotspot/connect — authorizing on credit would close the captive
+    # window before the voucher screen is even seen. sweep() connects
+    # anyone whose window died first.
     print(f"event=gateway-collection checkout={checkout_id[-6:]} state=confirmed", flush=True)
 
 
@@ -627,6 +627,26 @@ def sweep(connect):
                 _fail_direct(connect, row["source"], checkout_id, verified)
         except Exception as error:
             print(f"event=gateway-sweep checkout={str(row.get('checkout_id'))[-6:]} error={type(error).__name__}", flush=True)
+    # Paid hotspot purchases normally wait for the buyer's Done click. When
+    # the captive window died first — killed popup, dead phone, walked away —
+    # this pass connects them once the grace window has passed, so a paid
+    # bundle is never stranded on the captive side.
+    try:
+        with connect() as db:
+            with db.cursor() as cursor:
+                waiting = portal_server.hotspot_unauthorized(cursor, portal_server.HOTSPOT_CONNECT_GRACE)
+    except Exception:
+        waiting = []
+    for row in waiting:
+        try:
+            pending = portal_server.hotspot_pending_from_row(row)
+            with connect() as db:
+                with db.cursor() as cursor:
+                    vouchers = portal_server.issue_hotspot_vouchers(cursor, pending)
+                    db.commit()
+            _authorize_hotspot(connect, pending, vouchers)
+        except Exception as error:
+            print(f"event=hotspot-connect purchase={str(row.get('purchase_id'))[-6:]} error={type(error).__name__}", flush=True)
 
 
 def _age_ok(row):
@@ -640,15 +660,12 @@ def _age_ok(row):
 def _fulfil_direct(connect, checkout_id):
     """Credit a verified non-pooled payment — fulfil_stk_credit's claim
     guards make a repeat call a no-op, so the poll and this sweep can never
-    double-credit."""
-    pending = None
-    vouchers = []
+    double-credit. The device connects on its Done click or the sweep's
+    hotspot_unauthorized pass."""
     with connect() as db:
         with db.cursor() as cursor:
-            pending, vouchers = fulfil_stk_credit(cursor, checkout_id)
+            fulfil_stk_credit(cursor, checkout_id)
             db.commit()
-    if pending:
-        _authorize_hotspot(connect, pending, vouchers)
 
 
 def _fail_direct(connect, source, checkout_id, reason):

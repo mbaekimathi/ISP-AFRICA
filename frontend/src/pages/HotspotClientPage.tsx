@@ -125,8 +125,26 @@ type GuestTransaction = {
   current: boolean;
 };
 
+type GuestDevice = {
+  id: string;
+  code: string;
+  status: string;
+  seconds: number;
+  secondsLeft: number | null;
+  mac: string;
+  ip: string;
+  payer: boolean;
+  claimed?: boolean;
+  online: boolean;
+  connected: boolean;
+  sessionTimeLeft: string;
+  issuedAt: string | null;
+  usedAt: string | null;
+};
+
 type GuestDetail = {
   client: GuestClient;
+  devices: GuestDevice[];
   vouchers: Voucher[];
   transactions: GuestTransaction[];
   usage: {
@@ -168,6 +186,18 @@ function duration(seconds: number) {
   if (days) return `${days}d ${hours}h`;
   if (hours) return `${hours}h ${minutes}m`;
   return `${minutes}m`;
+}
+
+function deviceState(device: GuestDevice): { label: string; tone: "active" | "due" | "critical" | "paused" | "neutral" } {
+  if (device.online) return { label: "Online", tone: "active" };
+  if (device.claimed) return { label: "New owner", tone: "neutral" };
+  if (device.status === "issued") return { label: "Not redeemed", tone: "neutral" };
+  if (device.status === "void") return { label: "Void", tone: "paused" };
+  if (device.status === "pending") return { label: "Pending", tone: "due" };
+  if (device.status === "failed") return { label: "Failed", tone: "critical" };
+  if (device.connected) return { label: "On network", tone: "due" };
+  if (device.secondsLeft != null && device.secondsLeft > 0) return { label: "Time left", tone: "due" };
+  return { label: "Used up", tone: "neutral" };
 }
 
 function money(value: string) {
@@ -352,6 +382,7 @@ export function HotspotClientPage() {
   const [voucherCount, setVoucherCount] = useState(1);
   const [rechargePeriods, setRechargePeriods] = useState(1);
   const [copied, setCopied] = useState(false);
+  const [copiedCode, setCopiedCode] = useState("");
   const [menuOpen, setMenuOpen] = useState(false);
   const [menuPos, setMenuPos] = useState<{ top: number; left: number } | null>(null);
   const menuButtonRef = useRef<HTMLButtonElement>(null);
@@ -440,6 +471,19 @@ export function HotspotClientPage() {
     };
     if (navigator.clipboard?.writeText) {
       navigator.clipboard.writeText(codes).then(done, done);
+    } else {
+      done();
+    }
+  }
+
+  function copyCode(code: string) {
+    if (!code) return;
+    const done = () => {
+      setCopiedCode(code);
+      window.setTimeout(() => setCopiedCode(""), 2500);
+    };
+    if (navigator.clipboard?.writeText) {
+      navigator.clipboard.writeText(code).then(done, done);
     } else {
       done();
     }
@@ -595,7 +639,9 @@ export function HotspotClientPage() {
             </div>
           </div>
           <div className="ml-auto flex min-w-0 flex-col gap-1.5">
-            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Voucher</p>
+            <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+              {detail.vouchers.length > 1 ? `Vouchers (${detail.vouchers.length})` : "Voucher"}
+            </p>
             <div className="flex items-center gap-2 rounded-xl border border-border bg-surface-muted/50 px-3 py-2">
               <Ticket className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
               <code className="min-w-0 truncate font-mono text-sm font-semibold tracking-wide">
@@ -654,6 +700,93 @@ export function HotspotClientPage() {
 
       <div className="mt-4 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
         <div className="grid min-w-0 gap-4">
+          <section className="card overflow-hidden">
+            <CardHeader icon={<Ticket className="h-4 w-4" />} title="Devices & vouchers">
+              <StatusBadge tone="neutral">
+                {`${detail.devices.filter((device) => device.status === "used").length}/${detail.devices.length} used`}
+              </StatusBadge>
+            </CardHeader>
+            <div className="px-5 pb-5 pt-4">
+              {detail.devices.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  No vouchers or devices are linked to this purchase yet — they appear once the payment is confirmed.
+                </p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="data-table min-w-[44rem]">
+                    <thead className="border-b border-border text-xs text-muted-foreground">
+                      <tr>
+                        <th className="px-2 py-2 font-medium">Device</th>
+                        <th className="px-2 py-2 font-medium">Voucher</th>
+                        <th className="px-2 py-2 font-medium">Status</th>
+                        <th className="px-2 py-2 font-medium">Time left</th>
+                        <th className="px-2 py-2 font-medium">Redeemed</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detail.devices.map((device, index) => {
+                        const state = deviceState(device);
+                        return (
+                          <tr key={device.id || device.mac || index} className="border-b border-border last:border-0">
+                            <td className="px-2 py-2">
+                              <div className="font-medium">{device.payer ? "Paying device" : `Device ${index + 1}`}</div>
+                              <div className="text-xs text-muted-foreground">
+                                {device.mac || "—"}
+                                {device.ip ? ` · ${device.ip}` : ""}
+                              </div>
+                            </td>
+                            <td className="px-2 py-2">
+                              {device.code ? (
+                                <span className="inline-flex items-center gap-1.5">
+                                  <code className="font-mono text-xs font-semibold text-primary">{device.code}</code>
+                                  <button
+                                    type="button"
+                                    aria-label={`Copy voucher ${device.code}`}
+                                    title="Copy voucher code"
+                                    className="text-muted-foreground transition hover:text-foreground"
+                                    onClick={() => copyCode(device.code)}
+                                  >
+                                    {copiedCode === device.code ? (
+                                      <Check className="h-3.5 w-3.5 text-success" />
+                                    ) : (
+                                      <Copy className="h-3.5 w-3.5" />
+                                    )}
+                                  </button>
+                                </span>
+                              ) : (
+                                "—"
+                              )}
+                            </td>
+                            <td className="px-2 py-2">
+                              <StatusBadge tone={state.tone}>{state.label}</StatusBadge>
+                            </td>
+                            <td className="px-2 py-2 text-xs">
+                              {device.sessionTimeLeft
+                                ? device.sessionTimeLeft
+                                : device.secondsLeft != null
+                                  ? device.secondsLeft > 0
+                                    ? duration(device.secondsLeft)
+                                    : "—"
+                                  : device.status === "issued"
+                                    ? `Up to ${duration(device.seconds)}`
+                                    : "—"}
+                            </td>
+                            <td className="px-2 py-2 text-xs text-muted-foreground">{device.usedAt ?? "—"}</td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    One voucher connects one device. Unused codes can be typed on another device's portal — a payment
+                    from any of these devices with the same M-Pesa number stays under this guest. A device that pays
+                    under a different number moves to its own guest and shows "New owner" here.
+                  </p>
+                </div>
+              )}
+            </div>
+          </section>
+
           <section className="card overflow-hidden">
             <CardHeader icon={<Activity className="h-4 w-4" />} title="Live now">
               <StatusBadge

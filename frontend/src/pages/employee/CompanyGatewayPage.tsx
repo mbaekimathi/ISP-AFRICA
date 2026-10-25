@@ -110,21 +110,6 @@ type AuditRow = {
 
 type NoticeRow = { id: string; kind: string; subject: string; detail: string; created_at: string };
 
-type GatewaySettings = {
-  configured: boolean;
-  initiatorName?: string;
-  initiatorPasswordSet?: boolean;
-  payoutShortcode?: string;
-  status?: string | null;
-  killSwitch?: boolean;
-  commissionPercent?: string;
-  commissionFlat?: string;
-  defaultHoldHours?: number | null;
-  minPayout?: string;
-  maxPayoutPerTx?: string;
-  payoutFeeEstimate?: string;
-};
-
 type DirectoryEntry = { id: string; name: string; email: string; status: string };
 
 type HeldRow = {
@@ -140,7 +125,7 @@ type HeldRow = {
   hold: { code: string; message: string } | null;
 };
 
-type Tab = "held" | "payments" | "payouts" | "batches" | "suspense" | "pending" | "audit" | "notices" | "settings";
+type Tab = "held" | "payments" | "payouts" | "batches" | "suspense" | "pending" | "audit" | "notices";
 
 const holdTone: Record<string, StatusTone> = {
   eligible: "pending",
@@ -245,7 +230,6 @@ export function CompanyGatewayPage() {
   const [assignTarget, setAssignTarget] = useState("");
   const [assignBusy, setAssignBusy] = useState(false);
   const [directory, setDirectory] = useState<DirectoryEntry[] | null>(null);
-  const [settings, setSettings] = useState<GatewaySettings | null>(null);
   const [payoutBusy, setPayoutBusy] = useState<string | null>(null);
 
   const loadOverview = useCallback(() => {
@@ -277,7 +261,6 @@ export function CompanyGatewayPage() {
     if (tab === "pending") apiRequest<{ pending: PendingRow[] }>(`${base}/pending-changes`).then((b) => setPendingRows(b.pending)).catch(fail);
     if (tab === "audit") apiRequest<{ audit: AuditRow[] }>(`${base}/audit`).then((b) => setAudit(b.audit)).catch(fail);
     if (tab === "notices") apiRequest<{ notifications: NoticeRow[] }>(`${base}/notifications`).then((b) => setNotices(b.notifications)).catch(fail);
-    if (tab === "settings") apiRequest<GatewaySettings>(`${base}/settings`).then(setSettings).catch(fail);
     if (tab === "suspense" && directory === null)
       apiRequest<{ directory: DirectoryEntry[] }>(`${base}/clients`)
         .then((b) => setDirectory(b.directory))
@@ -399,7 +382,6 @@ export function CompanyGatewayPage() {
             { id: "pending", label: "Pending" },
             { id: "audit", label: "Audit" },
             { id: "notices", label: "Notices" },
-            { id: "settings", label: "Settings" },
           ]}
         />
       </div>
@@ -734,17 +716,6 @@ export function CompanyGatewayPage() {
         </section>
       ) : null}
 
-      {tab === "settings" ? (
-        <GatewaySettingsSection
-          settings={settings}
-          onSaved={(body) => {
-            setSettings(body);
-            loadOverview();
-          }}
-          onError={(text) => setMessage(text)}
-        />
-      ) : null}
-
       {transferFor ? (
         <TransferDialog
           row={transferFor}
@@ -892,192 +863,6 @@ function TransferDialog({
         </Dialog.Content>
       </Dialog.Portal>
     </Dialog.Root>
-  );
-}
-
-function GatewaySettingsSection({
-  settings,
-  onSaved,
-  onError,
-}: {
-  settings: GatewaySettings | null;
-  onSaved: (settings: GatewaySettings) => void;
-  onError: (message: string) => void;
-}) {
-  const [draft, setDraft] = useState<Record<string, string>>({});
-  const [busy, setBusy] = useState(false);
-  const [note, setNote] = useState("");
-
-  if (settings === null) {
-    return <p className="mt-4 text-sm text-muted-foreground">Loading…</p>;
-  }
-  if (!settings.configured) {
-    return (
-      <p className="notice mt-4" role="status">
-        Save the company Daraja credentials under company payment settings first — the
-        gateway ops knobs appear here afterwards.
-      </p>
-    );
-  }
-
-  const value = (key: string, fallback: string | number | null | undefined) =>
-    draft[key] ?? (fallback == null ? "" : String(fallback));
-
-  function save(updates: Record<string, unknown>) {
-    setBusy(true);
-    setNote("");
-    onError("");
-    apiRequest<{ outcome: string; settings: GatewaySettings }>(
-      "/api/employee/company/gateway/settings",
-      { method: "POST", body: JSON.stringify(updates) },
-    )
-      .then((body) => {
-        onSaved(body.settings);
-        setDraft({});
-        setNote(body.outcome === "unchanged" ? "Nothing changed." : "Saved.");
-      })
-      .catch((cause: unknown) =>
-        onError(cause instanceof Error ? cause.message : "Gateway settings could not be saved."))
-      .finally(() => setBusy(false));
-  }
-
-  return (
-    <section className="card mt-4">
-      <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
-        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><ShieldCheck className="h-4 w-4" /></span>
-        <h2 className="text-sm font-semibold">Gateway controls</h2>
-        <div className="ml-auto flex items-center gap-2">
-          <StatusBadge tone={settings.killSwitch ? "critical" : settings.status === "active" ? "active" : "paused"}>
-            {settings.killSwitch ? "kill switch on" : (settings.status ?? "unknown")}
-          </StatusBadge>
-          <SecondaryButton
-            type="button"
-            disabled={busy}
-            onClick={() => save({ killSwitch: !settings.killSwitch })}
-          >
-            {settings.killSwitch ? "Release kill switch" : "Engage kill switch"}
-          </SecondaryButton>
-          <SecondaryButton
-            type="button"
-            disabled={busy}
-            onClick={() => save({ status: settings.status === "active" ? "suspended" : "active" })}
-          >
-            {settings.status === "active" ? "Suspend" : "Activate"}
-          </SecondaryButton>
-        </div>
-      </header>
-
-      {note ? <p className="mx-5 mt-4 notice border-success-border bg-success-soft/60" role="status">{note}</p> : null}
-
-      <div className="grid gap-4 px-5 py-5 sm:grid-cols-2">
-        <label className="grid gap-1.5 text-sm font-medium">
-          Initiator name
-          <input
-            className="field"
-            value={value("initiatorName", settings.initiatorName)}
-            onChange={(e) => setDraft((d) => ({ ...d, initiatorName: e.target.value }))}
-          />
-        </label>
-        <label className="grid gap-1.5 text-sm font-medium">
-          Initiator password
-          <input
-            className="field"
-            type="password"
-            autoComplete="new-password"
-            placeholder={settings.initiatorPasswordSet ? "Saved — type to replace" : "Not set"}
-            value={draft.initiatorPassword ?? ""}
-            onChange={(e) => setDraft((d) => ({ ...d, initiatorPassword: e.target.value }))}
-          />
-        </label>
-        <label className="grid gap-1.5 text-sm font-medium">
-          Payout shortcode
-          <input
-            className="field"
-            inputMode="numeric"
-            placeholder="Defaults to the collection shortcode"
-            value={value("payoutShortcode", settings.payoutShortcode)}
-            onChange={(e) => setDraft((d) => ({ ...d, payoutShortcode: e.target.value }))}
-          />
-        </label>
-        <label className="grid gap-1.5 text-sm font-medium">
-          Default hold hours
-          <input
-            className="field"
-            inputMode="numeric"
-            value={value("defaultHoldHours", settings.defaultHoldHours)}
-            onChange={(e) => setDraft((d) => ({ ...d, defaultHoldHours: e.target.value }))}
-          />
-        </label>
-        <label className="grid gap-1.5 text-sm font-medium">
-          Commission %
-          <input
-            className="field"
-            inputMode="decimal"
-            value={value("commissionPercent", settings.commissionPercent)}
-            onChange={(e) => setDraft((d) => ({ ...d, commissionPercent: e.target.value }))}
-          />
-        </label>
-        <label className="grid gap-1.5 text-sm font-medium">
-          Commission flat (KES)
-          <input
-            className="field"
-            inputMode="decimal"
-            value={value("commissionFlat", settings.commissionFlat)}
-            onChange={(e) => setDraft((d) => ({ ...d, commissionFlat: e.target.value }))}
-          />
-        </label>
-        <label className="grid gap-1.5 text-sm font-medium">
-          Minimum payout (KES)
-          <input
-            className="field"
-            inputMode="decimal"
-            value={value("minPayout", settings.minPayout)}
-            onChange={(e) => setDraft((d) => ({ ...d, minPayout: e.target.value }))}
-          />
-        </label>
-        <label className="grid gap-1.5 text-sm font-medium">
-          Max per payout (KES)
-          <input
-            className="field"
-            inputMode="decimal"
-            placeholder="0 = no split cap"
-            value={value("maxPayoutPerTx", settings.maxPayoutPerTx)}
-            onChange={(e) => setDraft((d) => ({ ...d, maxPayoutPerTx: e.target.value }))}
-          />
-        </label>
-        <label className="grid gap-1.5 text-sm font-medium">
-          Payout fee estimate (KES)
-          <input
-            className="field"
-            inputMode="decimal"
-            value={value("payoutFeeEstimate", settings.payoutFeeEstimate)}
-            onChange={(e) => setDraft((d) => ({ ...d, payoutFeeEstimate: e.target.value }))}
-          />
-        </label>
-      </div>
-
-      <div className="border-t border-border px-5 py-4">
-        <PrimaryButton
-          type="button"
-          disabled={busy || Object.keys(draft).length === 0}
-          onClick={() => {
-            const updates: Record<string, unknown> = {};
-            if (draft.initiatorName !== undefined) updates.initiatorName = draft.initiatorName;
-            if (draft.initiatorPassword) updates.initiatorPassword = draft.initiatorPassword;
-            if (draft.payoutShortcode !== undefined) updates.payoutShortcode = draft.payoutShortcode;
-            if (draft.defaultHoldHours !== undefined) updates.defaultHoldHours = draft.defaultHoldHours;
-            if (draft.commissionPercent !== undefined) updates.commissionPercent = draft.commissionPercent;
-            if (draft.commissionFlat !== undefined) updates.commissionFlat = draft.commissionFlat;
-            if (draft.minPayout !== undefined) updates.minPayout = draft.minPayout;
-            if (draft.maxPayoutPerTx !== undefined) updates.maxPayoutPerTx = draft.maxPayoutPerTx;
-            if (draft.payoutFeeEstimate !== undefined) updates.payoutFeeEstimate = draft.payoutFeeEstimate;
-            save(updates);
-          }}
-        >
-          Save gateway settings
-        </PrimaryButton>
-      </div>
-    </section>
   );
 }
 

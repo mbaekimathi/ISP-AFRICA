@@ -8,7 +8,7 @@ import socket
 import time
 import uuid
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 import pppoe_service
 import routeros_api
@@ -2793,15 +2793,74 @@ def list_transactions(cursor, client_id, query):
     }
 
 
+def hotspot_guest_key(phone, mac, fallback=""):
+    """Local owner key — the same shape hotspot_mac_owners emits."""
+    phone = str(phone or "").strip()
+    if phone:
+        return f"phone:{phone}"
+    mac = str(mac or "").strip().upper()
+    return f"mac:{mac}" if mac else fallback
+
+
+def hotspot_mac_owners(cursor, client_id):
+    """The guest group that currently owns each hotspot device MAC.
+
+    A paid purchase binds the paying MAC to its owner and a voucher
+    redemption binds the redeeming MAC to the purchase's owner — the
+    newest binding wins, so a device that changed hands stops counting
+    under its old guest while staying there in history. View-only: this
+    only decides which MACs a guest tracks or re-grants, it never touches
+    the router, so a device mid-surf is never dropped.
+    """
+    cursor.execute(
+        """
+        SELECT mac, device_id, owner FROM (
+            SELECT UPPER(h.mac) AS mac, h.device_id,
+                   COALESCE(
+                       NULLIF(CONCAT('phone:', h.phone), 'phone:'),
+                       NULLIF(CONCAT('mac:', UPPER(h.mac)), 'mac:'),
+                       CONCAT('purchase:', h.id)
+                   ) AS owner,
+                   COALESCE(h.paid_at, h.created_at) AS at_time
+            FROM hotspot_purchases h
+            WHERE h.client_id = %s AND h.status = 'paid' AND h.mac <> ''
+            UNION ALL
+            SELECT UPPER(v.redeemed_mac), h.device_id,
+                   COALESCE(
+                       NULLIF(CONCAT('phone:', h.phone), 'phone:'),
+                       NULLIF(CONCAT('mac:', UPPER(h.mac)), 'mac:'),
+                       CONCAT('purchase:', h.id)
+                   ),
+                   v.used_at
+            FROM hotspot_vouchers v
+            JOIN hotspot_purchases h ON h.id = v.purchase_id
+            WHERE h.client_id = %s AND v.redeemed_mac <> '' AND v.used_at IS NOT NULL
+        ) events
+        ORDER BY at_time DESC
+        """,
+        (client_id, client_id),
+    )
+    owners = {}
+    for row in cursor.fetchall():
+        key = (str(row["device_id"] or ""), row["mac"])
+        if key not in owners:
+            owners[key] = row["owner"]
+    return owners
+
+
 def list_hotspot_clients(cursor, client_id, query):
-    """Hotspot devices: one row per paying device, latest payment first.
+    """Hotspot guests: one row per paying user, latest payment first.
 
     Hotspot buyers never become pppoe_subscribers rows — they exist only as
     purchases and single-use vouchers, so the clients page reads from them.
-    Every M-Pesa prompt writes its own purchase row, so a device that pays
+    Every M-Pesa prompt writes its own purchase row, so a user that pays
     every week would otherwise repeat in the list. Purchases group by the
-    buyer's MAC (phone when the MAC was not captured) and the newest purchase
-    carries the row — opening it shows every transaction for that device.
+    router and the paying phone — a second device paying with the same
+    number joins the same guest and its MAC joins the gadget list, while a
+    different number stays its own guest so one user's payment never merges
+    with another's. The buyer's MAC keys the group only when no phone was
+    captured, and the newest purchase carries the row — opening it shows
+    every transaction for that guest.
     """
     where = ["h.client_id = %s", "h.deleted = 0"]
     args = [client_id]
@@ -2851,6 +2910,9 @@ def list_hotspot_clients(cursor, client_id, query):
         args,
     )
     items = cursor.fetchall()
+    # A MAC belongs to whichever guest bound it last — a device that paid or
+    # redeemed under another number stops counting toward this guest.
+    owners = hotspot_mac_owners(cursor, client_id)
     # Group the purchases into devices — items arrive newest first, so each
     # group's lead purchase is that device's latest payment and the group
     # order is already latest-payment-first.
@@ -2860,7 +2922,13 @@ def list_hotspot_clients(cursor, client_id, query):
     for item in items:
         mac = str(item["mac"] or "").strip().upper()
         phone = str(item["phone"] or "").strip()
-        key = f"mac:{mac}" if mac else f"phone:{phone}" if phone else f"purchase:{item['id']}"
+        key = (
+            f"{item['device_id']}|phone:{phone}"
+            if phone
+            else f"{item['device_id']}|mac:{mac}"
+            if mac
+            else f"purchase:{item['id']}"
+        )
         group = by_key.get(key)
         if group is None:
             group = {"lead": item, "items": [], "macs": set()}
@@ -2869,6 +2937,10 @@ def list_hotspot_clients(cursor, client_id, query):
         group["items"].append(item)
         item_macs = {mac} | {m.strip().upper() for m in (item.get("device_macs") or "").split(",") if m.strip()}
         item_macs.discard("")
+        guest_key = hotspot_guest_key(phone, mac, f"purchase:{item['id']}")
+        item_macs = {
+            m for m in item_macs if owners.get((str(item["device_id"] or ""), m)) in (None, guest_key)
+        }
         group["macs"] |= item_macs
         # One /ip/hotspot/host scan per reachable router — it lists every
         # device associated to the hotspot, so a registered device shows
@@ -3039,10 +3111,96 @@ def hotspot_usage(cursor, client_id, query):
 
 HOTSPOT_VALIDITY_SECONDS = {"hours": 3600, "days": 86400, "weeks": 604800, "months": 2592000}
 
+# Byte-rule columns shared by every hotspot package lookup — the client's own
+# package wins, the linked company package fills what it leaves unset.
+HOTSPOT_LIMIT_COLUMNS = """
+               COALESCE(p.data_allowance_amount, c.data_allowance_amount) AS data_allowance_amount,
+               COALESCE(p.data_allowance_unit, c.data_allowance_unit) AS data_allowance_unit,
+               COALESCE(p.data_allowance_action, c.data_allowance_action) AS data_allowance_action,
+               COALESCE(p.data_throttle_download, c.data_throttle_download) AS data_throttle_download,
+               COALESCE(p.data_throttle_upload, c.data_throttle_upload) AS data_throttle_upload,
+               COALESCE(p.data_reset_amount, c.data_reset_amount) AS data_reset_amount,
+               COALESCE(p.data_reset_unit, c.data_reset_unit) AS data_reset_unit,
+               COALESCE(p.fair_use_amount, c.fair_use_amount) AS fair_use_amount,
+               COALESCE(p.fair_use_unit, c.fair_use_unit) AS fair_use_unit,
+               COALESCE(p.fair_use_action, c.fair_use_action) AS fair_use_action,
+               COALESCE(p.fair_throttle_download, c.fair_throttle_download) AS fair_throttle_download,
+               COALESCE(p.fair_throttle_upload, c.fair_throttle_upload) AS fair_throttle_upload,
+               COALESCE(p.fair_reset_amount, c.fair_reset_amount) AS fair_reset_amount,
+               COALESCE(p.fair_reset_unit, c.fair_reset_unit) AS fair_reset_unit
+"""
+
+
+def hotspot_limit_bytes(amount, unit):
+    """A package byte threshold in bytes, or None when unset."""
+    unit_text = str(unit or "").upper()
+    if amount is None or unit_text not in {"MB", "GB"}:
+        return None
+    try:
+        value = Decimal(str(amount)) * (1024 ** 2 if unit_text == "MB" else 1024 ** 3)
+    except (InvalidOperation, ValueError):
+        return None
+    return int(value) if value > 0 else None
+
+
+def hotspot_byte_limits(row):
+    """The byte rules a package puts on a hotspot grant, keyed by limit name.
+
+    'data' is the data allowance, 'fair' the fair-use threshold. Each entry
+    holds the byte threshold, the action at the threshold, the throttle rate
+    for 'throttle' actions, and the reset window in seconds when the package
+    resets the counter periodically.
+    """
+    limits = {}
+    for key, amount_f, unit_f, action_f, down_f, up_f, reset_a, reset_u in (
+        (
+            "data", "data_allowance_amount", "data_allowance_unit", "data_allowance_action",
+            "data_throttle_download", "data_throttle_upload", "data_reset_amount", "data_reset_unit",
+        ),
+        (
+            "fair", "fair_use_amount", "fair_use_unit", "fair_use_action",
+            "fair_throttle_download", "fair_throttle_upload", "fair_reset_amount", "fair_reset_unit",
+        ),
+    ):
+        total = hotspot_limit_bytes(row.get(amount_f), row.get(unit_f))
+        action = str(row.get(action_f) or "")
+        if not total or action not in ("throttle", "disconnect"):
+            continue
+        entry = {"bytes": total, "action": action}
+        if action == "throttle":
+            down_speed = int(row.get(down_f) or 0)
+            up_speed = int(row.get(up_f) or 0)
+            if not down_speed and not up_speed:
+                continue
+            entry["rate"] = f"{up_speed}M/{down_speed}M"
+        reset_amount = row.get(reset_a)
+        entry["reset"] = (
+            int(reset_amount) * HOTSPOT_VALIDITY_SECONDS.get(str(row.get(reset_u) or "days"), 86400)
+            if reset_amount
+            else None
+        )
+        limits[key] = entry
+    return limits
+
+
+def hotspot_native_cap(limits):
+    """Byte ceilings the router can enforce itself through limit-bytes-total.
+
+    A limit with a reset window frees the client each period, which the
+    native counter cannot express — those stay with the limit sweep. Only
+    non-resetting disconnect thresholds land on the grant.
+    """
+    caps = [
+        limit["bytes"]
+        for limit in limits.values()
+        if limit["action"] == "disconnect" and not limit["reset"]
+    ]
+    return min(caps) if caps else None
+
 
 def hotspot_client_row(cursor, client_id, purchase_id):
     cursor.execute(
-        """
+        f"""
         SELECT h.id, h.client_id, h.device_id, h.package_id, h.phone, h.amount, h.checkout_id,
                h.mac, h.ip, h.devices, h.periods, h.username, h.password, h.status, h.authorized,
                h.mpesa_code, h.paid_at, h.created_at, h.deleted, h.ended_at,
@@ -3051,7 +3209,8 @@ def hotspot_client_row(cursor, client_id, purchase_id):
                COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
                COALESCE(p.validity_unit, c.validity_unit, 'days') AS validity_unit,
                COALESCE(p.download_mbps, c.download_mbps, 0) AS download_mbps,
-               COALESCE(p.upload_mbps, c.upload_mbps, 0) AS upload_mbps
+               COALESCE(p.upload_mbps, c.upload_mbps, 0) AS upload_mbps,
+               {HOTSPOT_LIMIT_COLUMNS}
         FROM hotspot_purchases h
         LEFT JOIN isp_mikrotik_devices d ON d.id = h.device_id
         LEFT JOIN isp_packages p ON p.id = h.package_id
@@ -3122,17 +3281,22 @@ def radacct_for_usernames(cursor, usernames, sql, extra_args=()):
 
 
 def hotspot_device_purchases(cursor, client_id, row):
-    """Every purchase the same device made — the transactions list.
+    """Every purchase the same guest made — the transactions list.
 
-    Devices are keyed the same way list_hotspot_clients groups them: buyer
-    MAC, phone when the MAC was not captured, the row itself otherwise.
+    Guests key the same way list_hotspot_clients groups them: the paying
+    phone on the same router, so a payment from another of the guest's
+    devices lands here instead of a second row — but never a stranger's
+    payment, since a different number is a different guest. The buyer's MAC
+    keys the group only when no phone was captured, the row itself
+    otherwise.
     """
     mac = str(row.get("mac") or "").strip().upper()
     phone = str(row.get("phone") or "").strip()
-    if mac:
-        clause, args = "UPPER(h.mac) = %s", [mac]
-    elif phone:
-        clause, args = "h.mac = '' AND h.phone = %s", [phone]
+    router = str(row.get("device_id") or "")
+    if phone:
+        clause, args = "h.device_id = %s AND h.phone = %s", [router, phone]
+    elif mac:
+        clause, args = "h.device_id = %s AND UPPER(h.mac) = %s AND h.phone = ''", [router, mac]
     else:
         clause, args = "h.id = %s", [str(row["id"])]
     cursor.execute(
@@ -3211,13 +3375,30 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
     live = []
     hosts = []
     router_reachable = False
-    macs = [row.get("mac")] + [voucher["redeemed_mac"] for voucher in vouchers]
+    # Track only MACs this guest still owns — a device a newer payment or
+    # redemption under another number claimed keeps its history here but
+    # stops matching this guest's live view, so its current owner is never
+    # shown surfing under someone else's account.
+    router = str(row.get("device_id") or "")
+    guest_key = hotspot_guest_key(row.get("phone"), row.get("mac"), f"purchase:{row['id']}")
+    owners = hotspot_mac_owners(cursor, client_id)
+
+    def mac_kept(mac):
+        return owners.get((router, mac)) in (None, guest_key)
+
+    payer_mac = str(row.get("mac") or "").strip().upper()
+    macs = []
+    for candidate in [payer_mac] + [voucher["redeemed_mac"] for voucher in vouchers]:
+        candidate = str(candidate or "").strip().upper()
+        if candidate and candidate not in macs and mac_kept(candidate):
+            macs.append(candidate)
     mac_labels = {}
-    if row.get("mac"):
-        mac_labels[str(row["mac"]).upper()] = "This device"
+    if payer_mac and payer_mac in macs:
+        mac_labels[payer_mac] = "This device"
     for voucher in vouchers:
-        if voucher.get("redeemed_mac"):
-            mac_labels[str(voucher["redeemed_mac"]).upper()] = voucher["code"]
+        redeemed = str(voucher.get("redeemed_mac") or "").upper()
+        if redeemed and redeemed in macs:
+            mac_labels[redeemed] = voucher["code"]
     if row.get("tunnel_ip") and row.get("api_secret"):
         try:
             secret = routeros_api.open_password(row["api_secret"])
@@ -3230,7 +3411,8 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
             live = []
             hosts = []
     live_macs = {entry["mac"] for entry in live}
-    hosts = [host for host in hosts if host["mac"] not in live_macs and not host["authorized"]]
+    all_hosts = list(hosts)
+    hosts = [host for host in all_hosts if host["mac"] not in live_macs and not host["authorized"]]
     for host in hosts:
         host["label"] = mac_labels.get(host["mac"]) or host["mac"]
     for entry in live:
@@ -3302,6 +3484,65 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
     timeline = [event for event in timeline if event["at"]]
     timeline.sort(key=lambda event: event["at"], reverse=True)
 
+    # One slot per voucher: the paying device redeems the first code
+    # automatically, the rest wait issued until another device types them in.
+    # Each entry links the code to the device using it — MAC, IP, whether it
+    # is on the router right now, and how much paid time is left. 'claimed'
+    # marks a device that has since changed hands to another guest.
+    live_by_username = {entry["username"]: entry for entry in live}
+    host_by_mac = {host["mac"]: host for host in all_hosts}
+    now = datetime.now()
+    devices = []
+    for voucher in vouchers:
+        mac = str(voucher.get("redeemed_mac") or "").strip().upper()
+        live_entry = live_by_username.get(voucher["username"])
+        seconds_left = None
+        if voucher["status"] == "used" and voucher.get("used_at"):
+            remaining = voucher["used_at"] + timedelta(seconds=int(voucher["seconds"] or 0)) - now
+            seconds_left = max(0, int(remaining.total_seconds()))
+        devices.append(
+            {
+                "id": voucher["id"],
+                "code": voucher["code"],
+                "status": voucher["status"],
+                "seconds": int(voucher["seconds"] or 0),
+                "secondsLeft": seconds_left,
+                "mac": mac,
+                "ip": str(voucher.get("redeemed_ip") or ""),
+                "payer": bool(mac and mac == payer_mac),
+                "claimed": bool(mac and not mac_kept(mac)),
+                "online": live_entry is not None,
+                "connected": live_entry is not None or mac in host_by_mac,
+                "sessionTimeLeft": str((live_entry or {}).get("sessionTimeLeft") or ""),
+                "issuedAt": stamp(voucher["issued_at"]),
+                "usedAt": stamp(voucher["used_at"]),
+            }
+        )
+    if payer_mac and not any(device["payer"] for device in devices):
+        # The paying device's voucher was never stamped — still show the slot.
+        live_entry = live_by_username.get(row.get("username"))
+        devices.insert(
+            0,
+            {
+                "id": "",
+                "code": "",
+                "status": "used" if row["status"] == "paid" else row["status"],
+                "seconds": int(row["periods"] or 1)
+                * HOTSPOT_VALIDITY_SECONDS.get(str(row["validity_unit"] or "days"), 86400)
+                * int(row["validity_amount"] or 1),
+                "secondsLeft": None,
+                "mac": payer_mac,
+                "ip": str(row.get("ip") or ""),
+                "payer": True,
+                "claimed": not mac_kept(payer_mac),
+                "online": live_entry is not None,
+                "connected": live_entry is not None or payer_mac in host_by_mac,
+                "sessionTimeLeft": str((live_entry or {}).get("sessionTimeLeft") or ""),
+                "issuedAt": stamp(row.get("paid_at")),
+                "usedAt": stamp(row.get("paid_at")),
+            }
+        )
+
     return {
         "client": {
             "id": row["id"],
@@ -3327,6 +3568,7 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
         "live": live,
         "hosts": hosts,
         "routerReachable": router_reachable,
+        "devices": devices,
         "vouchers": [
             {
                 "id": voucher["id"],
@@ -3412,10 +3654,12 @@ def hotspot_end_access(cursor, client_id, purchase_id):
 def hotspot_recharge(cursor, client_id, purchase_id, payload):
     """Operator top-up: mint vouchers and put every connected registered device online.
 
-    The buyer's MAC plus every MAC a voucher was redeemed on are checked
-    against /ip/hotspot/host. Each device found there gets one of the fresh
-    vouchers authorized against its live IP, so a manual recharge reconnects
-    the whole account, not just the paying device.
+    Every MAC this guest has paid or redeemed a voucher on — across all of
+    their purchases on this router — is checked against /ip/hotspot/host,
+    except devices a newer payment under another number has since claimed.
+    Each device found there gets one of the fresh vouchers authorized
+    against its live IP, so a manual recharge reconnects the whole account
+    without ever touching a session that is already surfing.
     """
     row = hotspot_client_row(cursor, client_id, purchase_id)
     try:
@@ -3426,12 +3670,20 @@ def hotspot_recharge(cursor, client_id, purchase_id, payload):
     seconds = periods * HOTSPOT_VALIDITY_SECONDS.get(str(row["validity_unit"] or "days"), 86400) * int(row["validity_amount"] or 1)
 
     device_macs = []
-    if row.get("mac"):
-        device_macs.append(str(row["mac"]).upper())
-    for voucher in hotspot_voucher_rows(cursor, row["id"]):
-        mac = str(voucher.get("redeemed_mac") or "").upper()
+    for purchase in hotspot_device_purchases(cursor, client_id, row):
+        mac = str(purchase.get("mac") or "").upper()
         if mac and mac not in device_macs:
             device_macs.append(mac)
+        for voucher in hotspot_voucher_rows(cursor, purchase["id"]):
+            mac = str(voucher.get("redeemed_mac") or "").upper()
+            if mac and mac not in device_macs:
+                device_macs.append(mac)
+    # A device a newer payment under another number claimed belongs to that
+    # guest now — the recharge only ever grants, it never kicks a session.
+    owners = hotspot_mac_owners(cursor, client_id)
+    guest_key = hotspot_guest_key(row.get("phone"), row.get("mac"), f"purchase:{row['id']}")
+    router = str(row.get("device_id") or "")
+    device_macs = [m for m in device_macs if owners.get((router, m)) in (None, guest_key)]
     live_hosts = {}
     secret = ""
     if row.get("tunnel_ip") and row.get("api_secret") and device_macs:
@@ -3449,6 +3701,7 @@ def hotspot_recharge(cursor, client_id, purchase_id, payload):
     if live_hosts and secret:
         profile = f"hs-{str(row['package_id'])[:8]}"
         rate = f"{int(row['upload_mbps'] or 0)}M/{int(row['download_mbps'] or 0)}M"
+        cap = hotspot_native_cap(hotspot_byte_limits(row)) or 0
         slot = 0
         for mac in device_macs:
             host_row = live_hosts.get(mac)
@@ -3459,7 +3712,7 @@ def hotspot_recharge(cursor, client_id, purchase_id, payload):
                 grant = routeros_api.authorize_hotspot_client(
                     row["tunnel_ip"], secret,
                     host_row["ip"], mac, voucher["username"], voucher["password"],
-                    profile, rate, 1, f"{max(1, seconds)}s",
+                    profile, rate, 1, f"{max(1, seconds)}s", limit_bytes=cap,
                 )
             except (routeros_api.RouterError, OSError):
                 continue

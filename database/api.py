@@ -418,6 +418,52 @@ def optional_text(value, message, maximum=128):
     return text
 
 
+def clean_certificate(value, existing):
+    """The Safaricom public cert is a PEM block — newlines are required, so
+    the usual no-control-char secret rule does not apply. Blank keeps the
+    saved one; it is a public key, so it is stored as plain text."""
+    text = str(value or "").strip()
+    if not text or text.startswith("••••"):
+        return existing or ""
+    if len(text) > 16384 or "-----BEGIN CERTIFICATE-----" not in text:
+        raise ApiError(400, "Paste the Safaricom public certificate PEM for this environment.")
+    try:
+        from cryptography import x509
+
+        x509.load_pem_x509_certificate(text.encode())
+    except (ValueError, TypeError) as error:
+        raise ApiError(400, "That file is not a valid PEM X.509 certificate.") from error
+    return text
+
+
+def env_certificate(environment):
+    """Server-level cert fallback for an environment — a PEM path or inline
+    PEM in ISP_DARAJA_CERT_SANDBOX / ISP_DARAJA_CERT_LIVE."""
+    env = "LIVE" if environment == "live" else "SANDBOX"
+    return (os.environ.get(f"ISP_DARAJA_CERT_{env}") or "").strip()
+
+
+def daraja_checklist(row, callback_base=""):
+    """Everything the pooled gateway still needs — presence only, never
+    values. 'ok' flags let the page list what is missing."""
+    return [
+        {"key": "environment", "label": "Environment (sandbox/live)", "ok": bool(row.get("environment"))},
+        {"key": "accountType", "label": "Account type (paybill/till)", "ok": bool(row.get("account_type"))},
+        {"key": "shortCode", "label": "Business short code", "ok": bool(row.get("short_code"))},
+        {"key": "consumerKey", "label": "Consumer key", "ok": bool(row.get("consumer_key"))},
+        {"key": "consumerSecret", "label": "Consumer secret", "ok": bool(open_secret(row.get("consumer_secret")))},
+        {"key": "passkey", "label": "Passkey", "ok": bool(open_secret(row.get("passkey")))},
+        {"key": "initiatorName", "label": "Initiator name — for payouts", "ok": bool(row.get("initiator_name"))},
+        {"key": "initiatorPassword", "label": "Initiator password — for payouts", "ok": bool(row.get("initiator_password_enc"))},
+        {
+            "key": "certificate",
+            "label": "Safaricom certificate — for payouts",
+            "ok": bool(row.get("certificate") or env_certificate(row.get("environment"))),
+        },
+        {"key": "callbackBase", "label": "Public callback address", "ok": bool(callback_base)},
+    ]
+
+
 def clean_daraja(payload, existing):
     environment = str(payload.get("environment", "")).strip()
     account_type = str(payload.get("accountType", "")).strip()
@@ -524,7 +570,7 @@ def gateway_precheck(cursor):
     cursor.execute(
         """
         SELECT environment, consumer_key, consumer_secret, passkey,
-               initiator_name, initiator_password_enc, kill_switch
+               initiator_name, initiator_password_enc, certificate, kill_switch
         FROM company_daraja_settings WHERE id = 1
         """
     )
@@ -564,12 +610,16 @@ def gateway_precheck(cursor):
         if callbacks_ready else "The callback address is not configured on the server yet.",
     })
 
-    payouts_ready = bool(row.get("initiator_name") and row.get("initiator_password_enc"))
+    payouts_ready = bool(
+        row.get("initiator_name")
+        and row.get("initiator_password_enc")
+        and (row.get("certificate") or env_certificate(row.get("environment")))
+    )
     checks.append({
         "key": "payouts",
         "ok": payouts_ready,
         "detail": "Payout credentials are set — money can be disbursed to you."
-        if payouts_ready else "The company has not set up payout credentials (initiator) yet.",
+        if payouts_ready else "The company has not set up payout credentials (initiator and certificate) yet.",
     })
 
     checks.append({
@@ -988,6 +1038,7 @@ def public_payment(row):
         "securityCredential": saved_flag(row.get("security_credential") or ""),
         "initiatorPassword": saved_flag(row.get("initiator_password_enc") or ""),
         "payoutShortcode": row.get("payout_shortcode") or "",
+        "certificate": saved_flag(row.get("certificate") or ""),
         "updatedAt": stamp(row["updated_at"]) or str(row["updated_at"]),
     }
 
@@ -1832,6 +1883,19 @@ def ensure_schema():
                   UNIQUE KEY uq_hs_voucher_code (code),
                   KEY idx_hs_voucher_purchase (purchase_id),
                   KEY idx_hs_voucher_username (username)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS hotspot_limit_state (
+                  device_id CHAR(36) NOT NULL,
+                  username VARCHAR(40) NOT NULL,
+                  limit_key VARCHAR(8) NOT NULL,
+                  base_bytes BIGINT UNSIGNED NOT NULL DEFAULT 0,
+                  window_start DATETIME NULL,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                  PRIMARY KEY (device_id, username, limit_key)
                 )
                 """
             )
@@ -5487,7 +5551,7 @@ class Handler(BaseHTTPRequestHandler):
         cursor.execute(
             """
             SELECT environment, account_type, short_code, consumer_key, consumer_secret, passkey,
-                   initiator_name, initiator_password_enc, payout_shortcode, updated_at
+                   initiator_name, initiator_password_enc, payout_shortcode, certificate, updated_at
             FROM company_daraja_settings
             WHERE id = 1
             """
@@ -5510,12 +5574,13 @@ class Handler(BaseHTTPRequestHandler):
         # lower-privileged session must never steer callback URLs — and the
         # callback secret they carry — toward a forged Host.
         gateway_store.remember_public_base(cursor, self.learned_public_base())
-        daraja = public_payment(self.company_daraja_row(cursor))
+        daraja_row = self.company_daraja_row(cursor)
+        daraja = public_payment(daraja_row)
+        base = gateway_store.public_base(cursor)
         if daraja is not None:
             # The callback secret is shown only here — the only endpoint a
             # director can reach — never on any other settings read.
             secret = gateway_store.ensure_callback_secret(cursor)
-            base = gateway_store.public_base(cursor)
             prefix = f"{base}/api/daraja/{secret}" if base else ""
             daraja["callbackSecret"] = secret
             daraja["callbackBase"] = base
@@ -5537,9 +5602,17 @@ class Handler(BaseHTTPRequestHandler):
                     ("accountBalance", "account-balance"),
                 )
             }
+            daraja["certificateSource"] = (
+                "saved"
+                if (daraja_row or {}).get("certificate")
+                else "environment"
+                if env_certificate((daraja_row or {}).get("environment"))
+                else ""
+            )
         return {
             "daraja": daraja,
             "other": public_other_gateway(self.company_other_gateway_row(cursor)),
+            "checklist": daraja_checklist(daraja_row or {}, base),
         }
 
     def save_company_payments(self, cursor, payload, token):
@@ -5569,12 +5642,15 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 except daraja_client.DarajaError as error:
                     raise ApiError(400, str(error))
+            certificate = clean_certificate(
+                daraja.get("certificate"), (previous or {}).get("certificate")
+            )
             cursor.execute(
                 """
                 INSERT INTO company_daraja_settings (
                   id, environment, account_type, short_code, consumer_key, consumer_secret, passkey,
-                  initiator_name, initiator_password_enc, payout_shortcode
-                ) VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                  initiator_name, initiator_password_enc, payout_shortcode, certificate
+                ) VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON DUPLICATE KEY UPDATE
                   environment = VALUES(environment),
                   account_type = VALUES(account_type),
@@ -5584,7 +5660,8 @@ class Handler(BaseHTTPRequestHandler):
                   passkey = VALUES(passkey),
                   initiator_name = VALUES(initiator_name),
                   initiator_password_enc = VALUES(initiator_password_enc),
-                  payout_shortcode = VALUES(payout_shortcode)
+                  payout_shortcode = VALUES(payout_shortcode),
+                  certificate = VALUES(certificate)
                 """,
                 (
                     fields["environment"],
@@ -5596,6 +5673,7 @@ class Handler(BaseHTTPRequestHandler):
                     initiator_name,
                     seal_secret(open_secret(initiator_password)),
                     payout_shortcode,
+                    certificate,
                 ),
             )
             return self.read_company_payments(cursor, token)
@@ -6700,6 +6778,20 @@ def gateway_sweep_loop():
             print(f"event=gateway-sweep error={error}", flush=True)
 
 
+def hotspot_limit_loop():
+    """Byte-rule enforcement for hotspot guests — the router caps speed and
+    session time natively at grant; this sweep applies the data-allowance and
+    fair-use outcomes (throttle, disconnect, reset windows) the router cannot
+    express on its own."""
+    interval = max(15, int(os.environ.get("ISP_HOTSPOT_LIMIT_SECONDS", "60")))
+    while True:
+        time.sleep(interval)
+        try:
+            portal_server.enforce_hotspot_limits(connect)
+        except Exception as error:
+            print(f"event=hotspot-limit error={error}", flush=True)
+
+
 def gateway_settlement_loop():
     """Turn confirmed pooled collections into queued settlement payouts —
     one run per minute, one instance at a time via a MySQL GET_LOCK."""
@@ -6971,6 +7063,7 @@ def main():
     threading.Thread(target=reconcile_loop, daemon=True, name="reconcile").start()
     threading.Thread(target=radius_sweep_loop, daemon=True, name="radius-sweep").start()
     threading.Thread(target=gateway_sweep_loop, daemon=True, name="gateway-sweep").start()
+    threading.Thread(target=hotspot_limit_loop, daemon=True, name="hotspot-limit").start()
     threading.Thread(target=gateway_settlement_loop, daemon=True, name="gateway-settle").start()
     threading.Thread(target=push_dispatch_loop, daemon=True, name="push-dispatch").start()
     router_jobs.start_worker(connect)

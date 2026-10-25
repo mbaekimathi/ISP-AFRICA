@@ -6,7 +6,7 @@ import { CompanyAdvertsPage } from "@/pages/employee/CompanyAdvertsPage";
 import { CompanyCommunicationsPage } from "@/pages/employee/CompanyCommunicationsPage";
 import { CompanyNotificationsPage } from "@/pages/employee/CompanyNotificationsPage";
 import { CompanyNotificationSettingsPage } from "@/pages/employee/CompanyNotificationSettingsPage";
-import { CompanyChargesPage } from "@/pages/employee/CompanyChargesPage";
+import { CompanyGatewayControlsPage } from "@/pages/employee/CompanyGatewayControlsPage";
 import { CompanyGatewayPage } from "@/pages/employee/CompanyGatewayPage";
 import { CompanyPackagesPage } from "@/pages/employee/CompanyPackagesPage";
 import { CompanyProfilePage } from "@/pages/employee/CompanyProfilePage";
@@ -161,7 +161,7 @@ export function App() {
             <Route path="/:role/:code/company-settings/payments" element={<CompanyPaymentsPage />} />
             <Route path="/:role/:code/company-settings/billings" element={<SectionPage title="COMPANY BILLINGS" />} />
             <Route path="/:role/:code/company-settings/billings/gateway" element={<CompanyGatewayPage />} />
-            <Route path="/:role/:code/company-settings/billings/gateway/charges" element={<CompanyChargesPage />} />
+            <Route path="/:role/:code/company-settings/billings/gateway/charges" element={<CompanyGatewayControlsPage />} />
             <Route path="/:role/:code/company-settings/communications" element={<CompanyCommunicationsPage />} />
             <Route path="/:role/:code/company-settings/adverts" element={<CompanyAdvertsPage />} />
             <Route path="/:role/:code/company-settings/notifications" element={<CompanyNotificationsPage />} />
@@ -185,7 +185,7 @@ export function App() {
             <Route path="company-settings/payments" element={<CompanyPaymentsPage />} />
             <Route path="company-settings/billings" element={<SectionPage title="COMPANY BILLINGS" />} />
             <Route path="company-settings/billings/gateway" element={<CompanyGatewayPage />} />
-            <Route path="company-settings/billings/gateway/charges" element={<CompanyChargesPage />} />
+            <Route path="company-settings/billings/gateway/charges" element={<CompanyGatewayControlsPage />} />
             <Route path="company-settings/communications" element={<CompanyCommunicationsPage />} />
             <Route path="company-settings/adverts" element={<CompanyAdvertsPage />} />
             <Route path="company-settings/notifications" element={<CompanyNotificationsPage />} />

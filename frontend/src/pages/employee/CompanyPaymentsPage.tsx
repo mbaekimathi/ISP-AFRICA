@@ -1,3 +1,4 @@
+import { Check, X } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
@@ -20,12 +21,16 @@ type DarajaDraft = {
   payoutShortcode: string;
 };
 
+type ChecklistItem = { key: string; label: string; ok: boolean };
+
 type DarajaInfo = {
   callbackSecret: string;
   callbackBase: string;
   callbackBaseSource: "" | "environment" | "learned";
   callbackUrls: Record<string, string>;
   updatedAt: string;
+  certificate: string;
+  certificateSource: "" | "saved" | "environment";
 };
 
 type CompanyPayments = {
@@ -35,6 +40,7 @@ type CompanyPayments = {
         accountType: "paybill" | "till";
       } & Partial<DarajaInfo>)
     | null;
+  checklist?: ChecklistItem[];
 };
 
 const CALLBACK_ENDPOINTS: { key: string; label: string; path: string }[] = [
@@ -67,7 +73,10 @@ export function CompanyPaymentsPage() {
     "Set up the company payment gateway — collections, B2C/B2B transfers, and callbacks through the company Daraja API.",
   );
   const [daraja, setDaraja] = useState<DarajaDraft>(emptyDaraja);
+  const [certificate, setCertificate] = useState("");
+  const [certificateSaved, setCertificateSaved] = useState(false);
   const [darajaInfo, setDarajaInfo] = useState<DarajaInfo | null>(null);
+  const [checklist, setChecklist] = useState<ChecklistItem[]>([]);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [pending, setPending] = useState(false);
@@ -114,20 +123,35 @@ export function CompanyPaymentsPage() {
 
   const apply = useCallback(
     (body: CompanyPayments) => {
+      setChecklist(body.checklist ?? []);
       if (body.daraja) {
-        const { callbackSecret, callbackBase, callbackBaseSource, callbackUrls, updatedAt, ...draft } =
-          body.daraja;
+        const {
+          callbackSecret,
+          callbackBase,
+          callbackBaseSource,
+          callbackUrls,
+          updatedAt,
+          certificate: certificateFlag,
+          certificateSource,
+          ...draft
+        } = body.daraja;
         setDaraja(draft);
+        setCertificate("");
+        setCertificateSaved(Boolean(certificateFlag));
         setDarajaInfo({
           callbackSecret: callbackSecret ?? "",
           callbackBase: callbackBase ?? "",
           callbackBaseSource: callbackBaseSource ?? "",
           callbackUrls: callbackUrls ?? {},
           updatedAt: updatedAt ?? "",
+          certificate: certificateFlag ?? "",
+          certificateSource: certificateSource ?? "",
         });
         testConnection();
       } else {
         setDaraja(emptyDaraja);
+        setCertificate("");
+        setCertificateSaved(false);
         setDarajaInfo(null);
         setCheck({ state: "idle", reason: "" });
       }
@@ -162,7 +186,7 @@ export function CompanyPaymentsPage() {
     setPending(true);
     apiRequest<CompanyPayments>("/api/employee/company/payments", {
       method: "POST",
-      body: JSON.stringify({ gateway: "daraja", daraja }),
+      body: JSON.stringify({ gateway: "daraja", daraja: { ...daraja, certificate } }),
     })
       .then((body) => {
         apply(body);
@@ -191,6 +215,8 @@ export function CompanyPaymentsPage() {
           : darajaInfo
             ? "Connection not tested yet."
             : "Save the details, then test the connection.";
+
+  const missing = checklist.filter((item) => !item.ok);
 
   if (!ready) {
     return <LiveLoad label="Loading account" />;
@@ -222,6 +248,27 @@ export function CompanyPaymentsPage() {
           <span className={`h-2 w-2 rounded-full ${statusDot}`} />
           {statusText}
         </p>
+        {checklist.length > 0 ? (
+          <div className="grid gap-1.5 rounded-lg border border-border bg-surface-muted/60 px-3.5 py-3">
+            <p className="text-sm font-medium">
+              {missing.length
+                ? `Missing — collections and payouts stay off until ${missing.length === 1 ? "this is" : "these are"} saved:`
+                : "Every credential the gateway needs is saved."}
+            </p>
+            <ul className="grid gap-1">
+              {checklist.map((item) => (
+                <li key={item.key} className="flex items-center gap-2 text-caption">
+                  {item.ok ? (
+                    <Check className="h-3.5 w-3.5 shrink-0 text-success" aria-hidden="true" />
+                  ) : (
+                    <X className="h-3.5 w-3.5 shrink-0 text-destructive" aria-hidden="true" />
+                  )}
+                  <span className={item.ok ? "text-muted-foreground" : "font-medium"}>{item.label}</span>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
         <div className="grid gap-4">
           <h3 className="text-sm font-semibold">Collections — STK push &amp; C2B</h3>
           <p className="-mt-2 text-caption leading-5 text-muted-foreground">
@@ -351,6 +398,30 @@ export function CompanyPaymentsPage() {
               onChange={(event) =>
                 setDaraja((current) => ({ ...current, payoutShortcode: event.target.value.replace(/\D/g, "").slice(0, 10) }))
               }
+            />
+          </FormField>
+          <FormField
+            id="company-daraja-certificate"
+            label="Safaricom certificate (PEM)"
+            hint={
+              darajaInfo?.certificateSource === "environment"
+                ? "The server environment already provides one for this environment — paste a PEM here to override it."
+                : "The public certificate Daraja publishes for the selected environment — it encrypts the initiator password on every payout. Without it, payouts fail."
+            }
+          >
+            <textarea
+              id="company-daraja-certificate"
+              className="field font-mono text-xs"
+              rows={6}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder={
+                certificateSaved
+                  ? "Saved — paste a new certificate to replace it"
+                  : "-----BEGIN CERTIFICATE-----"
+              }
+              value={certificate}
+              onChange={(event) => setCertificate(event.target.value)}
             />
           </FormField>
         </div>

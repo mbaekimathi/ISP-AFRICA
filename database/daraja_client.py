@@ -18,9 +18,10 @@ Money-safety rules baked in:
   spellings (RecieverIdentifierType, Occassion).
 
 The Safaricom security credential is the initiator password RSA-encrypted
-with Safaricom's public X.509 certificate (PKCS1v15) and base64'd. Cert paths
-come from ISP_DARAJA_CERT_SANDBOX / ISP_DARAJA_CERT_LIVE (a PEM file path or
-inline PEM), never the database.
+with Safaricom's public X.509 certificate (PKCS1v15) and base64'd. The cert
+comes from the PEM saved with the company's payment settings, falling back
+to ISP_DARAJA_CERT_SANDBOX / ISP_DARAJA_CERT_LIVE (a PEM file path or
+inline PEM).
 """
 
 import base64
@@ -162,6 +163,7 @@ class DarajaConfig:
         initiator_name="",
         initiator_password="",
         payout_shortcode="",
+        certificate="",
     ):
         if environment not in HOSTS:
             raise DarajaError("Unknown Daraja environment.")
@@ -174,6 +176,7 @@ class DarajaConfig:
         self.initiator_name = str(initiator_name or "")
         self.initiator_password = str(initiator_password or "")
         self.payout_shortcode = str(payout_shortcode or "")
+        self.certificate = str(certificate or "")
 
     @property
     def host(self):
@@ -261,18 +264,23 @@ class DarajaClient:
     # --- security credential --------------------------------------------------
 
     def _cert_pem(self):
-        """Safaricom public cert for this environment — a PEM file path or
-        inline PEM in ISP_DARAJA_CERT_SANDBOX / ISP_DARAJA_CERT_LIVE."""
+        """Safaricom public cert for this environment — the PEM saved with the
+        company's payment settings first, else a PEM file path or inline PEM
+        in ISP_DARAJA_CERT_SANDBOX / ISP_DARAJA_CERT_LIVE."""
         if self._cert_cache is None:
-            env = "LIVE" if self.config.environment == "live" else "SANDBOX"
-            setting = (os.environ.get(f"ISP_DARAJA_CERT_{env}") or "").strip()
-            if not setting:
-                self._cert_cache = b""
-            elif setting.startswith("-----BEGIN"):
-                self._cert_cache = setting.encode()
+            saved = self.config.certificate.strip()
+            if saved:
+                self._cert_cache = saved.encode()
             else:
-                with open(setting, "rb") as handle:
-                    self._cert_cache = handle.read()
+                env = "LIVE" if self.config.environment == "live" else "SANDBOX"
+                setting = (os.environ.get(f"ISP_DARAJA_CERT_{env}") or "").strip()
+                if not setting:
+                    self._cert_cache = b""
+                elif setting.startswith("-----BEGIN"):
+                    self._cert_cache = setting.encode()
+                else:
+                    with open(setting, "rb") as handle:
+                        self._cert_cache = handle.read()
         return self._cert_cache
 
     def _credential(self):

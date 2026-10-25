@@ -47,6 +47,7 @@ const ITEM_ICONS: Record<string, { icon: LucideIcon; chip: string }> = {
   "ISP clients": { icon: Users, chip: "bg-emerald-500/15 text-emerald-400" },
   Billings: { icon: Receipt, chip: "bg-amber-500/15 text-amber-400" },
   "Gateway billings": { icon: CreditCard, chip: "bg-amber-500/15 text-amber-400" },
+  "Gateway controls": { icon: SlidersHorizontal, chip: "bg-amber-500/15 text-amber-400" },
   Company: { icon: Building2, chip: "bg-indigo-500/15 text-indigo-400" },
   Profile: { icon: UserRound, chip: "bg-indigo-500/15 text-indigo-400" },
   Theme: { icon: Palette, chip: "bg-fuchsia-500/15 text-fuchsia-400" },

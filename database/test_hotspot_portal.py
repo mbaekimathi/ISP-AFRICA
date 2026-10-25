@@ -1,5 +1,6 @@
 import sys
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -425,6 +426,69 @@ class HotspotRouterTests(unittest.TestCase):
                 opener=lambda _address, _timeout: sock_with(),
             )
 
+    def test_authorize_writes_byte_cap(self):
+        sock = sock_with()
+        routeros_api.authorize_hotspot_client(
+            "10.88.0.5", "secret-password", "10.5.50.10", "AA:BB:CC:DD:EE:FF",
+            "hs-abc123", "pw-xyz", "hs-pkg1", "5M/10M", 1, "7200s",
+            limit_bytes=2147483648, opener=lambda _address, _timeout: sock,
+        )
+        self.assertIn(b"=limit-bytes-total=2147483648", b"".join(sock.sent))
+
+    def test_user_counters_reads_bytes_and_flags(self):
+        sock = rule_sock(
+            [
+                (
+                    "/ip/hotspot/user/print",
+                    ("=name=hs-u1", "=bytes-in=100", "=bytes-out=250", "=profile=hs-pkg1", "=disabled=false"),
+                )
+            ]
+        )
+        counters = routeros_api.hotspot_user_counters("10.88.0.5", "pw", opener=lambda _a, _t: sock)
+        self.assertEqual(counters["hs-u1"]["bytesIn"], 100)
+        self.assertEqual(counters["hs-u1"]["bytesOut"], 250)
+        self.assertEqual(counters["hs-u1"]["profile"], "hs-pkg1")
+        self.assertFalse(counters["hs-u1"]["disabled"])
+
+    def test_limit_user_throttles_onto_fup_profile(self):
+        sock = rule_sock(
+            [
+                ("/ip/hotspot/user/print", ("=.id=*1", "=name=hs-u1")),
+                ("/ip/hotspot/active/print", ("=.id=*A", "=user=hs-u1")),
+            ]
+        )
+        applied = routeros_api.limit_hotspot_user(
+            "10.88.0.5", "secret-password", "hs-u1", "hs-pkg1-fup-2M-1M",
+            rate_limit="2M/1M", blocked=False, opener=lambda _a, _t: sock,
+        )
+        self.assertTrue(applied)
+        sent = b"".join(sock.sent)
+        self.assertIn(b"/ip/hotspot/user/profile/add", sent)
+        self.assertIn(b"=name=hs-pkg1-fup-2M-1M", sent)
+        self.assertIn(b"=rate-limit=2M/1M", sent)
+        self.assertIn(b"=profile=hs-pkg1-fup-2M-1M", sent)
+        self.assertIn(b"=disabled=no", sent)
+        self.assertIn(b"/ip/hotspot/active/remove", sent)
+
+    def test_limit_user_blocks_at_cap(self):
+        sock = rule_sock([("/ip/hotspot/user/print", ("=.id=*1", "=name=hs-u1"))])
+        applied = routeros_api.limit_hotspot_user(
+            "10.88.0.5", "secret-password", "hs-u1", "hs-pkg1",
+            blocked=True, opener=lambda _a, _t: sock,
+        )
+        self.assertTrue(applied)
+        sent = b"".join(sock.sent)
+        self.assertIn(b"=disabled=yes", sent)
+        self.assertNotIn(b"/ip/hotspot/user/profile/add", sent)
+
+    def test_limit_user_missing_returns_false(self):
+        sock = rule_sock([])
+        applied = routeros_api.limit_hotspot_user(
+            "10.88.0.5", "secret-password", "hs-ghost", "hs-pkg1",
+            blocked=True, opener=lambda _a, _t: sock,
+        )
+        self.assertFalse(applied)
+
 
 class PortalHelperTests(unittest.TestCase):
     def test_validity_seconds(self):
@@ -834,3 +898,194 @@ class BlockSharingApiTests(unittest.TestCase):
         ):
             with self.assertRaises(api.ApiError):
                 handler.save_hotspot_access(FakeCursor([]), "router-1", "token", {"enabled": True, "blockSharing": "yes"})
+
+
+class LimitCursor:
+    """Enough SQL for the hotspot limit sweep: the two target queries, the
+    per-limit window rows, and the stale-state cleanup."""
+
+    def __init__(self, vouchers, purchases=None):
+        self.vouchers = vouchers
+        self.purchases = purchases or []
+        self.state = {}
+        self._result = []
+
+    def execute(self, sql, args=None):
+        args = list(args or [])
+        flat = " ".join(sql.split())
+        self._result = []
+        if flat.startswith("SELECT NULL AS voucher_id"):
+            self._result = list(self.purchases)
+        elif flat.startswith("SELECT v.id AS voucher_id"):
+            self._result = list(self.vouchers)
+        elif flat.startswith("SELECT base_bytes"):
+            row = self.state.get(tuple(args))
+            self._result = [dict(row)] if row else []
+        elif flat.startswith("INSERT IGNORE INTO hotspot_limit_state"):
+            self.state.setdefault(tuple(args[:3]), {"base_bytes": 0, "window_start": args[3]})
+        elif flat.startswith("UPDATE hotspot_limit_state"):
+            row = self.state.get(tuple(args[2:5]))
+            if row:
+                row["base_bytes"], row["window_start"] = args[0], args[1]
+        elif flat.startswith("SELECT device_id, username FROM hotspot_limit_state"):
+            self._result = [{"device_id": key[0], "username": key[1]} for key in self.state]
+        elif flat.startswith("DELETE FROM hotspot_limit_state"):
+            for key in [key for key in self.state if key[:2] == tuple(args)]:
+                del self.state[key]
+
+    def fetchall(self):
+        return list(self._result)
+
+    def fetchone(self):
+        return self._result[0] if self._result else None
+
+
+class LimitDb:
+    def __init__(self, cursor):
+        self._cursor = cursor
+        self.committed = False
+
+    def cursor(self):
+        db = self
+
+        class _Ctx:
+            def __enter__(self):
+                return db._cursor
+
+            def __exit__(self, *exc):
+                return False
+
+        return _Ctx()
+
+    def commit(self):
+        self.committed = True
+
+    def close(self):
+        pass
+
+
+def limit_voucher_row(**extra):
+    row = {
+        "voucher_id": "v1",
+        "username": "hs-u1",
+        "started": datetime.now(),
+        "seconds": 86400,
+        "purchase_id": "pu-1",
+        "client_id": "client-1",
+        "device_id": "router-1",
+        "package_id": "pkg-1",
+        "tunnel_ip": "10.88.0.5",
+        "api_secret": "sealed",
+    }
+    row.update(extra)
+    return row
+
+
+class HotspotLimitSweepTests(unittest.TestCase):
+    def enforce(self, vouchers, counters, state=None):
+        cursor = LimitCursor(vouchers)
+        if state:
+            cursor.state.update(state)
+        db = LimitDb(cursor)
+        with mock.patch.object(routeros_api, "open_password", return_value="pw"), mock.patch.object(
+            routeros_api, "hotspot_user_counters", return_value=counters
+        ), mock.patch.object(routeros_api, "limit_hotspot_user", return_value=True) as applied:
+            portal_server.enforce_hotspot_limits(lambda: db)
+        return applied, cursor
+
+    def test_throttles_past_fup_threshold(self):
+        row = limit_voucher_row(
+            fair_use_amount="1.00", fair_use_unit="GB", fair_use_action="throttle",
+            fair_throttle_download=1, fair_throttle_upload=2,
+        )
+        counters = {"hs-u1": {"bytesIn": 2 * 1024**3, "bytesOut": 0, "profile": "hs-pkg-1", "disabled": False}}
+        applied, _cursor = self.enforce([row], counters)
+        applied.assert_called_once()
+        args, kwargs = applied.call_args
+        self.assertEqual(args[2], "hs-u1")
+        self.assertEqual(args[3], "hs-pkg-1-fup-2M-1M")
+        self.assertEqual(kwargs["rate_limit"], "2M/1M")
+        self.assertFalse(kwargs["blocked"])
+
+    def test_blocks_past_disconnect_cap(self):
+        row = limit_voucher_row(
+            data_allowance_amount="1.00", data_allowance_unit="GB", data_allowance_action="disconnect",
+            data_reset_amount=1, data_reset_unit="days",
+        )
+        counters = {"hs-u1": {"bytesIn": 3 * 1024**3, "bytesOut": 0, "profile": "hs-pkg-1", "disabled": False}}
+        applied, _cursor = self.enforce([row], counters)
+        applied.assert_called_once()
+        _args, kwargs = applied.call_args
+        self.assertTrue(kwargs["blocked"])
+        self.assertIsNone(kwargs["rate_limit"])
+
+    def test_reset_window_restores_speed(self):
+        row = limit_voucher_row(
+            fair_use_amount="1.00", fair_use_unit="GB", fair_use_action="throttle",
+            fair_throttle_download=1, fair_throttle_upload=2, fair_reset_amount=1, fair_reset_unit="days",
+        )
+        counters = {"hs-u1": {"bytesIn": 5 * 1024**3, "bytesOut": 0, "profile": "hs-pkg-1-fup-2M-1M", "disabled": False}}
+        state = {
+            ("router-1", "hs-u1", "fair"): {
+                "base_bytes": 4 * 1024**3,
+                "window_start": datetime.now() - timedelta(days=2),
+            }
+        }
+        applied, cursor = self.enforce([row], counters, state)
+        applied.assert_called_once()
+        args, kwargs = applied.call_args
+        self.assertEqual(args[3], "hs-pkg-1")
+        self.assertIsNone(kwargs["rate_limit"])
+        self.assertFalse(kwargs["blocked"])
+        self.assertEqual(cursor.state[("router-1", "hs-u1", "fair")]["base_bytes"], 5 * 1024**3)
+
+    def test_expired_grant_is_ignored(self):
+        row = limit_voucher_row(
+            started=datetime.now() - timedelta(hours=3), seconds=3600,
+            fair_use_amount="1.00", fair_use_unit="GB", fair_use_action="disconnect",
+        )
+        counters = {"hs-u1": {"bytesIn": 5 * 1024**3, "bytesOut": 0, "profile": "hs-pkg-1", "disabled": False}}
+        applied, _cursor = self.enforce([row], counters)
+        applied.assert_not_called()
+
+    def test_under_threshold_is_left_alone(self):
+        row = limit_voucher_row(
+            fair_use_amount="10.00", fair_use_unit="GB", fair_use_action="throttle",
+            fair_throttle_download=1, fair_throttle_upload=2,
+        )
+        counters = {"hs-u1": {"bytesIn": 1024**3, "bytesOut": 0, "profile": "hs-pkg-1", "disabled": False}}
+        applied, cursor = self.enforce([row], counters)
+        applied.assert_not_called()
+        self.assertIn(("router-1", "hs-u1", "fair"), cursor.state)
+
+
+class ByteLimitResolutionTests(unittest.TestCase):
+    def test_byte_limits_resolve_package_rules(self):
+        row = {
+            "data_allowance_amount": "2.00", "data_allowance_unit": "GB", "data_allowance_action": "throttle",
+            "data_throttle_download": 1, "data_throttle_upload": 2,
+            "data_reset_amount": 1, "data_reset_unit": "days",
+            "fair_use_amount": "500", "fair_use_unit": "MB", "fair_use_action": "disconnect",
+        }
+        limits = pppoe_store.hotspot_byte_limits(row)
+        self.assertEqual(limits["data"]["bytes"], 2 * 1024**3)
+        self.assertEqual(limits["data"]["rate"], "2M/1M")
+        self.assertEqual(limits["data"]["reset"], 86400)
+        self.assertEqual(limits["fair"]["bytes"], 500 * 1024**2)
+        self.assertEqual(pppoe_store.hotspot_native_cap(limits), 500 * 1024**2)
+
+    def test_native_cap_skips_resetting_limits(self):
+        limits = {"data": {"bytes": 1024, "action": "disconnect", "reset": 86400}}
+        self.assertIsNone(pppoe_store.hotspot_native_cap(limits))
+
+    def test_pending_row_carries_limits(self):
+        row = {
+            "purchase_id": "pu-1", "client_id": "c1", "device_id": "d1", "package_id": "pkg-1",
+            "mac": "AA:BB:CC:DD:EE:FF", "ip": "10.5.50.10", "periods": 1,
+            "download_mbps": 10, "upload_mbps": 5, "devices": 1,
+            "validity_amount": 1, "validity_unit": "days",
+            "fair_use_amount": "1.00", "fair_use_unit": "GB", "fair_use_action": "throttle",
+            "fair_throttle_download": 1, "fair_throttle_upload": 1,
+        }
+        pending = portal_server.hotspot_pending_from_row(row)
+        self.assertEqual(pending["limits"]["fair"]["rate"], "1M/1M")

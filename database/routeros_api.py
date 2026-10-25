@@ -2538,7 +2538,7 @@ def _hotspot_mac(value):
     return mac if MAC_ADDRESS.match(mac) and mac != "00:00:00:00:00:00" else ""
 
 
-def authorize_hotspot_client(host, password, ip, mac, username, secret, profile, rate_limit, shared_users, uptime, timeout=12, port=API_PORT, opener=None):
+def authorize_hotspot_client(host, password, ip, mac, username, secret, profile, rate_limit, shared_users, uptime, limit_bytes=0, timeout=12, port=API_PORT, opener=None):
     """Create a paid hotspot account on the router and log the waiting client in."""
     if not (_safe_iface(str(username)) and _safe_iface(str(secret))):
         raise RouterError("The hotspot account could not be prepared.")
@@ -2578,6 +2578,8 @@ def authorize_hotspot_client(host, password, ip, mac, username, secret, profile,
             f"=limit-uptime={uptime}",
             f"=mac-address={lock or '00:00:00:00:00:00'}",
         ]
+        if int(limit_bytes or 0) > 0:
+            user_words.append(f"=limit-bytes-total={int(limit_bytes)}")
         users = talk(sock, reader, ["/ip/hotspot/user/print"])
         matched = [row for row in users if row.get("name") == username and _row_id(row)]
         if matched:
@@ -2691,6 +2693,90 @@ def hotspot_active_sessions(host, password, usernames=None, macs=None, timeout=8
             }
         )
     return live
+
+
+def hotspot_user_counters(host, password, usernames=None, timeout=8, port=API_PORT, opener=None):
+    """Cumulative per-user counters and flags from /ip/hotspot/user.
+
+    bytes-in/bytes-out on the user record count everything the account moved
+    since it was created — the numbers the data-allowance and fair-use
+    thresholds compare against.
+    """
+    wanted = {str(name) for name in (usernames or []) if str(name or "").strip()}
+    connect = opener or socket.create_connection
+    try:
+        sock = connect((host, port), timeout)
+    except OSError as error:
+        raise RouterError("The management tunnel did not answer.") from error
+    try:
+        sock.settimeout(timeout)
+        reader = ByteReader(sock)
+        login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
+        if any(row.get("ret") for row in login):
+            raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
+        rows = talk(sock, reader, ["/ip/hotspot/user/print"])
+    finally:
+        sock.close()
+    counters = {}
+    for row in rows:
+        name = str(row.get("name") or "")
+        if wanted and name not in wanted:
+            continue
+        counters[name] = {
+            "bytesIn": _count(row.get("bytes-in")),
+            "bytesOut": _count(row.get("bytes-out")),
+            "profile": str(row.get("profile") or ""),
+            "disabled": str(row.get("disabled") or "").lower() in {"true", "yes"},
+        }
+    return counters
+
+
+def limit_hotspot_user(host, password, username, profile, rate_limit=None, blocked=None, timeout=12, port=API_PORT, opener=None):
+    """Re-profile or block one hotspot user while its grant still stands.
+
+    rate_limit rewrites the named profile's speed so a FUP throttle tier is
+    created on demand; blocked disables the record so a capped account stays
+    on the captive side. The live session is then dropped — the mac cookie
+    logs the device back in under the new profile on its next request.
+    Returns False when the user record is gone.
+    """
+    connect = opener or socket.create_connection
+    try:
+        sock = connect((host, port), timeout)
+    except OSError as error:
+        raise RouterError("The management tunnel did not answer.") from error
+    try:
+        sock.settimeout(timeout)
+        reader = ByteReader(sock)
+        login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
+        if any(row.get("ret") for row in login):
+            raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
+        if profile and rate_limit:
+            profile_words = ["=shared-users=1", f"=rate-limit={rate_limit}"]
+            profiles = talk(sock, reader, ["/ip/hotspot/user/profile/print"])
+            matched = [row for row in profiles if row.get("name") == profile and _row_id(row)]
+            if matched:
+                for row in matched:
+                    talk(sock, reader, ["/ip/hotspot/user/profile/set", f"=.id={_row_id(row)}"] + profile_words)
+            else:
+                talk(sock, reader, ["/ip/hotspot/user/profile/add", f"=name={profile}"] + profile_words)
+        user_words = []
+        if profile:
+            user_words.append(f"=profile={profile}")
+        if blocked is not None:
+            user_words.append(f"=disabled={'yes' if blocked else 'no'}")
+        users = talk(sock, reader, ["/ip/hotspot/user/print"])
+        matched = [row for row in users if row.get("name") == username and _row_id(row)]
+        if not matched:
+            return False
+        for row in matched:
+            talk(sock, reader, ["/ip/hotspot/user/set", f"=.id={_row_id(row)}"] + user_words)
+        for row in talk(sock, reader, ["/ip/hotspot/active/print"]):
+            if row.get("user") == username and _row_id(row):
+                talk(sock, reader, ["/ip/hotspot/active/remove", f"=.id={_row_id(row)}"])
+    finally:
+        sock.close()
+    return True
 
 
 def hotspot_hosts(host, password, macs=None, timeout=8, port=API_PORT, opener=None):

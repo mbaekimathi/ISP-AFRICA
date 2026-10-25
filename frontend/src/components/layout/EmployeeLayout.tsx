@@ -51,12 +51,12 @@ const dashboardLinks = [
 const billingsLinks = [
   { label: "Billings", to: "/employee/company-settings/billings" },
   { label: "Gateway billings", to: "/employee/company-settings/billings/gateway" },
-  { label: "Transaction charges", to: "/employee/company-settings/billings/gateway/charges" },
+  { label: "Gateway controls", to: "/employee/company-settings/billings/gateway/charges" },
 ];
 
 const companyPaymentsLinks = [
   { label: "Payments", to: "/employee/company-settings/payments" },
-  { label: "Transaction charges", to: "/employee/company-settings/billings/gateway/charges" },
+  { label: "Gateway controls", to: "/employee/company-settings/billings/gateway/charges" },
 ];
 
 function employeeSidebarItems(pathname: string, director: boolean) {

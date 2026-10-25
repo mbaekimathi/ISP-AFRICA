@@ -51,6 +51,7 @@ def company_gateway_settings(cursor):
         """
         SELECT id, environment, account_type, short_code, consumer_key, consumer_secret,
                passkey, initiator_name, initiator_password_enc, payout_shortcode,
+               certificate,
                status, kill_switch, commission_percent, commission_flat,
                default_hold_hours, min_payout, max_payout_per_tx, payout_fee_estimate,
                last_known_balance, last_balance_at, txn_fees_enabled
@@ -872,6 +873,7 @@ def company_client(company):
             initiator_name=company.get("initiator_name") or "",
             initiator_password=open_stored(company.get("initiator_password_enc")),
             payout_shortcode=company.get("payout_shortcode") or "",
+            certificate=company.get("certificate") or "",
         )
     )
 

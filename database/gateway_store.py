@@ -71,6 +71,7 @@ UNDO_STATEMENTS = [
     "ALTER TABLE company_daraja_settings DROP COLUMN last_balance_at",
     "ALTER TABLE company_daraja_settings DROP COLUMN txn_fees_enabled",
     "ALTER TABLE company_daraja_settings DROP COLUMN public_base",
+    "ALTER TABLE company_daraja_settings DROP COLUMN certificate",
 ]
 
 
@@ -96,6 +97,7 @@ def ensure_schema(cursor):
         ("last_balance_at", "last_balance_at DATETIME NULL"),
         ("txn_fees_enabled", "txn_fees_enabled TINYINT NOT NULL DEFAULT 0"),
         ("public_base", "public_base VARCHAR(255) NOT NULL DEFAULT ''"),
+        ("certificate", "certificate TEXT NULL"),
     ):
         cursor.execute("SHOW COLUMNS FROM company_daraja_settings LIKE %s", (column,))
         if cursor.fetchone() is None:

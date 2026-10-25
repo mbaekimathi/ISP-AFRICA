@@ -52,6 +52,10 @@ RATE_LOCK = threading.Lock()
 VALIDITY_SECONDS = {"hours": 3600, "days": 86400, "weeks": 604800, "months": 2592000}
 ANDROID_PROBES = {"/generate_204", "/generate204", "/gen_204"}
 PROBE_GRACE = int(os.environ.get("ISP_PROBE_GRACE") or 180)
+# Seconds a paid hotspot purchase may sit unconnected before the sweep puts
+# the device online itself — the fallback for a popup that closed before the
+# buyer could tap Done.
+HOTSPOT_CONNECT_GRACE = int(os.environ.get("ISP_HOTSPOT_CONNECT_GRACE") or 90)
 PROBE_RESTART = int(os.environ.get("ISP_PROBE_RESTART") or 900)
 PROBE_SEEN = {}
 PROBE_LOCK = threading.Lock()
@@ -131,11 +135,11 @@ button:disabled{background:#c7d2e0;box-shadow:none;cursor:default;transform:none
 .voucher code{display:inline-block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:21px;font-weight:800;letter-spacing:.12em;color:#1d4ed8;background:#eef2f7;padding:4px 12px;border-radius:8px}
 .vcode{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;font-weight:700;letter-spacing:.08em;color:#1d4ed8}
 .foot{margin-top:16px;text-align:center;font-size:11px;font-weight:600;letter-spacing:.08em;color:rgba(255,255,255,.5)}
-.advs{display:grid;gap:8px}
-.adv{display:block;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;text-decoration:none;color:#1d4ed8;transition:border-color .15s,box-shadow .15s}
+.advs{display:flex;flex-wrap:wrap;justify-content:center;gap:10px}
+.adv{width:62px;height:62px;border-radius:14px;border:1px solid #e2e8f0;background:#f8fafc;overflow:hidden;display:flex;align-items:center;justify-content:center;text-decoration:none;color:#1d4ed8;transition:border-color .15s,box-shadow .15s}
 .adv:hover{border-color:#1d4ed8;box-shadow:0 0 0 3px rgba(37,99,235,.12)}
-.adv img{display:block;width:100%;height:auto}
-.adv span{display:block;padding:12px 14px;font-size:14px;font-weight:600}
+.adv img{display:block;width:100%;height:100%;object-fit:cover}
+.adv span{display:block;padding:6px;font-size:9.5px;font-weight:700;line-height:1.25;text-align:center;word-break:break-word}
 @media(max-width:420px){body{padding:14px}.card{padding:22px 18px;border-radius:20px}h1{font-size:19px}}
 """
 
@@ -800,12 +804,12 @@ def advert_rows(cursor, client_id):
 
 
 def adverts_html(adverts):
-    """Clickable partner banners for the thank-you pages — each one opens
-    the partner's website."""
+    """Clickable partner icons along the foot of the thank-you pages — each
+    one opens the partner's website."""
     if not adverts:
         return ""
     cards = "".join(
-        f'<a class=adv href="{esc(advert["website"])}">'
+        f'<a class=adv href="{esc(advert["website"])}" title="{esc(advert["partner_name"])}">'
         + (
             f'<img src="{esc(advert["image_data_url"])}" alt="{esc(advert["partner_name"])}">'
             if advert.get("image_data_url")
@@ -814,7 +818,7 @@ def adverts_html(adverts):
         + "</a>"
         for advert in adverts
     )
-    return f'<p class=sect>Our partners</p><div class=advs>{cards}</div>'
+    return f'<p class=sect style="text-align:center;margin-top:22px">Our partners</p><div class=advs>{cards}</div>'
 
 
 def thankyou_page(voucher, adverts=None):
@@ -868,24 +872,20 @@ def thankyou_hotspot_page(receipt, adverts=None):
         f'<span>{"Used" if voucher["status"] == "used" else "Ready"}</span></div>'
         for voucher in vouchers
     ) or "<p class=note>No vouchers were issued for this purchase.</p>"
-    share = ""
-    if len(vouchers) > 1:
-        share = (
-            "<p class=note>Share the ready codes — each one connects one more device. On that device, open this "
-            "Wi-Fi page and enter the code under <b>Have a voucher?</b></p>"
-        )
+    share = (
+        "Share the ready codes — each one connects one more device. "
+        if len(vouchers) > 1
+        else ""
+    )
     return page(
         "Thank you",
         f"""<div class=okpage>{DONE_ICON}
 <span class="badge ok">Payment successful</span>
 <h1>Thank you — you're online</h1>
-<p class=sub>Your Wi-Fi bundle is active on this device.</p></div>
-<div class=row><span>Package</span><span>{esc(receipt['package_name'])}</span></div>
-<div class=row><span>Amount paid</span><span>KSh {esc(ksh(receipt['amount']))}</span></div>
+<p class=sub>Your {esc(receipt['package_name'])} is active on this device.</p></div>
 <p class=sect>Voucher{'' if len(vouchers) == 1 else 's'} for this purchase</p>
 {listing}
-{share}
-<p class=note>A voucher is spent once its device starts surfing and cannot be used again.</p>
+<p class=hint style=text-align:center>{share}A code is spent once its device starts surfing and cannot be used again.</p>
 {adverts_html(adverts)}""",
     )
 
@@ -984,7 +984,7 @@ def hotspot_device(cursor, source_ip, requested):
 
 def hotspot_packages(cursor, client_id, device_id):
     cursor.execute(
-        """
+        f"""
         SELECT p.id, p.name, p.price, p.download_mbps, p.upload_mbps, p.availability_routers,
                COALESCE(p.service_type, c.service_type, 'pppoe') AS service_type,
                COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
@@ -992,7 +992,8 @@ def hotspot_packages(cursor, client_id, device_id):
                COALESCE(p.simultaneous_devices, c.simultaneous_devices, 1) AS devices,
                COALESCE(p.extra_device_price, c.extra_device_price) AS extra_device_price,
                COALESCE(p.extra_period_price, c.extra_period_price) AS extra_period_price,
-               COALESCE(p.image_data_url, c.image_data_url) AS image_data_url
+               COALESCE(p.image_data_url, c.image_data_url) AS image_data_url,
+               {pppoe_store.HOTSPOT_LIMIT_COLUMNS}
         FROM isp_packages p
         LEFT JOIN company_packages c ON c.id = p.company_package_id
         WHERE p.client_id = %s AND p.status = 'active'
@@ -1131,6 +1132,37 @@ def hotspot_offer_detail(offer):
     return f"1 device · {period} included — +KSh {extra_device} each extra device · +KSh {extra_period} each extra {each}"
 
 
+def hotspot_limit_label(offer):
+    """The byte rules a bundle carries — the data allowance and the fair-use
+    threshold — so the picker shows the cap before the guest pays."""
+    parts = []
+    for label, amount_key, unit_key, action_key, down_key, up_key in (
+        (
+            "data", "data_allowance_amount", "data_allowance_unit",
+            "data_allowance_action", "data_throttle_download", "data_throttle_upload",
+        ),
+        (
+            "FUP", "fair_use_amount", "fair_use_unit",
+            "fair_use_action", "fair_throttle_download", "fair_throttle_upload",
+        ),
+    ):
+        amount = offer.get(amount_key)
+        unit = str(offer.get(unit_key) or "")
+        if amount is None or unit not in {"MB", "GB"}:
+            continue
+        cap = f"{ksh(amount)} {unit} {label}"
+        action = str(offer.get(action_key) or "")
+        down_speed = int(offer.get(down_key) or 0)
+        up_speed = int(offer.get(up_key) or 0)
+        if action == "throttle" and down_speed:
+            parts.append(f"{cap} — then {down_speed} Mbps ↓ · {up_speed} Mbps ↑")
+        elif action == "disconnect":
+            parts.append(f"{cap} — then off")
+        else:
+            parts.append(cap)
+    return " · ".join(parts)
+
+
 def hotspot_pick(offer, checked, customize):
     price = Decimal(offer["price"] or 0)
     thumb = package_thumb(offer)
@@ -1140,7 +1172,8 @@ def hotspot_pick(offer, checked, customize):
 {thumb}
 <span class=pd><span class="nm">{esc(offer['name'])}</span>
 <span class="sp">{int(offer['download_mbps'])} Mbps ↓ · {int(offer['upload_mbps'])} Mbps ↑ · {esc(validity_label(offer['validity_amount'], offer['validity_unit']))}</span>
-<span class="sp">{esc(hotspot_offer_detail(offer))}</span></span>
+<span class="sp">{esc(hotspot_offer_detail(offer))}</span>
+{f'<span class="sp">{esc(hotspot_limit_label(offer))}</span>' if hotspot_limit_label(offer) else ''}</span>
 <span class="pr">KSh {esc(ksh(price))}</span></label>"""
     if customize:
         each = unit_label(offer["validity_amount"], offer["validity_unit"])
@@ -1305,24 +1338,39 @@ function legacy(t){{
  try{{document.execCommand('copy');}}catch(e){{}}
  document.body.removeChild(ta);
 }}
-function go(){{
+let connecting=false;
+async function go(){{
+ if(connecting)return;
  const b=paidBody||{{}};
  if(b.loginUrl){{location.href=b.loginUrl;return;}}
- if(b.purchase){{location.href='/thank-you?purchase='+encodeURIComponent(b.purchase);return;}}
+ if(!b.purchase)return;
+ connecting=true;
+ const btn=document.getElementById('donebtn');
+ const note=document.getElementById('cmsg');
+ if(btn){{btn.disabled=true;btn.textContent='Connecting…';}}
+ try{{
+  const r=await fetch('/hotspot/connect',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{purchase:b.purchase}})}});
+  const c=await r.json();
+  if(c.loginUrl){{location.href=c.loginUrl;return;}}
+  if(c.state==='connected'){{location.href='/thank-you?purchase='+encodeURIComponent(b.purchase);return;}}
+  if(note)note.textContent=c.error||'Could not connect yet — try again.';
+ }}catch(e){{if(note)note.textContent='Could not reach the router — try again.';}}
+ connecting=false;
+ if(btn){{btn.disabled=false;btn.textContent='Done — connect';}}
 }}
 function paid(b){{
  paidBody=b;
  const card=document.querySelector('.card');
  let html='<div class=okpage>';
  if(b.warning)html+=WARNI+'<span class="badge warn">Received</span><h1>Payment received</h1><p class=sub>'+b.warning+'</p>';
- else html+=DONE+'<span class="badge ok">Paid</span><h1>You are online</h1><p class=sub>Internet is switched on for this device.</p>';
+ else html+=DONE+'<span class="badge ok">Paid</span><h1>Payment received</h1><p class=sub>Copy your voucher codes, then tap Done — connect to go online.</p>';
  html+=vlist(b);
  if(b.vouchers&&b.vouchers.length){{
   html+='<p class=note>Copy these codes before leaving — each connects one device and cannot be used twice.</p>';
   html+='<button type=button onclick="copycodes()">Copy voucher code'+(b.vouchers.length>1?'s':'')+'</button>';
   html+='<p class=hint id=copied></p>';
  }}
- html+='<button type=button onclick="go()">Done — continue</button></div>';
+ html+='<button type=button id=donebtn onclick="go()">Done — connect</button><p class=hint id=cmsg></p></div>';
  card.innerHTML=BRAND+html;
 }}
 async function redeem(){{
@@ -1399,7 +1447,7 @@ refresh();
     body = f"""<span class="ic blue">{ICON_WIFI}</span>
 <span class="badge blue">Wi-Fi hotspot</span>
 <h1>Choose a bundle to get online</h1>
-<p class=sub>{lead}Pick a bundle and pay — your internet switches on as soon as M-Pesa confirms.</p>
+<p class=sub>{lead}Pick a bundle and pay — then tap Done — connect on the receipt to go online.</p>
 <p class=sect>Wi-Fi bundles</p>
 {picker}
 {stk}
@@ -1408,27 +1456,51 @@ refresh();
     return page("Get online", body).replace(b"</style>", HOTSPOT_CSS.encode() + b"</style>")
 
 
-def hotspot_pending_for(cursor, checkout_id):
-    """Load a purchase with the router and package details needed to finish it."""
+def _hotspot_pending_rows(cursor, where, params):
     cursor.execute(
-        """
+        f"""
         SELECT pu.id AS purchase_id, pu.client_id, pu.device_id, pu.mac, pu.ip, pu.devices, pu.periods,
-               pu.status, pu.username, pu.password, pu.login_url, pu.orig_url, pu.paid_at, pu.created_at, pu.mpesa_code,
+               pu.status, pu.username, pu.password, pu.authorized, pu.login_url, pu.orig_url,
+               pu.paid_at, pu.created_at, pu.mpesa_code,
                d.tunnel_ip, d.api_secret,
                COALESCE(p.download_mbps, c.download_mbps, 0) AS download_mbps,
                COALESCE(p.upload_mbps, c.upload_mbps, 0) AS upload_mbps,
                COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
                COALESCE(p.validity_unit, c.validity_unit, 'days') AS validity_unit,
+               {pppoe_store.HOTSPOT_LIMIT_COLUMNS},
                pu.package_id
         FROM hotspot_purchases pu
         LEFT JOIN isp_mikrotik_devices d ON d.id = pu.device_id
         LEFT JOIN isp_packages p ON p.id = pu.package_id
         LEFT JOIN company_packages c ON c.id = p.company_package_id
-        WHERE pu.checkout_id = %s
+        WHERE {where}
         """,
-        (checkout_id,),
+        params,
     )
-    return cursor.fetchone()
+    return cursor.fetchall()
+
+
+def hotspot_pending_for(cursor, checkout_id):
+    """Load a purchase with the router and package details needed to finish it."""
+    rows = _hotspot_pending_rows(cursor, "pu.checkout_id = %s", (checkout_id,))
+    return rows[0] if rows else None
+
+
+def hotspot_pending_purchase(cursor, purchase_id):
+    """Same load keyed by the purchase id — the Done-click connect step."""
+    rows = _hotspot_pending_rows(cursor, "pu.id = %s", (str(purchase_id or "")[:36],))
+    return rows[0] if rows else None
+
+
+def hotspot_unauthorized(cursor, seconds):
+    """Paid purchases still waiting for the buyer's Done click — after the
+    grace window the sweep connects them anyway, so a closed popup can never
+    strand a paid bundle on the captive side."""
+    return _hotspot_pending_rows(
+        cursor,
+        "pu.status = 'paid' AND pu.authorized = 0 AND pu.paid_at < NOW() - INTERVAL %s SECOND",
+        (max(15, int(seconds)),),
+    )
 
 
 def hotspot_pending_from_row(row):
@@ -1444,12 +1516,224 @@ def hotspot_pending_from_row(row):
         "upload": int(row["upload_mbps"] or 0),
         "seconds": int(row["periods"] or 1) * validity_seconds(row["validity_amount"], row["validity_unit"]),
         "devices": int(row["devices"] or 1),
+        "limits": pppoe_store.hotspot_byte_limits(row),
         "ip": row["ip"],
         "mac": row["mac"],
         "login": row.get("login_url") or "",
         "orig": row.get("orig_url") or "",
         "at": row.get("created_at") or datetime.now(),
     }
+
+
+def _limit_target(row, started):
+    return {
+        "username": str(row["username"]),
+        "device_id": str(row.get("device_id") or ""),
+        "client_id": str(row.get("client_id") or ""),
+        "purchase_id": str(row.get("purchase_id") or ""),
+        "voucher_id": str(row.get("voucher_id") or ""),
+        "tunnel_ip": str(row.get("tunnel_ip") or ""),
+        "api_secret": str(row.get("api_secret") or ""),
+        "profile": f"hs-{str(row.get('package_id') or '')[:8]}",
+        "started": started,
+        "limits": pppoe_store.hotspot_byte_limits(row),
+    }
+
+
+def hotspot_limit_targets(cursor):
+    """Every live hotspot grant joined to the byte rules its package sets.
+
+    Used vouchers and the payer's own grant row each carry one authorized
+    username. The sweep re-reads the package fields every pass, so editing a
+    package mid-grant still lands on the sessions it already opened.
+    """
+    cursor.execute(
+        f"""
+        SELECT v.id AS voucher_id, v.username, v.used_at AS started, v.seconds,
+               pu.id AS purchase_id, pu.client_id, pu.device_id, v.package_id,
+               d.tunnel_ip, d.api_secret,
+               {pppoe_store.HOTSPOT_LIMIT_COLUMNS}
+        FROM hotspot_vouchers v
+        JOIN hotspot_purchases pu ON pu.id = v.purchase_id
+        JOIN isp_mikrotik_devices d ON d.id = v.device_id
+        LEFT JOIN isp_packages p ON p.id = v.package_id
+        LEFT JOIN company_packages c ON c.id = p.company_package_id
+        WHERE v.status = 'used' AND v.username <> ''
+          AND pu.status = 'paid' AND pu.deleted = 0 AND pu.ended_at IS NULL
+        """
+    )
+    now = datetime.now()
+    targets = {}
+    for row in cursor.fetchall():
+        started = row.get("started")
+        seconds = int(row.get("seconds") or 0)
+        if isinstance(started, datetime) and started + timedelta(seconds=seconds + 3600) < now:
+            continue
+        key = (str(row["device_id"]), str(row["username"]))
+        targets.setdefault(key, _limit_target(row, started))
+    # The paying device grants through pu.username — its first voucher covers
+    # it, but a grant made before the voucher rows landed has none.
+    cursor.execute(
+        f"""
+        SELECT NULL AS voucher_id, pu.username, COALESCE(pu.paid_at, pu.created_at) AS started,
+               pu.periods, pu.id AS purchase_id, pu.client_id, pu.device_id, pu.package_id,
+               d.tunnel_ip, d.api_secret,
+               COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
+               COALESCE(p.validity_unit, c.validity_unit, 'days') AS validity_unit,
+               {pppoe_store.HOTSPOT_LIMIT_COLUMNS}
+        FROM hotspot_purchases pu
+        JOIN isp_mikrotik_devices d ON d.id = pu.device_id
+        LEFT JOIN isp_packages p ON p.id = pu.package_id
+        LEFT JOIN company_packages c ON c.id = p.company_package_id
+        WHERE pu.status = 'paid' AND pu.authorized = 1 AND pu.username <> ''
+          AND pu.deleted = 0 AND pu.ended_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM hotspot_vouchers v
+              WHERE v.purchase_id = pu.id AND v.username = pu.username AND v.status = 'used'
+          )
+        """
+    )
+    for row in cursor.fetchall():
+        started = row.get("started")
+        seconds = int(row.get("periods") or 1) * validity_seconds(row["validity_amount"], row["validity_unit"])
+        if isinstance(started, datetime) and started + timedelta(seconds=seconds + 3600) < now:
+            continue
+        key = (str(row["device_id"]), str(row["username"]))
+        targets.setdefault(key, _limit_target(row, started))
+    return list(targets.values())
+
+
+def _throttle_profile(base, rate):
+    """The FUP tier profile name — the rate is baked in so an edited throttle
+    speed reads as a different profile and converges on the next pass."""
+    return f"{base}-fup-{str(rate).replace('/', '-')}"
+
+
+def _rate_total(rate):
+    try:
+        up, down = str(rate).split("/", 1)
+        return int(up.rstrip("M")) + int(down.rstrip("M"))
+    except (AttributeError, ValueError):
+        return 0
+
+
+def _limit_state(cursor, device_id, username, key, start):
+    cursor.execute(
+        "SELECT base_bytes, window_start FROM hotspot_limit_state WHERE device_id = %s AND username = %s AND limit_key = %s",
+        (device_id, username, key),
+    )
+    row = cursor.fetchone()
+    if row:
+        return row
+    # The router's counters started at zero with the grant, so the window
+    # baseline is zero — not whatever the counters happen to read on the
+    # first pass the sweep sees this user.
+    cursor.execute(
+        """
+        INSERT IGNORE INTO hotspot_limit_state (device_id, username, limit_key, base_bytes, window_start)
+        VALUES (%s, %s, %s, 0, %s)
+        """,
+        (device_id, username, key, start),
+    )
+    return {"base_bytes": 0, "window_start": start}
+
+
+def _enforce_device_limits(cursor, targets):
+    device = targets[0]
+    try:
+        password = routeros_api.open_password(device["api_secret"])
+        counters = routeros_api.hotspot_user_counters(
+            device["tunnel_ip"], password, usernames=[t["username"] for t in targets]
+        )
+    except (routeros_api.RouterError, OSError):
+        return
+    now = datetime.now()
+    for target in targets:
+        name = target["username"]
+        user = counters.get(name)
+        if user is None:
+            continue
+        total = user["bytesIn"] + user["bytesOut"]
+        blocked = False
+        rates = []
+        for key, limit in (target["limits"] or {}).items():
+            start = target["started"] if isinstance(target["started"], datetime) else now
+            state = _limit_state(cursor, device["device_id"], name, key, start)
+            base = int(state["base_bytes"] or 0)
+            window = state["window_start"] or start
+            if limit["reset"] and (now - window).total_seconds() >= limit["reset"]:
+                base, window = total, now
+                cursor.execute(
+                    """
+                    UPDATE hotspot_limit_state
+                    SET base_bytes = %s, window_start = %s
+                    WHERE device_id = %s AND username = %s AND limit_key = %s
+                    """,
+                    (total, window, device["device_id"], name, key),
+                )
+            if total - base >= limit["bytes"]:
+                if limit["action"] == "disconnect":
+                    blocked = True
+                else:
+                    rates.append(limit["rate"])
+        want_profile = target["profile"]
+        want_rate = None
+        if not blocked and rates:
+            # Crossed throttle tiers stack — the strictest rate wins.
+            want_rate = min(rates, key=_rate_total)
+            want_profile = _throttle_profile(target["profile"], want_rate)
+        if user["profile"] == want_profile and user["disabled"] == blocked:
+            continue
+        try:
+            applied = routeros_api.limit_hotspot_user(
+                device["tunnel_ip"], password, name, want_profile, rate_limit=want_rate, blocked=blocked
+            )
+        except (routeros_api.RouterError, OSError):
+            continue
+        if applied:
+            print(
+                f"event=hotspot-limit user={name} profile={want_profile} blocked={int(blocked)}",
+                flush=True,
+            )
+
+
+def _drop_limit_state(cursor, live):
+    """State rows whose grant expired or was revoked are dead weight."""
+    cursor.execute("SELECT device_id, username FROM hotspot_limit_state")
+    for row in cursor.fetchall():
+        if (str(row["device_id"]), str(row["username"])) in live:
+            continue
+        cursor.execute(
+            "DELETE FROM hotspot_limit_state WHERE device_id = %s AND username = %s",
+            (row["device_id"], row["username"]),
+        )
+
+
+def enforce_hotspot_limits(connect):
+    """Apply the packages' byte rules to live hotspot sessions.
+
+    Speed and session time are written on the grant itself; byte rules cannot
+    all be — a throttle action, or any limit with a reset window, has no
+    RouterOS property. The router keeps cumulative per-user counters, so each
+    pass measures the window's usage and converges the account to what the
+    package says: the FUP throttle profile past its threshold, disabled past
+    a hard cap, back to full speed when the window resets.
+    """
+    db = connect()
+    try:
+        with db.cursor() as cursor:
+            targets = hotspot_limit_targets(cursor)
+            devices = {}
+            for target in targets:
+                if target["tunnel_ip"] and target["api_secret"]:
+                    devices.setdefault(target["device_id"], []).append(target)
+            live = {(target["device_id"], target["username"]) for target in targets}
+            for rows in devices.values():
+                _enforce_device_limits(cursor, rows)
+            _drop_limit_state(cursor, live)
+        db.commit()
+    finally:
+        db.close()
 
 
 def hotspot_login_url(pending, username, password, dst=""):
@@ -1533,6 +1817,7 @@ def authorize_hotspot_grant(pending, voucher=None):
     secret = (voucher or {}).get("password") or secrets.token_hex(4)
     profile = f"hs-{pending['package_id'][:8]}"
     rate = f"{pending['upload']}M/{pending['download']}M"
+    cap = pppoe_store.hotspot_native_cap(pending.get("limits") or {})
     report = routeros_api.authorize_hotspot_client(
         pending["tunnel_ip"],
         password,
@@ -1544,6 +1829,7 @@ def authorize_hotspot_grant(pending, voucher=None):
         rate,
         1,
         f"{pending['seconds']}s",
+        limit_bytes=cap or 0,
     )
     return {"username": username, "password": secret, "authorized": True, "online": bool(report.get("online"))}
 
@@ -1579,19 +1865,15 @@ def hotspot_receipt(cursor, purchase_id, client_id=None):
 
 
 def hotspot_paid_result(cursor, row):
-    """Credentials for a paid purchase, or pending while they are still being issued."""
+    """Receipt for a paid purchase — 'connect' while it waits for the Done
+    click, credentials once the device was authorized."""
     vouchers = [{"code": voucher["code"], "status": voucher["status"]} for voucher in hotspot_voucher_list(cursor, row["purchase_id"])]
     if not row["username"]:
-        paid_at = row.get("paid_at")
-        if paid_at and (datetime.now() - paid_at).total_seconds() < 60:
-            return {"state": "pending"}
         return {
             "state": "paid",
             "purchase": row["purchase_id"],
+            "connect": True,
             "vouchers": vouchers,
-            "username": "",
-            "password": "",
-            "warning": "Payment was received but the router did not answer. Show this page to the provider.",
         }
     body = {
         "state": "paid",
@@ -1788,6 +2070,8 @@ class PortalHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         if self.throttled("portal-pay", 20):
             return self._send(b'{"error":"Too many requests."}', 429, "application/json")
+        if urlparse(self.path).path == "/hotspot/connect":
+            return self.hotspot_connect()
         if urlparse(self.path).path == "/hotspot/redeem":
             return self.hotspot_redeem()
         if urlparse(self.path).path == "/hotspot/pay":
@@ -2229,6 +2513,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                 "upload": int(package["upload_mbps"]),
                 "seconds": quote_result["seconds"],
                 "devices": quote_result["devices"],
+                "limits": pppoe_store.hotspot_byte_limits(package),
                 "ip": ip,
                 "mac": mac,
                 "login": str(payload.get("login") or "")[:200],
@@ -2344,10 +2629,65 @@ class PortalHandler(BaseHTTPRequestHandler):
                     db.commit()
                 except Exception:
                     db.rollback()
+                with HOTSPOT_LOCK:
+                    HOTSPOT_PENDING.pop(checkout_id, None)
+                # The router grant waits for the Done click on the receipt
+                # screen (/hotspot/connect): authorizing here flips the phone
+                # to 'connected' and the OS closes the captive window before
+                # the voucher codes are ever seen. The sweep connects anyone
+                # whose window died first.
+                body = {
+                    "state": "paid",
+                    "purchase": pending["purchase_id"],
+                    "connect": True,
+                    "vouchers": [{"code": voucher["code"], "status": voucher["status"]} for voucher in vouchers],
+                }
+                return self._send(json.dumps(body).encode(), 200, "application/json")
+        finally:
+            db.close()
+
+    def hotspot_connect(self):
+        """The Done click on the paid receipt screen — authorize the buying
+        device only now. Holding the grant until this tap keeps the captive
+        window open while the voucher codes are on screen."""
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            payload = json.loads(self.rfile.read(min(length, 8192)) or b"{}")
+        except (ValueError, OSError):
+            return self._send(b'{"error":"Bad request."}', 400, "application/json")
+        purchase_id = str(payload.get("purchase") or "").strip()[:36]
+        if not purchase_id:
+            return self._send(b'{"error":"Which purchase?"}', 400, "application/json")
+        db = self.server.connect()
+        try:
+            with db.cursor() as cursor:
+                row = hotspot_pending_purchase(cursor, purchase_id)
+                if not row or row["status"] != "paid":
+                    return self._send(b'{"error":"That purchase is not ready to connect."}', 404, "application/json")
+                if row["username"] and row["authorized"]:
+                    login_url = hotspot_login_url(
+                        {"login": row.get("login_url"), "orig": row.get("orig_url")},
+                        row["username"],
+                        row["password"] or "",
+                        thankyou_url(purchase_id),
+                    )
+                    body = {"state": "connected", "purchase": purchase_id}
+                    if login_url:
+                        body["loginUrl"] = login_url
+                    return self._send(json.dumps(body).encode(), 200, "application/json")
+                pending = hotspot_pending_from_row(row)
+                cursor.execute(
+                    """
+                    SELECT id, code, username, password, status FROM hotspot_vouchers
+                    WHERE purchase_id = %s ORDER BY issued_at, id
+                    """,
+                    (purchase_id,),
+                )
+                vouchers = cursor.fetchall()
                 try:
                     grant = self.hotspot_authorize(pending, vouchers[0] if vouchers else None)
-                except Exception as error:
-                    grant = {"username": "", "password": "", "authorized": False, "error": str(error)}
+                except Exception:
+                    grant = {"username": "", "password": "", "authorized": False}
                 if vouchers and grant.get("online"):
                     cursor.execute(
                         """
@@ -2357,30 +2697,28 @@ class PortalHandler(BaseHTTPRequestHandler):
                         """,
                         (pending["ip"], pending["mac"], vouchers[0]["id"]),
                     )
-                    vouchers[0]["status"] = "used"
-                cursor.execute(
-                    """
-                    UPDATE hotspot_purchases
-                    SET username = %s, password = %s, authorized = %s
-                    WHERE id = %s
-                    """,
-                    (grant["username"], grant["password"], 1 if grant.get("authorized") else 0, pending["purchase_id"]),
-                )
+                if grant.get("authorized"):
+                    cursor.execute(
+                        """
+                        UPDATE hotspot_purchases
+                        SET username = %s, password = %s, authorized = 1
+                        WHERE id = %s
+                        """,
+                        (grant["username"], grant["password"], purchase_id),
+                    )
                 db.commit()
-                with HOTSPOT_LOCK:
-                    HOTSPOT_PENDING.pop(checkout_id, None)
-                body = {
-                    "state": "paid",
-                    "purchase": pending["purchase_id"],
-                    "username": grant["username"],
-                    "password": grant["password"],
-                    "vouchers": [{"code": voucher["code"], "status": voucher["status"]} for voucher in vouchers],
-                }
-                login_url = hotspot_login_url(pending, grant["username"], grant["password"], thankyou_url(pending["purchase_id"]))
+                if not grant.get("authorized"):
+                    return self._send(
+                        b'{"state":"failed","error":"Payment was received but the router did not answer - try again, or show this screen to the provider."}',
+                        200,
+                        "application/json",
+                    )
+                body = {"state": "connected", "purchase": purchase_id}
+                login_url = hotspot_login_url(
+                    pending, grant["username"], grant["password"], thankyou_url(purchase_id)
+                )
                 if login_url:
                     body["loginUrl"] = login_url
-                if not grant.get("authorized"):
-                    body["warning"] = "Payment was received but the router did not answer. Show this page to the provider."
                 return self._send(json.dumps(body).encode(), 200, "application/json")
         finally:
             db.close()
@@ -2404,12 +2742,13 @@ class PortalHandler(BaseHTTPRequestHandler):
         try:
             with db.cursor() as cursor:
                 cursor.execute(
-                    """
+                    f"""
                     SELECT v.id, v.client_id, v.purchase_id, v.device_id, v.package_id, v.code,
                            v.username, v.password, v.seconds, v.status,
                            d.tunnel_ip, d.api_secret,
                            COALESCE(p.download_mbps, c.download_mbps, 0) AS download_mbps,
-                           COALESCE(p.upload_mbps, c.upload_mbps, 0) AS upload_mbps
+                           COALESCE(p.upload_mbps, c.upload_mbps, 0) AS upload_mbps,
+                           {pppoe_store.HOTSPOT_LIMIT_COLUMNS}
                     FROM hotspot_vouchers v
                     JOIN isp_mikrotik_devices d ON d.id = v.device_id
                     LEFT JOIN isp_packages p ON p.id = v.package_id
@@ -2438,6 +2777,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                     secret = routeros_api.open_password(voucher["api_secret"] or "")
                     profile = f"hs-{str(voucher['package_id'])[:8]}"
                     rate = f"{int(voucher['upload_mbps'] or 0)}M/{int(voucher['download_mbps'] or 0)}M"
+                    cap = pppoe_store.hotspot_native_cap(pppoe_store.hotspot_byte_limits(voucher)) or 0
                     routeros_api.authorize_hotspot_client(
                         voucher["tunnel_ip"],
                         secret,
@@ -2449,6 +2789,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                         rate,
                         1,
                         f"{max(1, int(voucher['seconds'] or 0))}s",
+                        limit_bytes=cap,
                     )
                 except Exception:
                     cursor.execute(
