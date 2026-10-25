@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { PrimaryButton } from "@/components/ui/Buttons";
+import { SoundAlertsCard } from "@/components/ui/SoundAlertsCard";
 import { LiveLoad } from "@/components/ui/LiveLoad";
 import { PageHeader } from "@/components/ui/DetailGrid";
 import { usePageMeta } from "@/hooks/usePageMeta";
@@ -110,6 +111,9 @@ export function CompanyNotificationSettingsPage() {
         title="Notification settings"
         description="Choose which events should notify the company. Alerts go through the communication APIs set up in company settings."
       />
+      <div className="mt-6">
+        <SoundAlertsCard apiBase="/api/employee/company/notifications" scope="company" />
+      </div>
       {error ? (
         <p className="mt-4 notice" role="alert">
           {error}

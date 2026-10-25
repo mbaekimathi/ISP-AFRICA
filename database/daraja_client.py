@@ -21,7 +21,7 @@ The Safaricom security credential is the initiator password RSA-encrypted
 with Safaricom's public X.509 certificate (PKCS1v15) and base64'd. The cert
 comes from the PEM saved with the company's payment settings, falling back
 to ISP_DARAJA_CERT_SANDBOX / ISP_DARAJA_CERT_LIVE (a PEM file path or
-inline PEM).
+inline PEM), then to the published certs shipped under database/certs/.
 """
 
 import base64
@@ -38,6 +38,18 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 HOSTS = {
     "sandbox": "https://sandbox.safaricom.co.ke",
     "live": "https://api.safaricom.co.ke",
+}
+
+# Safaricom's published public certs, shipped under database/certs/ — public
+# keys only, used solely to RSA-encrypt the initiator password, so expiry
+# dates are irrelevant. The sandbox PEM is byte-identical to
+# keys/sandbox-cert.cer in Safaricom's mpesa-node-library repo; the live PEM
+# is the production cert Safaricom hands out at go-live. A PEM saved with
+# the payment settings or in ISP_DARAJA_CERT_* overrides these when
+# Safaricom rotates a cert.
+BUILTIN_CERT_FILES = {
+    "sandbox": os.path.join(os.path.dirname(__file__), "certs", "daraja_sandbox.pem"),
+    "live": os.path.join(os.path.dirname(__file__), "certs", "daraja_live.pem"),
 }
 
 OAUTH_PATH = "/oauth/v1/generate?grant_type=client_credentials"
@@ -266,7 +278,8 @@ class DarajaClient:
     def _cert_pem(self):
         """Safaricom public cert for this environment — the PEM saved with the
         company's payment settings first, else a PEM file path or inline PEM
-        in ISP_DARAJA_CERT_SANDBOX / ISP_DARAJA_CERT_LIVE."""
+        in ISP_DARAJA_CERT_SANDBOX / ISP_DARAJA_CERT_LIVE, else the published
+        cert shipped under database/certs/."""
         if self._cert_cache is None:
             saved = self.config.certificate.strip()
             if saved:
@@ -274,13 +287,15 @@ class DarajaClient:
             else:
                 env = "LIVE" if self.config.environment == "live" else "SANDBOX"
                 setting = (os.environ.get(f"ISP_DARAJA_CERT_{env}") or "").strip()
-                if not setting:
-                    self._cert_cache = b""
-                elif setting.startswith("-----BEGIN"):
+                if setting.startswith("-----BEGIN"):
                     self._cert_cache = setting.encode()
                 else:
-                    with open(setting, "rb") as handle:
-                        self._cert_cache = handle.read()
+                    path = setting or BUILTIN_CERT_FILES.get(self.config.environment, "")
+                    if not path:
+                        self._cert_cache = b""
+                    else:
+                        with open(path, "rb") as handle:
+                            self._cert_cache = handle.read()
         return self._cert_cache
 
     def _credential(self):

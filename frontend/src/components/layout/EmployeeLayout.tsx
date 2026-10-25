@@ -45,6 +45,7 @@ const companyCommunicationsLinks = [
 
 const dashboardLinks = [
   { label: "ISP clients", to: "/dashboard" },
+  { label: "System performance", to: "/performance" },
   { label: "Billings", to: "/employee/company-settings/billings" },
 ];
 
@@ -61,7 +62,7 @@ const companyPaymentsLinks = [
 
 function employeeSidebarItems(pathname: string, director: boolean) {
   const path = pathname.replace(/^\/employee/, "").replace(/^\/[a-z-]+\/[A-Z0-9]+/, "");
-  if (path === "/dashboard") return director ? dashboardLinks : [];
+  if (path === "/dashboard" || path === "/performance") return director ? dashboardLinks : [];
   if (path.startsWith("/company-settings/billings")) return billingsLinks;
   if (path === "/company-settings/payments") return companyPaymentsLinks;
   if (path.startsWith("/company-settings/notifications")) return companyNotificationLinks;

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { PrimaryButton } from "@/components/ui/Buttons";
+import { SoundAlertsCard } from "@/components/ui/SoundAlertsCard";
 import { LiveLoad } from "@/components/ui/LiveLoad";
 import { PageHeader } from "@/components/ui/DetailGrid";
 import { usePageMeta } from "@/hooks/usePageMeta";
@@ -124,6 +125,9 @@ export function IspNotificationSettingsPage() {
         title="Notification settings"
         description="Choose which events should notify this account. Alerts go through the communication API set up for this account or the company."
       />
+      <div className="mt-6">
+        <SoundAlertsCard apiBase="/api/notifications" scope="client" />
+      </div>
       {error ? (
         <p className="mt-4 notice" role="alert">
           {error}

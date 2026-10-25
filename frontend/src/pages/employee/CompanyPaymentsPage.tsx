@@ -30,7 +30,7 @@ type DarajaInfo = {
   callbackUrls: Record<string, string>;
   updatedAt: string;
   certificate: string;
-  certificateSource: "" | "saved" | "environment";
+  certificateSource: "" | "saved" | "environment" | "builtin";
 };
 
 type CompanyPayments = {
@@ -181,12 +181,20 @@ export function CompanyPaymentsPage() {
   }, [apply, approvedId]);
 
   function save() {
+    postDaraja({ gateway: "daraja", daraja: { ...daraja, certificate } });
+  }
+
+  function useBuiltinCertificate() {
+    postDaraja({ gateway: "daraja", daraja: { ...daraja, certificate: "", certificateReset: true } });
+  }
+
+  function postDaraja(body: { gateway: "daraja"; daraja: Record<string, unknown> }) {
     setError("");
     setNotice("");
     setPending(true);
     apiRequest<CompanyPayments>("/api/employee/company/payments", {
       method: "POST",
-      body: JSON.stringify({ gateway: "daraja", daraja: { ...daraja, certificate } }),
+      body: JSON.stringify(body),
     })
       .then((body) => {
         apply(body);
@@ -406,7 +414,7 @@ export function CompanyPaymentsPage() {
             hint={
               darajaInfo?.certificateSource === "environment"
                 ? "The server environment already provides one for this environment — paste a PEM here to override it."
-                : "The public certificate Daraja publishes for the selected environment — it encrypts the initiator password on every payout. Without it, payouts fail."
+                : "Optional — payouts already use the built-in Safaricom certificate for the selected environment; paste a PEM only to override it."
             }
           >
             <textarea
@@ -423,6 +431,11 @@ export function CompanyPaymentsPage() {
               value={certificate}
               onChange={(event) => setCertificate(event.target.value)}
             />
+            {certificateSaved ? (
+              <SecondaryButton type="button" disabled={pending} onClick={useBuiltinCertificate}>
+                Use the built-in certificate instead
+              </SecondaryButton>
+            ) : null}
           </FormField>
         </div>
         {darajaInfo ? (

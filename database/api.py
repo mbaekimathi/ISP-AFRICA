@@ -7,11 +7,13 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import socket
 import threading
 import time
 import traceback
 import uuid
+from collections import deque
 from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -82,6 +84,9 @@ AUTH_PATHS = {
     "/api/client/register",
     "/api/employee/register",
 }
+STARTED_AT = time.time()
+REQUEST_TIMES = deque(maxlen=2000)
+REQUEST_LOCK = threading.Lock()
 
 
 def rate_ok(key, limit, window):
@@ -458,7 +463,7 @@ def daraja_checklist(row, callback_base=""):
         {
             "key": "certificate",
             "label": "Safaricom certificate — for payouts",
-            "ok": bool(row.get("certificate") or env_certificate(row.get("environment"))),
+            "ok": True,
         },
         {"key": "callbackBase", "label": "Public callback address", "ok": bool(callback_base)},
     ]
@@ -1957,6 +1962,39 @@ def ensure_schema():
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS isp_notification_reads (
+                  client_id CHAR(36) NOT NULL,
+                  item_id VARCHAR(96) NOT NULL,
+                  read_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  PRIMARY KEY (client_id, item_id)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_push_subscriptions (
+                  endpoint VARCHAR(500) NOT NULL PRIMARY KEY,
+                  client_id CHAR(36) NOT NULL,
+                  p256dh VARCHAR(255) NOT NULL,
+                  auth VARCHAR(64) NOT NULL,
+                  user_agent VARCHAR(255) NOT NULL DEFAULT '',
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_push_dispatches (
+                  client_id CHAR(36) NOT NULL,
+                  item_id VARCHAR(96) NOT NULL,
+                  sent_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  PRIMARY KEY (client_id, item_id)
+                )
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS isp_company_settings (
                   client_id CHAR(36) NOT NULL PRIMARY KEY,
                   company_name VARCHAR(120) NOT NULL,
@@ -2618,6 +2656,133 @@ def company_notification_items(cursor):
     return items
 
 
+def client_notification_items(cursor, client_id):
+    """An ISP client's feed as data — shared by the notifications page, the
+    read-marker, and the push dispatcher (same role as
+    company_notification_items on the staff side)."""
+    cursor.execute(
+        "SELECT * FROM isp_notification_settings WHERE client_id = %s", (client_id,)
+    )
+    prefs = public_notification_settings(cursor.fetchone(), ISP_NOTIFICATION_TOGGLES)
+    items = []
+    if prefs["mikrotikOnboarded"]:
+        cursor.execute(
+            """
+            SELECT id, name, site, COALESCE(authorized_at, created_at) AS happened_at
+            FROM isp_mikrotik_devices
+            WHERE client_id = %s
+            ORDER BY happened_at DESC
+            LIMIT 20
+            """,
+            (client_id,),
+        )
+        for row in cursor.fetchall():
+            site = str(row["site"] or "").strip()
+            items.append(
+                {
+                    "id": f"onboarded-{row['id']}",
+                    "kind": "mikrotikOnboarded",
+                    "subject": f"{row['name']} was onboarded",
+                    "detail": f"Router {row['name']} at {site} is under management." if site else f"Router {row['name']} is under management.",
+                    "at": stamp(row["happened_at"]),
+                    "open": False,
+                }
+            )
+    if prefs["mikrotikUnreachable"]:
+        cursor.execute(
+            """
+            SELECT e.id, e.subject, e.reason, e.started_at, e.ended_at, d.name AS device_name
+            FROM isp_mikrotik_health_events e
+            JOIN isp_mikrotik_devices d ON d.id = e.device_id
+            WHERE e.client_id = %s
+            ORDER BY e.started_at DESC
+            LIMIT 30
+            """,
+            (client_id,),
+        )
+        for row in cursor.fetchall():
+            ended = row["ended_at"] is not None
+            items.append(
+                {
+                    "id": f"health-{row['id']}",
+                    "kind": "mikrotikUnreachable",
+                    "subject": row["subject"],
+                    "detail": f"{row['device_name']}: {row['reason']}" + ("" if ended else " — still down."),
+                    "at": stamp(row["started_at"]),
+                    "open": not ended,
+                }
+            )
+    items += gateway_feed_items(cursor, "client", client_id=client_id)
+    items.sort(key=lambda item: item["at"] or "", reverse=True)
+    return items
+
+
+def cpu_usage():
+    cores = os.cpu_count() or 1
+    try:
+        load1, load5, load15 = os.getloadavg()
+    except (AttributeError, OSError):
+        return {"cores": cores, "load1": None, "load5": None, "load15": None, "percent": None}
+    return {
+        "cores": cores,
+        "load1": round(load1, 2),
+        "load5": round(load5, 2),
+        "load15": round(load15, 2),
+        "percent": round(min(load1 / cores, 1) * 100, 1),
+    }
+
+
+def memory_usage():
+    """Total/available bytes from /proc/meminfo — present on the Linux VPS,
+    absent on a Windows dev box, where the panel just shows n/a."""
+    try:
+        stats = {}
+        with open("/proc/meminfo", encoding="utf-8") as handle:
+            for line in handle:
+                name, _, rest = line.partition(":")
+                stats[name.strip()] = int(rest.strip().split()[0]) * 1024
+        total = stats.get("MemTotal")
+        available = stats.get("MemAvailable")
+        if not total or available is None:
+            return None
+        used = total - available
+        return {"total": total, "used": used, "percent": round(used / total * 100, 1)}
+    except (OSError, ValueError, IndexError):
+        return None
+
+
+def host_uptime():
+    try:
+        with open("/proc/uptime", encoding="utf-8") as handle:
+            return int(float(handle.read().split()[0]))
+    except (OSError, ValueError, IndexError):
+        return int(time.time() - STARTED_AT)
+
+
+def uplink_probe():
+    """Outbound TCP reachability — the VPS's own path to the internet."""
+    started = time.perf_counter()
+    try:
+        with socket.create_connection(("8.8.8.8", 53), timeout=2):
+            pass
+        return {"status": "ok", "latencyMs": int((time.perf_counter() - started) * 1000)}
+    except OSError:
+        return {"status": "down", "latencyMs": None}
+
+
+def api_request_stats():
+    now = time.time()
+    with REQUEST_LOCK:
+        samples = [(at, ms) for at, ms in REQUEST_TIMES if at >= now - 300]
+    recent = [ms for _, ms in samples]
+    return {
+        "avgMs": round(sum(recent) / len(recent), 1) if recent else None,
+        "maxMs": max(recent) if recent else None,
+        "requestsPerMinute": sum(1 for at, _ in samples if at >= now - 60),
+        "tracked": len(samples),
+    }
+
+
 class ApiServer(ThreadingHTTPServer):
     """Refuses to share its port: without SO_EXCLUSIVEADDRUSE a second
     api.py instance can bind the same TCP port on Windows and silently
@@ -2744,6 +2909,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(status, {"error": "The account service could not complete that request."})
         finally:
             elapsed = int((time.perf_counter() - started) * 1000)
+            if path.startswith("/api/"):
+                with REQUEST_LOCK:
+                    REQUEST_TIMES.append((time.time(), elapsed))
             print(f"event=request method={method} path={path} status={status} ms={elapsed}", flush=True)
 
     def dispatch(self, cursor, method, path, payload, token, query):
@@ -2845,6 +3013,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.test_company_push(cursor, payload, token.get("isp_employee_session")), None
         if method == "POST" and path == "/api/employee/company/notifications/read":
             return self.mark_company_notifications_read(cursor, payload, token.get("isp_employee_session")), None
+        if method == "GET" and path == "/api/director/system":
+            return {"system": self.system_health(cursor, token.get("isp_employee_session"))}, None
         if method == "POST" and path == "/api/director/clients/enter":
             require_reviewer(cursor, token.get("isp_employee_session"))
             employee_id = session_account_id(cursor, token.get("isp_employee_session"), "employee")
@@ -3007,6 +3177,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.save_notifications(cursor, payload, token.get("isp_client_session")), None
         if method == "GET" and path == "/api/notifications/feed":
             return self.notification_feed(cursor, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/notifications/feed/read":
+            return self.mark_notifications_read(cursor, payload, token.get("isp_client_session")), None
+        if method == "GET" and path == "/api/notifications/push":
+            return self.read_client_push(cursor, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/notifications/push/subscribe":
+            return self.save_client_push_subscription(cursor, payload, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/notifications/push/unsubscribe":
+            return self.delete_client_push_subscription(cursor, payload, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/notifications/push/test":
+            return self.test_client_push(cursor, payload, token.get("isp_client_session")), None
         raise ApiError(404, "That account request was not found.")
 
     def login(self, cursor, kind, payload):
@@ -3237,6 +3417,56 @@ class Handler(BaseHTTPRequestHandler):
                 "wireguard": wireguard,
                 "web": "serving" if web_root() else "not-built",
             },
+        }
+
+    def system_health(self, cursor, token):
+        require_director(cursor, token, "system performance")
+        started = time.perf_counter()
+        cursor.execute("SELECT 1 AS ok")
+        cursor.fetchone()
+        db_ms = int((time.perf_counter() - started) * 1000)
+        cursor.execute(
+            "SHOW GLOBAL STATUS WHERE Variable_name IN ('Threads_connected', 'Uptime')"
+        )
+        status_rows = {row["Variable_name"]: row["Value"] for row in cursor.fetchall()}
+        cursor.execute(
+            "SELECT account_kind, COUNT(*) AS total FROM isp_sessions "
+            "WHERE created_at >= DATE_SUB(NOW(), INTERVAL %s SECOND) GROUP BY account_kind",
+            (SESSION_SECONDS,),
+        )
+        sessions = {"clients": 0, "employees": 0, "subscribers": None}
+        for row in cursor.fetchall():
+            if row["account_kind"] == "client":
+                sessions["clients"] = int(row["total"])
+            elif row["account_kind"] == "employee":
+                sessions["employees"] = int(row["total"])
+        sessions["total"] = sessions["clients"] + sessions["employees"]
+        try:
+            cursor.execute("SELECT COUNT(*) AS live FROM radacct WHERE acctstoptime IS NULL")
+            sessions["subscribers"] = int(cursor.fetchone()["live"] or 0)
+        except pymysql.MySQLError:
+            pass
+        disk = shutil.disk_usage(os.environ.get("ISP_DISK_PATH", "/"))
+        return {
+            "at": datetime.now().isoformat(timespec="seconds"),
+            "cpu": cpu_usage(),
+            "memory": memory_usage(),
+            "disk": {
+                "total": disk.total,
+                "used": disk.used,
+                "free": disk.free,
+                "percent": round(disk.used / disk.total * 100, 1),
+            },
+            "database": {
+                "status": "ok",
+                "latencyMs": db_ms,
+                "threads": int(status_rows.get("Threads_connected") or 0),
+                "uptimeSeconds": int(status_rows.get("Uptime") or 0),
+            },
+            "sessions": sessions,
+            "api": api_request_stats(),
+            "host": {"uptimeSeconds": host_uptime()},
+            "uplink": uplink_probe(),
         }
 
     def dashboard_summary(self, cursor, token):
@@ -5071,60 +5301,102 @@ class Handler(BaseHTTPRequestHandler):
 
     def notification_feed(self, cursor, token):
         client_id = self.require_notification_client(cursor, token)
-        prefs = public_notification_settings(
-            self.isp_notification_row(cursor, client_id), ISP_NOTIFICATION_TOGGLES
+        items = client_notification_items(cursor, client_id)
+        cursor.execute(
+            "SELECT item_id FROM isp_notification_reads WHERE client_id = %s",
+            (client_id,),
         )
-        items = []
-        if prefs["mikrotikOnboarded"]:
-            cursor.execute(
-                """
-                SELECT id, name, site, COALESCE(authorized_at, created_at) AS happened_at
-                FROM isp_mikrotik_devices
-                WHERE client_id = %s
-                ORDER BY happened_at DESC
-                LIMIT 20
-                """,
-                (client_id,),
-            )
-            for row in cursor.fetchall():
-                site = str(row["site"] or "").strip()
-                items.append(
-                    {
-                        "id": f"onboarded-{row['id']}",
-                        "kind": "mikrotikOnboarded",
-                        "subject": f"{row['name']} was onboarded",
-                        "detail": f"Router {row['name']} at {site} is under management." if site else f"Router {row['name']} is under management.",
-                        "at": stamp(row["happened_at"]),
-                        "open": False,
-                    }
-                )
-        if prefs["mikrotikUnreachable"]:
-            cursor.execute(
-                """
-                SELECT e.id, e.subject, e.reason, e.started_at, e.ended_at, d.name AS device_name
-                FROM isp_mikrotik_health_events e
-                JOIN isp_mikrotik_devices d ON d.id = e.device_id
-                WHERE e.client_id = %s
-                ORDER BY e.started_at DESC
-                LIMIT 30
-                """,
-                (client_id,),
-            )
-            for row in cursor.fetchall():
-                ended = row["ended_at"] is not None
-                items.append(
-                    {
-                        "id": f"health-{row['id']}",
-                        "kind": "mikrotikUnreachable",
-                        "subject": row["subject"],
-                        "detail": f"{row['device_name']}: {row['reason']}" + ("" if ended else " — still down."),
-                        "at": stamp(row["started_at"]),
-                        "open": not ended,
-                    }
-                )
-        items += gateway_feed_items(cursor, "client", client_id=client_id)
-        items.sort(key=lambda item: item["at"] or "", reverse=True)
+        read = {row["item_id"] for row in cursor.fetchall()}
+        for item in items:
+            item["read"] = item["id"] in read
         return {"notifications": items[:50]}
+
+    def mark_notifications_read(self, cursor, payload, token):
+        client_id = self.require_notification_client(cursor, token)
+        if payload.get("all"):
+            ids = [item["id"] for item in client_notification_items(cursor, client_id)]
+        else:
+            ids = [str(item or "")[:96] for item in (payload.get("itemIds") or []) if str(item or "")]
+        for item_id in ids[:200]:
+            cursor.execute(
+                "INSERT IGNORE INTO isp_notification_reads (client_id, item_id) VALUES (%s, %s)",
+                (client_id, item_id),
+            )
+        return self.notification_feed(cursor, token)
+
+    def read_client_push(self, cursor, token):
+        client_id = self.require_notification_client(cursor, token)
+        public, _ = vapid_keys(cursor)
+        cursor.execute(
+            "SELECT COUNT(*) AS devices FROM isp_push_subscriptions WHERE client_id = %s",
+            (client_id,),
+        )
+        return {
+            "push": {
+                "vapidPublicKey": public,
+                "devices": int((cursor.fetchone() or {}).get("devices") or 0),
+            }
+        }
+
+    def save_client_push_subscription(self, cursor, payload, token):
+        client_id = self.require_notification_client(cursor, token)
+        endpoint = str(payload.get("endpoint", "")).strip()
+        keys = payload.get("keys") or {}
+        p256dh = str(keys.get("p256dh", "")).strip()
+        auth = str(keys.get("auth", "")).strip()
+        if not endpoint.startswith("https://") or len(endpoint) > 500:
+            raise ApiError(400, "The push subscription endpoint is not valid.")
+        if not p256dh or len(p256dh) > 255 or not auth or len(auth) > 64:
+            raise ApiError(400, "The push subscription keys are not valid.")
+        cursor.execute(
+            """
+            INSERT INTO isp_push_subscriptions (endpoint, client_id, p256dh, auth, user_agent)
+            VALUES (%s, %s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE
+              client_id = VALUES(client_id),
+              p256dh = VALUES(p256dh),
+              auth = VALUES(auth),
+              user_agent = VALUES(user_agent)
+            """,
+            (endpoint, client_id, p256dh, auth, str(payload.get("userAgent", ""))[:250]),
+        )
+        return self.read_client_push(cursor, token)
+
+    def delete_client_push_subscription(self, cursor, payload, token):
+        self.require_notification_client(cursor, token)
+        endpoint = str(payload.get("endpoint", "")).strip()
+        if endpoint:
+            cursor.execute("DELETE FROM isp_push_subscriptions WHERE endpoint = %s", (endpoint,))
+        return self.read_client_push(cursor, token)
+
+    def test_client_push(self, cursor, payload, token):
+        client_id = self.require_notification_client(cursor, token)
+        endpoint = str(payload.get("endpoint", "")).strip()
+        cursor.execute(
+            "SELECT p256dh, auth FROM isp_push_subscriptions WHERE endpoint = %s AND client_id = %s",
+            (endpoint, client_id),
+        )
+        sub = cursor.fetchone()
+        if not sub:
+            raise ApiError(404, "This gadget is not subscribed for sound alerts yet.")
+        public, private = vapid_keys(cursor)
+        message = json.dumps(
+            {
+                "title": "Test alert",
+                "body": "Sound alerts are working on this device.",
+                "tag": "test-alert",
+                "url": "/account/settings/isp-notifications",
+            }
+        )
+        code, detail = webpush.send_push(
+            endpoint, sub["p256dh"], sub["auth"], message, public, private, push_contact(cursor)
+        )
+        if code in (404, 410):
+            cursor.execute("DELETE FROM isp_push_subscriptions WHERE endpoint = %s", (endpoint,))
+            raise ApiError(410, "This gadget's subscription expired — turn alerts off and on again.")
+        if code is None or code >= 400:
+            raise ApiError(502, f"The push service could not be reached ({detail or 'network error'}).")
+        return {"test": {"connected": True, "reason": "The push service accepted the test alert."}}
 
     def require_company_client(self, cursor, token):
         client_id = session_account_id(cursor, token, "client")
@@ -5607,7 +5879,7 @@ class Handler(BaseHTTPRequestHandler):
                 if (daraja_row or {}).get("certificate")
                 else "environment"
                 if env_certificate((daraja_row or {}).get("environment"))
-                else ""
+                else "builtin"
             )
         return {
             "daraja": daraja,
@@ -5642,8 +5914,12 @@ class Handler(BaseHTTPRequestHandler):
                     )
                 except daraja_client.DarajaError as error:
                     raise ApiError(400, str(error))
-            certificate = clean_certificate(
-                daraja.get("certificate"), (previous or {}).get("certificate")
+            certificate = (
+                ""
+                if daraja.get("certificateReset")
+                else clean_certificate(
+                    daraja.get("certificate"), (previous or {}).get("certificate")
+                )
             )
             cursor.execute(
                 """
@@ -6074,14 +6350,9 @@ class Handler(BaseHTTPRequestHandler):
             (employee_id,),
         )
         read = {row["item_id"] for row in cursor.fetchall()}
-        today = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0).isoformat(sep=" ")
-        visible = []
         for item in items:
             item["read"] = item["id"] in read
-            # Today's items always show; older ones only stay while unread.
-            if not item["read"] or (item["at"] or "") >= today:
-                visible.append(item)
-        return {"notifications": visible[:80]}
+        return {"notifications": items[:80]}
 
     def mark_company_notifications_read(self, cursor, payload, token):
         employee_id = self.require_company_employee(cursor, token, "company notifications")
@@ -6863,6 +7134,69 @@ def dispatch_company_pushes():
                         print(f"event=push item={item['id']} status={code} detail={detail}", flush=True)
 
 
+def dispatch_client_pushes():
+    """Per-ISP-client mirror of dispatch_company_pushes: each subscribed
+    client's feed is diffed against its own isp_push_dispatches rows, so one
+    client's already-pushed items never mute another's."""
+    with connect() as db:
+        with db.cursor() as cursor:
+            cursor.execute("SELECT DISTINCT client_id FROM isp_push_subscriptions")
+            client_ids = [row["client_id"] for row in cursor.fetchall()]
+            if not client_ids:
+                return
+            public, private = vapid_keys(cursor)
+            subject = push_contact(cursor)
+            for client_id in client_ids:
+                items = client_notification_items(cursor, client_id)
+                if not items:
+                    continue
+                cursor.execute(
+                    "SELECT COUNT(*) AS seen FROM isp_push_dispatches WHERE client_id = %s",
+                    (client_id,),
+                )
+                seeded = bool((cursor.fetchone() or {}).get("seen"))
+                fresh = []
+                for item in reversed(items):
+                    cursor.execute(
+                        "INSERT IGNORE INTO isp_push_dispatches (client_id, item_id) VALUES (%s, %s)",
+                        (client_id, item["id"]),
+                    )
+                    if cursor.rowcount == 1 and (seeded or (item["at"] or "") >= _BOOT_STAMP):
+                        fresh.append(item)
+                if not fresh:
+                    continue
+                cursor.execute(
+                    "SELECT endpoint, p256dh, auth FROM isp_push_subscriptions WHERE client_id = %s",
+                    (client_id,),
+                )
+                subscriptions = list(cursor.fetchall())
+                for item in fresh[-3:]:
+                    message = json.dumps(
+                        {
+                            "title": item["subject"],
+                            "body": item.get("detail") or "",
+                            "tag": item["id"],
+                            "url": "/account/settings/isp-notifications",
+                        }
+                    )
+                    for sub in subscriptions:
+                        try:
+                            code, detail = webpush.send_push(
+                                sub["endpoint"], sub["p256dh"], sub["auth"],
+                                message, public, private, subject,
+                            )
+                        except Exception as error:
+                            print(f"event=push item={item['id']} error={error}", flush=True)
+                            continue
+                        if code in (404, 410):
+                            cursor.execute(
+                                "DELETE FROM isp_push_subscriptions WHERE endpoint = %s",
+                                (sub["endpoint"],),
+                            )
+                        elif code is None or code >= 400:
+                            print(f"event=push item={item['id']} status={code} detail={detail}", flush=True)
+
+
 _push_wake = threading.Event()
 
 
@@ -6884,6 +7218,10 @@ def push_dispatch_loop():
             dispatch_company_pushes()
         except Exception as error:
             print(f"event=push-dispatch error={error}", flush=True)
+        try:
+            dispatch_client_pushes()
+        except Exception as error:
+            print(f"event=push-dispatch-client error={error}", flush=True)
 
 
 def reconcile_all(connect):

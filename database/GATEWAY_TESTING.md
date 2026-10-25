@@ -11,8 +11,9 @@
 
 Payout-side calls (B2C, B2B, Transaction Status, Account Balance, Reversal)
 need the initiator password encrypted with Safaricom's public certificate —
-set `ISP_DARAJA_CERT_SANDBOX` / `ISP_DARAJA_CERT_LIVE` to a PEM path (or the
-inline PEM) downloaded from the Daraja portal.
+the published certs ship in `database/certs/`, so this works with no setup;
+`ISP_DARAJA_CERT_SANDBOX` / `ISP_DARAJA_CERT_LIVE` (a PEM path or inline PEM)
+override only when Safaricom rotates a cert.
 
 `test_gateway_db.py` creates a scratch database (`ISP-DB-GWTEST`, override
 with `ISP_GATEWAY_TEST_DB`), exercises apply/undo/re-apply, ledger triggers,

@@ -17,6 +17,7 @@ import { IspClientsPage } from "@/pages/employee/IspClientsPage";
 import { EmployeeLoginPage } from "@/pages/employee/EmployeeLoginPage";
 import { EmployeeReviewsPage } from "@/pages/employee/EmployeeReviewsPage";
 import { EmployeeSignUpPage } from "@/pages/employee/EmployeeSignUpPage";
+import { SystemPerformancePage } from "@/pages/employee/SystemPerformancePage";
 import { AccountPage } from "@/pages/AccountPage";
 import { BillingsPage } from "@/pages/BillingsPage";
 import { GatewayLedgerPage } from "@/pages/GatewayLedgerPage";
@@ -151,6 +152,7 @@ export function App() {
           </Route>
           <Route element={<EmployeeLayout />}>
             <Route path="/:role/:code/dashboard" element={<EmployeeDashboardPage />} />
+            <Route path="/:role/:code/performance" element={<SystemPerformancePage />} />
             <Route path="/:role/:code/clients" element={<IspClientsPage />} />
             <Route path="/:role/:code/account" element={<EmployeeAccountPage />} />
             <Route path="/:role/:code/company-settings" element={<SectionPage title="Company settings" />} />

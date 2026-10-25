@@ -4,7 +4,7 @@ import { Link, useLocation } from "react-router-dom";
 import { apiRequest } from "@/lib/api";
 import { cn } from "@/lib/cn";
 
-type NotificationItem = { id: string; open: boolean };
+type NotificationItem = { id: string; open: boolean; read?: boolean };
 
 const POLL_MS = 30_000;
 
@@ -40,13 +40,14 @@ export function NotificationBell({
 
   if (!enabled) return null;
 
-  const ongoing = items.filter((item) => item.open).length;
-  const count = items.length;
+  const unread = items.filter((item) => item.read !== true);
+  const ongoing = unread.filter((item) => item.open).length;
+  const count = unread.length;
   const label = count > 99 ? "99+" : String(count);
   const ariaLabel =
     count === 0
       ? "Notifications"
-      : `${count} notification${count === 1 ? "" : "s"}${ongoing ? `, ${ongoing} ongoing` : ""}`;
+      : `${count} unread notification${count === 1 ? "" : "s"}${ongoing ? `, ${ongoing} ongoing` : ""}`;
 
   return (
     <Link

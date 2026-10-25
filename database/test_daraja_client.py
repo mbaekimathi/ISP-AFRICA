@@ -389,9 +389,24 @@ class ErrorPathTests(unittest.TestCase):
     def test_missing_cert_blocks_secured_calls(self):
         import os
         with patch.dict(os.environ, {"ISP_DARAJA_CERT_SANDBOX": ""}):
-            transport = FakeTransport(TOKEN_OK)
-            with self.assertRaises(DarajaError):
-                fresh_client(transport).account_balance("https://r/ok", "https://r/tmo")
+            with patch.dict(daraja_client.BUILTIN_CERT_FILES, {"sandbox": ""}):
+                transport = FakeTransport(TOKEN_OK)
+                with self.assertRaises(DarajaError):
+                    fresh_client(transport).account_balance("https://r/ok", "https://r/tmo")
+
+    def test_builtin_cert_files_ship_and_parse(self):
+        from cryptography import x509
+        for path in daraja_client.BUILTIN_CERT_FILES.values():
+            with open(path, "rb") as handle:
+                x509.load_pem_x509_certificate(handle.read())
+
+    def test_builtin_cert_encrypts_when_nothing_configured(self):
+        import os
+        with patch.dict(os.environ, {"ISP_DARAJA_CERT_SANDBOX": ""}):
+            transport = FakeTransport(TOKEN_OK, ACK)
+            fresh_client(transport).account_balance("https://r/ok", "https://r/tmo")
+            body = transport.last_json()
+            self.assertTrue(body["SecurityCredential"])
 
     def test_mask_msisdn(self):
         self.assertEqual(daraja_client.mask_msisdn("254700123456"), "2547•••••456")
