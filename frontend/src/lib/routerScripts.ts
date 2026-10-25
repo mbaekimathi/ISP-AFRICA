@@ -96,14 +96,16 @@ export function assignPortRoles(
   }
   const open = sorted.filter((port) => !assigned[port.name] && !port.slave && !port.disabled);
   const requested = routerPortUses(role);
-  const customerUses = requested.filter((use) => use === "hotspot" || use === "pppoe" || use === "static");
+  const customerUses = requested.length
+    ? requested.filter((use) => use === "hotspot" || use === "pppoe" || use === "static")
+    : (["hotspot", "pppoe"] as PortUse[]);
   const wanName = (open.find((port) => port.running) ?? open[0])?.name;
   if (wanName && (requested.includes("wan") || customerUses.length > 0 || requested.includes("dhcp"))) assigned[wanName] = ["wan"];
   const rest = open.filter((port) => port.name !== wanName);
   const localName = requested.includes("dhcp") ? rest[rest.length - 1]?.name : "";
   const customerPorts = rest.filter((port) => port.name !== localName);
-  if (customerUses.length === 1) {
-    for (const port of customerPorts) assigned[port.name] = [customerUses[0]];
+  if (requested.length === 0 || customerUses.length === 1) {
+    for (const port of customerPorts) assigned[port.name] = [...customerUses];
   } else {
     customerPorts.forEach((port, index) => {
       if (index < customerUses.length) assigned[port.name] = [customerUses[index]];

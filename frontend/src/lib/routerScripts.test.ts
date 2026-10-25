@@ -34,6 +34,18 @@ assert.deepEqual(
   assignPortRoles([{ name: "ether1", comment: "PPPoE", running: true, disabled: false }], "hotspot").ether1,
   ["pppoe"],
 );
+const unroled = assignPortRoles(
+  ["ether1", "ether2", "ether3"].map((name) => ({
+    name,
+    comment: "",
+    running: name === "ether1",
+    disabled: false,
+  })),
+  "",
+);
+assert.deepEqual(unroled.ether1, ["wan"]);
+assert.deepEqual(unroled.ether2, ["hotspot", "pppoe"]);
+assert.deepEqual(unroled.ether3, ["hotspot", "pppoe"]);
 const restored = loadPortUses(
   [
     { name: "ether1", comment: "", running: true },
