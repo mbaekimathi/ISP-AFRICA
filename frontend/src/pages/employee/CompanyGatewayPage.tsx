@@ -129,6 +129,7 @@ type Tab = "held" | "payments" | "payouts" | "batches" | "suspense" | "pending" 
 
 const holdTone: Record<string, StatusTone> = {
   eligible: "pending",
+  queued: "pending",
   kill_switch: "critical",
   suspended: "critical",
   unconfigured: "critical",

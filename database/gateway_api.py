@@ -343,7 +343,17 @@ def export_csv(cursor, kind, query):
 
 
 def isp_summary(cursor, client_id):
-    return gateway_store.isp_gateway_summary(cursor, client_id)
+    import gateway_settle
+
+    summary = gateway_store.isp_gateway_summary(cursor, client_id)
+    hold = None
+    rows = gateway_store.client_custody(cursor, client_id)
+    if rows:
+        hold = gateway_settle.held_reason(
+            cursor, rows[0], gateway_settle.company_gateway_settings(cursor),
+            gateway_store.fee_bands(cursor), audience="client")
+    summary["hold"] = hold
+    return summary
 
 
 def isp_settings(cursor, client_id):
@@ -381,14 +391,16 @@ def isp_payments(cursor, client_id, query):
     limit, offset = _page(query)
     status = (query.get("status") or [None])[0]
     return {"payments": gateway_store.custody_rows(
-        cursor, client_id=client_id, status=status, limit=limit, offset=offset)}
+        cursor, client_id=client_id, status=status, limit=limit, offset=offset,
+        mask=False)}
 
 
 def isp_payouts(cursor, client_id, query):
     limit, offset = _page(query)
     status = (query.get("status") or [None])[0]
     return {"payouts": gateway_store.list_payouts(
-        cursor, client_id=client_id, status=status, limit=limit, offset=offset)}
+        cursor, client_id=client_id, status=status, limit=limit, offset=offset,
+        mask=False)}
 
 
 def isp_ledger(cursor, client_id, query):

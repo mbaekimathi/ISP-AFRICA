@@ -13,6 +13,7 @@ type Summary = {
   mode: string | null;
   balance: string;
   unbatchedPayments: number;
+  hold: { code: string; message: string } | null;
   settlement: {
     mode: string | null;
     holdHours: number | null;
@@ -101,6 +102,20 @@ const payoutTone: Record<string, StatusTone> = {
   timed_out: "overdue",
   needs_review: "overdue",
   failed: "critical",
+};
+
+const holdTone: Record<string, StatusTone> = {
+  eligible: "pending",
+  queued: "pending",
+  kill_switch: "critical",
+  suspended: "critical",
+  unconfigured: "critical",
+  no_destination: "overdue",
+  residual: "due",
+  hold: "due",
+  threshold: "due",
+  schedule: "due",
+  minimum: "due",
 };
 
 const custodyLabel: Record<string, string> = {
@@ -236,6 +251,13 @@ export function GatewayLedgerPage() {
             <p className="notice mt-4" role="status">
               A payout destination change ({pendingChangeText(summary.pendingChange)}) applies at{" "}
               {summary.pendingChangeEffectiveAt}. Contact the company before then to stop it.
+            </p>
+          ) : null}
+
+          {summary.hold ? (
+            <p className="notice mt-4" role="status">
+              <StatusBadge tone={holdTone[summary.hold.code] ?? "neutral"}>{summary.hold.code}</StatusBadge>{" "}
+              {summary.hold.message}
             </p>
           ) : null}
 

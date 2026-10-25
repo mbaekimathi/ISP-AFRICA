@@ -159,6 +159,47 @@ def schedule_due(schedule_text, last_settled_at, now=None):
     return False
 
 
+def _next_occurrence(entry, now):
+    """The next time this schedule entry fires after now — one step past the
+    most recent occurrence (a day for daily entries, a week for weekdays)."""
+    import datetime as _dt
+
+    last = _last_occurrence(entry, now)
+    if last is None:
+        return None
+    day = str((entry or {}).get("day") or "daily")
+    return last + _dt.timedelta(days=1 if day == "daily" else 7)
+
+
+def next_schedule_run(schedule_text, now=None):
+    """Soonest upcoming fire time across the payout schedule, or None."""
+    import datetime as _dt
+
+    now = now or _dt.datetime.now()
+    try:
+        entries = json.loads(schedule_text or "[]")
+    except ValueError:
+        entries = []
+    if not isinstance(entries, list):
+        return None
+    upcoming = [run for entry in entries
+                if (run := _next_occurrence(entry, now)) is not None]
+    return min(upcoming) if upcoming else None
+
+
+def _wait_text(delta):
+    """A short '2h 14m' countdown for hold and schedule waits."""
+    seconds = max(0, int(delta.total_seconds()))
+    days, seconds = divmod(seconds, 86400)
+    hours, seconds = divmod(seconds, 3600)
+    minutes = seconds // 60
+    if days:
+        return f"{days}d {hours}h"
+    if hours:
+        return f"{hours}h {minutes}m"
+    return f"{max(1, minutes)}m"
+
+
 # --- pending destination changes ------------------------------------------------
 
 
@@ -210,9 +251,11 @@ def split_amount(net, count):
     return parts
 
 
-def plan_batch(entries, company, client_row, bands=None):
-    """gross - commission - estimated fees - banded charges -> payout
-    amounts, or None when the money carries forward to the next cycle."""
+def project_batch(entries, company, client_row, bands=None):
+    """The batch these entries would make — gross, commission, fees, net and
+    the per-payout split — even when the net sits below the minimum payout,
+    so callers can say exactly how far short it falls. None only when there
+    are no positive collections to pay out."""
     gross = sum((_money(e["amount"]) for e in entries if e["type"] == "collection"), Decimal("0"))
     other = sum((_money(e["amount"]) for e in entries if e["type"] != "collection"), Decimal("0"))
     if gross <= 0:
@@ -240,19 +283,27 @@ def plan_batch(entries, company, client_row, bands=None):
         net = base - fee
     minimum = client_row.get("min_payout_override")
     minimum = _money(minimum) if minimum is not None else _money(company["min_payout"])
-    if net < minimum or net <= 0:
-        return None
-    if not amounts:
+    if not amounts and net > 0:
         amounts = split_amount(net, int(count))
     return {
         "gross": gross,
         "commission": commission,
         "fee": fee,
         "net": net,
+        "minimum": minimum,
         "amounts": amounts,
         "period_from": min(e["created_at"] for e in entries),
         "period_to": max(e["created_at"] for e in entries),
     }
+
+
+def plan_batch(entries, company, client_row, bands=None):
+    """project_batch limited to what may settle now — None when the net
+    carries forward to the next cycle (below the minimum or nothing left)."""
+    plan = project_batch(entries, company, client_row, bands)
+    if not plan or plan["net"] < plan["minimum"] or plan["net"] <= 0:
+        return None
+    return plan
 
 
 # --- writing the batch -------------------------------------------------------------
@@ -736,23 +787,70 @@ def _describe_schedule(schedule_text):
     return suffix or "no times set"
 
 
-def held_reason(cursor, row, company, bands=None):
+def _pending_payouts(cursor, client_id):
+    """Payouts already queued or in flight for this client — count and the
+    total they're about to draw out of the held balance."""
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS total
+        FROM gateway_payouts
+        WHERE client_id = %s AND status IN ('queued', 'submitting', 'submitted')
+        """,
+        (client_id,),
+    )
+    row = cursor.fetchone() or {}
+    return int(row.get("n") or 0), _money(row.get("total"))
+
+
+def _release_detail(releases):
+    """'first releases in ~4h 12m (Mon 27 Oct 14:30)' for a hold window."""
+    import datetime as _dt
+
+    if not releases:
+        return "release on the next settlement run"
+    wait = _wait_text(releases - _dt.datetime.now())
+    return f"first releases in ~{wait} ({releases.strftime('%a %d %b %H:%M')})"
+
+
+def held_reason(cursor, row, company, bands=None, audience="company"):
     """Why a pooled client's balance hasn't settled yet — mirrors the checks
-    settle_client runs, in the same order. Returns {code, message} or None
-    when nothing is held."""
+    settle_client runs, in the same order, and says how long a timed hold
+    still has or how much more a threshold or the minimum needs. Returns
+    {code, message} or None when nothing is held. audience='client' rewords
+    the company-side actions (manual transfer, kill switch) as things the
+    ISP waits on rather than does."""
+    import datetime as _dt
+
+    client_view = audience == "client"
     balance = _money(row.get("balance"))
     if balance <= 0 or row.get("gateway_mode") != "company_gateway":
         return None
     if not company:
-        return {"code": "unconfigured", "message": "The company gateway is not configured."}
+        return {"code": "unconfigured",
+                "message": "The payout gateway is still being configured — held money stays pooled meanwhile."
+                if client_view else "The company gateway is not configured."}
     if company["kill_switch"]:
-        return {"code": "kill_switch", "message": "All payouts are halted by the gateway kill switch."}
+        return {"code": "kill_switch",
+                "message": "Payouts are paused by the company — they send as soon as the gateway is switched back on."
+                if client_view else "All payouts are halted by the gateway kill switch."}
     if company["status"] != "active":
         return {"code": "suspended",
-                "message": f"The gateway is {company['status']} — payouts resume when it is active."}
+                "message": (f"Payouts are paused while the gateway is {company['status']} — "
+                            "they resume automatically when it is active.")
+                if client_view else
+                f"The gateway is {company['status']} — payouts resume when it is active."}
     if not row.get("destination_type") or not row.get("destination_value"):
-        return {"code": "no_destination",
-                "message": "No payout destination is set — money waits for one."}
+        message = ("No payout destination is set — add one in payment settings and held money sends to it."
+                   if client_view else "No payout destination is set — money waits for one.")
+        pending_at = row.get("pending_change_effective_at")
+        if row.get("pending_change") and pending_at:
+            wait = pending_at - _dt.datetime.now()
+            if wait.total_seconds() > 0:
+                message = (f"A new payout destination goes live in ~{_wait_text(wait)} "
+                           f"({pending_at.strftime('%a %d %b %H:%M')}).")
+            else:
+                message = "A new payout destination applies on the next settlement run."
+        return {"code": "no_destination", "message": message}
     client_id = row["client_id"]
     mode = row.get("settlement_mode")
     hold_hours = row.get("hold_hours")
@@ -760,37 +858,82 @@ def held_reason(cursor, row, company, bands=None):
     if not entries:
         if mode == "delayed" and _unbatched_collections(cursor, client_id):
             held, releases = _held_in_window(cursor, client_id, hold_hours)
-            when = releases.strftime("%Y-%m-%d %H:%M") if releases else "later"
             return {"code": "hold",
                     "message": f"Each payment is held {max(1, int(hold_hours or 24))}h after confirmation — "
-                               f"{held} release{'s' if held != 1 else ''} next at ~{when}."}
+                               f"{held} still inside the hold, {_release_detail(releases)}."}
+        queued, queued_total = _pending_payouts(cursor, client_id)
+        if queued:
+            if not _callback_base(cursor):
+                return {"code": "queued",
+                        "message": (f"KES {queued_total} is queued for payout — it submits once the "
+                                    "company's callback setup is reachable.")
+                        if client_view else
+                        f"KES {queued_total} is queued for payout but cannot be submitted — "
+                        "the gateway has no public callback URL configured."}
+            return {"code": "queued",
+                    "message": f"KES {queued_total} across {queued} payout{'s' if queued != 1 else ''} "
+                               "already queued or in flight — "
+                               + ("they send automatically on the next settlement run."
+                                  if client_view else
+                                  "the scheduler submits them automatically.")}
         return {"code": "residual",
-                "message": "No payments left to batch — release this balance with a manual transfer."}
+                "message": "No payments left to batch — the company can release this balance on request."
+                if client_view else
+                "No payments left to batch — release this balance with a manual transfer."}
     if mode == "transactions":
         threshold = max(1, int(row.get("settle_every_n_tx") or 0))
         collected = sum(1 for entry in entries if entry["type"] == "collection")
         if collected < threshold:
+            left = threshold - collected
             return {"code": "threshold",
-                    "message": f"Settles after {threshold} payments per batch — {collected} collected so far."}
+                    "message": f"Settles every {threshold} confirmed payments — "
+                               f"{collected} collected, {left} more to go."}
     elif mode == "scheduled" and not schedule_due(
         row.get("settle_schedule"), row.get("last_settled_at")
     ):
+        next_run = next_schedule_run(row.get("settle_schedule"))
+        if next_run:
+            wait = _wait_text(next_run - _dt.datetime.now())
+            return {"code": "schedule",
+                    "message": f"Next scheduled payout in ~{wait} ({next_run.strftime('%a %d %b %H:%M')}) — "
+                               f"{_describe_schedule(row.get('settle_schedule'))}."}
         return {"code": "schedule",
                 "message": f"Waits for the next scheduled settlement ({_describe_schedule(row.get('settle_schedule'))})."}
-    plan = plan_batch(entries, company, row, bands or [])
-    if not plan:
-        minimum = row.get("min_payout_override")
-        minimum = _money(minimum) if minimum is not None else _money(company["min_payout"])
+    plan = project_batch(entries, company, row, bands or [])
+    if not plan or plan["net"] < plan["minimum"] or plan["net"] <= 0:
+        if not plan:
+            return {"code": "residual",
+                    "message": ("Only adjustments are left to batch — the company can release this "
+                                "balance on request.")
+                    if client_view else
+                    "Only adjustments are left to batch — release this balance with a manual transfer."}
+        net, minimum = plan["net"], plan["minimum"]
+        needed = minimum - net
+        if net > 0:
+            detail = (f"After commission and fees the payout would be KES {net} — "
+                      f"KES {needed} short of the KES {minimum} minimum")
+        elif minimum > 0:
+            detail = (f"Commission, fees and adjustments leave KES {net} — "
+                      f"it takes KES {needed} more in collections to reach the KES {minimum} minimum")
+        else:
+            detail = (f"Commission, fees and adjustments leave KES {net} — "
+                      f"it takes KES {needed} more in collections before there is anything to send")
         return {"code": "minimum",
-                "message": f"Below the KES {minimum} minimum payout after commission and fees."}
+                "message": detail + (". The company can also release the held balance manually."
+                                     if client_view else
+                                     ". A manual transfer can send the held balance any time.")}
     message = "Settles automatically on the next run."
     if mode == "delayed":
         held, releases = _held_in_window(cursor, client_id, hold_hours)
         if held:
-            when = releases.strftime("%Y-%m-%d %H:%M") if releases else "later"
-            message += f" {held} more payment{'s' if held != 1 else ''} still inside the hold — first releases ~{when}."
-    if _balance_shortfall(company, plan["net"]):
-        message += " The payout float looks short of this amount."
+            message += (f" {held} more payment{'s' if held != 1 else ''} still inside the hold — "
+                        f"{_release_detail(releases)}.")
+    deficit = _balance_shortfall(company, plan["net"])
+    if deficit:
+        message += (f" The company's payout float is short KES {deficit} — "
+                    "payouts send once it is topped up.") if client_view else \
+                   (f" The payout float is KES {deficit} short — "
+                    f"last known KES {_money(company['last_known_balance'])} against KES {plan['net']} needed.")
     return {"code": "eligible", "message": message}
 
 
@@ -804,14 +947,19 @@ def held_reasons(cursor, rows):
 
 
 def _balance_shortfall(company, net):
+    """The float deficit for this payout, or None — only a fresh balance
+    check counts; a stale number can't block or alarm on money."""
     balance = company.get("last_known_balance")
     checked = company.get("last_balance_at")
     if balance is None or not checked:
-        return False
+        return None
     import datetime as _dt
 
     fresh = (_dt.datetime.now() - checked).total_seconds() < BALANCE_FRESH_SECONDS
-    return fresh and _money(balance) < _money(net)
+    if not fresh:
+        return None
+    deficit = _money(net) - _money(balance)
+    return deficit if deficit > 0 else None
 
 
 def _default_notify(cursor, audience, kind, subject, detail, client_id=None):

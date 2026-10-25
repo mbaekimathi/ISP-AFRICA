@@ -1,10 +1,27 @@
-import { ArrowRight, CircleAlert, Filter, Package, PackagePlus, Pencil, ReceiptText, Wallet } from "lucide-react";
+import {
+  ArrowRight,
+  Banknote,
+  CircleAlert,
+  FileText,
+  Filter,
+  Inbox,
+  Landmark,
+  Package,
+  PackagePlus,
+  Pencil,
+  ReceiptText,
+  Smartphone,
+  Ticket,
+  Wallet,
+} from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
+import { EmptyState } from "@/components/ui/EmptyState";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
 import { clientPage } from "@/lib/accounts";
+import { cn } from "@/lib/cn";
 import { useAuth } from "@/providers/AuthProvider";
 
 type ServiceFilter = "all" | "pppoe" | "hotspot";
@@ -45,6 +62,20 @@ const statusTone: Record<string, "active" | "due" | "critical" | "paused" | "neu
   failed: "critical",
   void: "paused",
 };
+
+const kindIcon: Record<Transaction["kind"], ReactNode> = {
+  payment: <Banknote className="h-4 w-4" />,
+  invoice: <FileText className="h-4 w-4" />,
+  stk: <Smartphone className="h-4 w-4" />,
+  purchase: <Ticket className="h-4 w-4" />,
+  gateway: <Landmark className="h-4 w-4" />,
+};
+
+const serviceFilters: Array<{ value: ServiceFilter; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "pppoe", label: "PPPoE" },
+  { value: "hotspot", label: "Hotspot" },
+];
 
 function money(value: string) {
   const amount = Number(value);
@@ -157,6 +188,65 @@ function amountClass(status: string) {
   return "text-warning";
 }
 
+function iconTone(status: string) {
+  if (status === "paid") return "bg-success-soft/70 text-success";
+  if (status === "failed" || status === "void") return "bg-destructive-soft/70 text-destructive";
+  return "bg-warning-soft/70 text-warning";
+}
+
+function TransactionCard({ item }: { item: Transaction }) {
+  return (
+    <article className="flex h-full flex-col gap-2.5 rounded-xl border border-border bg-surface p-3.5 shadow-xs transition duration-fast ease-out hover:border-primary/40 hover:shadow-card">
+      <div className="flex items-center gap-2.5">
+        <span
+          className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", iconTone(item.status))}
+          aria-hidden="true"
+        >
+          {kindIcon[item.kind]}
+        </span>
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-semibold leading-5">{item.customer || "—"}</p>
+          <p className="truncate text-xs text-muted-foreground">{item.contact || kindLabel[item.kind]}</p>
+        </div>
+        <p className={cn("shrink-0 text-sm font-semibold tabular", amountClass(item.status))}>{money(item.amount)}</p>
+      </div>
+      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-t border-border/60 pt-2.5 text-xs text-muted-foreground">
+        <StatusBadge tone={statusTone[item.status] ?? "neutral"}>{item.status}</StatusBadge>
+        <StatusBadge tone={item.service === "pppoe" ? "active" : "neutral"}>
+          {item.service === "pppoe" ? "PPPoE" : "Hotspot"}
+        </StatusBadge>
+        <span className="tabular">{item.createdAt}</span>
+        <span className="ml-auto">{kindLabel[item.kind]}</span>
+      </div>
+      {item.detail || item.reference ? (
+        <p className="truncate text-xs text-muted-foreground" title={`${item.detail} ${item.reference}`.trim()}>
+          {item.detail}
+          {item.detail && item.reference ? " · " : ""}
+          <span className="font-mono text-[11px]">{item.reference}</span>
+        </p>
+      ) : null}
+    </article>
+  );
+}
+
+function TransactionSkeleton() {
+  return (
+    <div className="flex flex-col gap-2.5 rounded-xl border border-border bg-surface p-3.5 shadow-xs">
+      <div className="flex items-center gap-2.5">
+        <div className="skeleton h-9 w-9 shrink-0 rounded-lg" />
+        <div className="min-w-0 flex-1 space-y-1.5">
+          <div className="skeleton h-3 w-2/3" />
+          <div className="skeleton h-2.5 w-1/3" />
+        </div>
+        <div className="skeleton h-3.5 w-12" />
+      </div>
+      <div className="border-t border-border/60 pt-2.5">
+        <div className="skeleton h-5 w-3/4 rounded-full" />
+      </div>
+    </div>
+  );
+}
+
 export function BillingsPage() {
   const { user } = useAuth();
   usePageMeta("Billings — ISP CENTRIC", "Every transaction on this account, filtered by service and date.");
@@ -246,18 +336,42 @@ export function BillingsPage() {
 
       <section className="card mt-4 overflow-hidden">
         <CardHeader icon={<Filter className="h-4 w-4" />} title="Filters" />
-        <form className="grid gap-3 px-5 pb-5 pt-4 sm:grid-cols-2 lg:grid-cols-4" onSubmit={(event) => event.preventDefault()}>
-          <label className="grid gap-1.5 text-sm font-medium">
-            Service
-            <select className="field" value={service} onChange={(event) => setService(event.target.value as ServiceFilter)}>
-              <option value="all">All services</option>
-              <option value="pppoe">PPPoE</option>
-              <option value="hotspot">Hotspot</option>
-            </select>
-          </label>
-          <label className="grid gap-1.5 text-sm font-medium">
+        <form
+          className="flex flex-wrap items-end gap-x-4 gap-y-3 px-5 pb-5 pt-4"
+          onSubmit={(event) => event.preventDefault()}
+        >
+          <div className="grid gap-1.5">
+            <span className="text-xs font-medium text-muted-foreground">Service</span>
+            <div
+              role="group"
+              aria-label="Service"
+              className="inline-flex w-max items-center gap-0.5 rounded-lg border border-border bg-surface-muted/60 p-0.5"
+            >
+              {serviceFilters.map(({ value, label }) => (
+                <button
+                  key={value}
+                  type="button"
+                  aria-pressed={service === value}
+                  onClick={() => setService(value)}
+                  className={cn(
+                    "rounded-md px-3.5 py-1.5 text-xs font-semibold transition duration-fast ease-out",
+                    service === value
+                      ? "bg-surface text-foreground shadow-xs ring-1 ring-border"
+                      : "text-muted-foreground hover:text-foreground",
+                  )}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
             Period
-            <select className="field" value={mode} onChange={(event) => setMode(event.target.value as PeriodMode)}>
+            <select
+              className="field h-9 min-h-9 w-full py-0 text-sm sm:w-44"
+              value={mode}
+              onChange={(event) => setMode(event.target.value as PeriodMode)}
+            >
               <option value="all">All time</option>
               <option value="day">Day</option>
               <option value="month">Month</option>
@@ -266,23 +380,33 @@ export function BillingsPage() {
             </select>
           </label>
           {mode === "day" ? (
-            <label className="grid gap-1.5 text-sm font-medium">
+            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
               Day
-              <input type="date" className="field" value={day} onChange={(event) => setDay(event.target.value)} />
+              <input
+                type="date"
+                className="field h-9 min-h-9 w-full py-0 text-sm sm:w-40"
+                value={day}
+                onChange={(event) => setDay(event.target.value)}
+              />
             </label>
           ) : null}
           {mode === "month" ? (
-            <label className="grid gap-1.5 text-sm font-medium">
+            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
               Month
-              <input type="month" className="field" value={month} onChange={(event) => setMonth(event.target.value)} />
+              <input
+                type="month"
+                className="field h-9 min-h-9 w-full py-0 text-sm sm:w-40"
+                value={month}
+                onChange={(event) => setMonth(event.target.value)}
+              />
             </label>
           ) : null}
           {mode === "year" ? (
-            <label className="grid gap-1.5 text-sm font-medium">
+            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
               Year
               <input
                 type="number"
-                className="field"
+                className="field h-9 min-h-9 w-full py-0 text-sm sm:w-28"
                 min={2000}
                 max={2100}
                 inputMode="numeric"
@@ -293,124 +417,67 @@ export function BillingsPage() {
           ) : null}
           {mode === "period" ? (
             <>
-              <label className="grid gap-1.5 text-sm font-medium">
+              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 From
-                <input type="date" className="field" value={from} onChange={(event) => setFrom(event.target.value)} />
+                <input
+                  type="date"
+                  className="field h-9 min-h-9 w-full py-0 text-sm sm:w-40"
+                  value={from}
+                  onChange={(event) => setFrom(event.target.value)}
+                />
               </label>
-              <label className="grid gap-1.5 text-sm font-medium">
+              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 To
-                <input type="date" className="field" value={to} onChange={(event) => setTo(event.target.value)} />
+                <input
+                  type="date"
+                  className="field h-9 min-h-9 w-full py-0 text-sm sm:w-40"
+                  value={to}
+                  onChange={(event) => setTo(event.target.value)}
+                />
               </label>
             </>
           ) : null}
         </form>
       </section>
 
-      <section className="card mt-4 overflow-hidden">
-        <CardHeader icon={<ReceiptText className="h-4 w-4" />} title="Transactions">
-          {report ? <p className="text-xs tabular-nums text-muted-foreground">{report.total} in this period</p> : null}
-        </CardHeader>
-
-        <div className="hidden overflow-x-auto md:block">
-          <table className="data-table min-w-[56rem]">
-            <thead>
-              <tr>
-                <th className="px-5 py-3 font-medium">Date</th>
-                <th className="px-5 py-3 font-medium">Customer</th>
-                <th className="px-5 py-3 font-medium">Service</th>
-                <th className="px-5 py-3 font-medium">Type</th>
-                <th className="px-5 py-3 font-medium">Details</th>
-                <th className="px-5 py-3 font-medium">M-Pesa code</th>
-                <th className="px-5 py-3 text-right font-medium">Amount</th>
-                <th className="px-5 py-3 font-medium">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {!report && !message ? (
-                <tr>
-                  <td colSpan={8} className="px-5 py-6">
-                    <div className="grid gap-2.5" aria-hidden="true">
-                      <div className="skeleton h-4 w-1/3" />
-                      <div className="skeleton h-4 w-3/5" />
-                      <div className="skeleton h-4 w-2/5" />
-                    </div>
-                    <span className="sr-only">Loading transactions…</span>
-                  </td>
-                </tr>
-              ) : null}
-              {report && transactions.length === 0 ? (
-                <tr>
-                  <td colSpan={8} className="px-5 py-10 text-center text-muted-foreground">No transactions match these filters.</td>
-                </tr>
-              ) : null}
-              {transactions.map((item) => (
-                <tr key={item.id}>
-                  <td className="whitespace-nowrap px-5 py-3 tabular">{item.createdAt}</td>
-                  <td className="px-5 py-3">
-                    <div className="font-medium">{item.customer || "—"}</div>
-                    <div className="text-xs text-muted-foreground">{item.contact}</div>
-                  </td>
-                  <td className="px-5 py-3">
-                    <StatusBadge tone={item.service === "pppoe" ? "active" : "neutral"}>
-                      {item.service === "pppoe" ? "PPPoE" : "Hotspot"}
-                    </StatusBadge>
-                  </td>
-                  <td className="px-5 py-3">{kindLabel[item.kind]}</td>
-                  <td className="px-5 py-3">{item.detail || "—"}</td>
-                  <td className="px-5 py-3 font-mono text-xs text-muted-foreground">{item.reference || "—"}</td>
-                  <td className={`px-5 py-3 text-right font-semibold tabular ${amountClass(item.status)}`}>
-                    {money(item.amount)}
-                  </td>
-                  <td className="px-5 py-3">
-                    <StatusBadge tone={statusTone[item.status] ?? "neutral"}>{item.status}</StatusBadge>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+      <section className="mt-6">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <h2 className="inline-flex items-center gap-2 text-sm font-semibold">
+            <span
+              className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary"
+              aria-hidden="true"
+            >
+              <ReceiptText className="h-3.5 w-3.5" />
+            </span>
+            Transactions
+          </h2>
+          {report ? (
+            <p className="text-xs tabular-nums text-muted-foreground">{report.total} in this period</p>
+          ) : null}
         </div>
 
-        <div className="divide-y divide-border md:hidden">
-          {!report && !message ? (
-            <div className="grid gap-2.5 px-5 py-6" aria-hidden="true">
-              <div className="skeleton h-4 w-1/3" />
-              <div className="skeleton h-4 w-3/5" />
-              <div className="skeleton h-4 w-2/5" />
-              <span className="sr-only">Loading transactions…</span>
-            </div>
-          ) : null}
-          {report && transactions.length === 0 ? (
-            <p className="px-5 py-10 text-center text-sm text-muted-foreground">No transactions match these filters.</p>
-          ) : null}
-          {transactions.map((item) => (
-            <div key={item.id} className="grid gap-2 px-5 py-4">
-              <div className="flex items-start justify-between gap-3">
-                <div className="min-w-0">
-                  <p className="truncate font-medium">{item.customer || "—"}</p>
-                  <p className="truncate text-xs text-muted-foreground">{item.contact || item.createdAt}</p>
-                </div>
-                <div className="flex shrink-0 flex-col items-end gap-1.5">
-                  <p className={`font-semibold tabular ${amountClass(item.status)}`}>{money(item.amount)}</p>
-                  <StatusBadge tone={statusTone[item.status] ?? "neutral"}>{item.status}</StatusBadge>
-                </div>
-              </div>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1.5 text-xs text-muted-foreground">
-                <span className="tabular">{item.createdAt}</span>
-                <StatusBadge tone={item.service === "pppoe" ? "active" : "neutral"}>
-                  {item.service === "pppoe" ? "PPPoE" : "Hotspot"}
-                </StatusBadge>
-                <span>{kindLabel[item.kind]}</span>
-              </div>
-              {item.detail || item.reference ? (
-                <p className="truncate text-xs text-muted-foreground">
-                  {item.detail}
-                  {item.detail && item.reference ? " · " : ""}
-                  <span className="font-mono">{item.reference}</span>
-                </p>
-              ) : null}
-            </div>
-          ))}
-        </div>
+        {!report && !message ? (
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {Array.from({ length: 6 }, (_, index) => (
+              <TransactionSkeleton key={index} />
+            ))}
+            <span className="sr-only">Loading transactions…</span>
+          </div>
+        ) : report && transactions.length === 0 ? (
+          <div className="mt-3">
+            <EmptyState
+              icon={<Inbox className="h-5 w-5" />}
+              title="No transactions"
+              description="No transactions match these filters. Try a different service or period."
+            />
+          </div>
+        ) : (
+          <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
+            {transactions.map((item) => (
+              <TransactionCard key={item.id} item={item} />
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="card mt-4 overflow-hidden">

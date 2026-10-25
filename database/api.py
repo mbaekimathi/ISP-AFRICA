@@ -4451,7 +4451,9 @@ class Handler(BaseHTTPRequestHandler):
                 "/hotspot",
                 "Bundle page",
                 "Guests pick a Wi-Fi bundle, pay with M-Pesa, or enter a voucher code.",
-                portal_server.hotspot_page(device, offers, ctx, payment),
+                portal_server.hotspot_page(
+                    device, offers, ctx, payment, portal_server.support_phone(cursor, client_id)
+                ),
             ),
             (
                 "thank-you",

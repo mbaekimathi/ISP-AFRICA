@@ -56,6 +56,11 @@ PROBE_GRACE = int(os.environ.get("ISP_PROBE_GRACE") or 180)
 # the device online itself — the fallback for a popup that closed before the
 # buyer could tap Done.
 HOTSPOT_CONNECT_GRACE = int(os.environ.get("ISP_HOTSPOT_CONNECT_GRACE") or 90)
+# Seconds the thank-you page shows the receipt before it fires the router
+# grant. The page loads while the device is still captive — the OS cannot
+# close the captive window yet — then asks to connect; once online the
+# window may close whenever it wants, with the voucher codes already seen.
+HOTSPOT_CONNECT_DELAY = int(os.environ.get("ISP_HOTSPOT_CONNECT_DELAY") or 8)
 PROBE_RESTART = int(os.environ.get("ISP_PROBE_RESTART") or 900)
 PROBE_SEEN = {}
 PROBE_LOCK = threading.Lock()
@@ -856,7 +861,36 @@ def thankyou_page(voucher, adverts=None):
     )
 
 
-def thankyou_hotspot_page(receipt, adverts=None):
+def connect_script(connect):
+    """Delayed router grant fired from the thank-you page itself.
+
+    The page renders while the device is still captive, so the receipt and
+    voucher codes are guaranteed on screen before the grant flips the phone
+    to 'connected' — the moment the OS closes the captive window on its own.
+    """
+    if not connect:
+        return ""
+    body = json.dumps(connect).replace("</", "<\\/")
+    endpoint = "/hotspot/redeem" if connect.get("code") else "/hotspot/connect"
+    delay = max(1, HOTSPOT_CONNECT_DELAY) * 1000
+    return f"""<p class="hint" id="cstate" style="text-align:center"><span class=spin></span> Switching your internet on — keep this window open.</p>
+<script>
+const LINK={body};
+const cs=document.getElementById('cstate');
+async function link(){{
+ try{{
+  const r=await fetch('{endpoint}',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify(LINK)}});
+  const b=await r.json();
+  if(b.state==='connected'){{cs.textContent='You are online — you can close this window and start browsing.';return;}}
+  cs.innerHTML=(b.error||'Could not connect yet.')+' <a href="#" onclick="link();return false">Try again</a>';
+ }}catch(e){{cs.innerHTML='Could not reach the router — <a href="#" onclick="link();return false">Try again</a>';}}
+}}
+setTimeout(link,{delay});
+</script>"""
+
+
+def thankyou_hotspot_page(receipt, adverts=None, connect=None):
+    link = connect_script(connect)
     if not receipt:
         return page(
             "Thank you",
@@ -864,7 +898,7 @@ def thankyou_hotspot_page(receipt, adverts=None):
 <span class="badge ok">Paid</span>
 <h1>Thank you for your payment</h1>
 <p class=sub>Your payment was received and this device is connected.</p>
-<p class=hint>You can close this window and start browsing.</p></div>{adverts_html(adverts)}""",
+<p class=hint>You can close this window and start browsing.</p></div>{adverts_html(adverts)}{link}""",
         )
     vouchers = receipt["vouchers"]
     listing = "".join(
@@ -886,7 +920,8 @@ def thankyou_hotspot_page(receipt, adverts=None):
 <p class=sect>Voucher{'' if len(vouchers) == 1 else 's'} for this purchase</p>
 {listing}
 <p class=hint style=text-align:center>{share}A code is spent once its device starts surfing and cannot be used again.</p>
-{adverts_html(adverts)}""",
+{adverts_html(adverts)}
+{link}""",
     )
 
 
@@ -1119,48 +1154,18 @@ def unit_label(amount, unit):
     return f"{int(amount or 1)} {unit}"
 
 
-def hotspot_offer_detail(offer):
-    devices = int(offer["devices"] or 0)
-    period = validity_label(offer["validity_amount"], offer["validity_unit"])
-    if devices > 1:
-        return f"Up to {devices} devices · {period}"
-    if devices:
-        return "1 device"
-    each = unit_label(offer["validity_amount"], offer["validity_unit"])
-    extra_device = ksh(offer["extra_device_price"])
-    extra_period = ksh(offer["extra_period_price"])
-    return f"1 device · {period} included — +KSh {extra_device} each extra device · +KSh {extra_period} each extra {each}"
-
-
-def hotspot_limit_label(offer):
-    """The byte rules a bundle carries — the data allowance and the fair-use
-    threshold — so the picker shows the cap before the guest pays."""
-    parts = []
-    for label, amount_key, unit_key, action_key, down_key, up_key in (
-        (
-            "data", "data_allowance_amount", "data_allowance_unit",
-            "data_allowance_action", "data_throttle_download", "data_throttle_upload",
-        ),
-        (
-            "FUP", "fair_use_amount", "fair_use_unit",
-            "fair_use_action", "fair_throttle_download", "fair_throttle_upload",
-        ),
-    ):
-        amount = offer.get(amount_key)
-        unit = str(offer.get(unit_key) or "")
-        if amount is None or unit not in {"MB", "GB"}:
-            continue
-        cap = f"{ksh(amount)} {unit} {label}"
-        action = str(offer.get(action_key) or "")
-        down_speed = int(offer.get(down_key) or 0)
-        up_speed = int(offer.get(up_key) or 0)
-        if action == "throttle" and down_speed:
-            parts.append(f"{cap} — then {down_speed} Mbps ↓ · {up_speed} Mbps ↑")
-        elif action == "disconnect":
-            parts.append(f"{cap} — then off")
-        else:
-            parts.append(cap)
-    return " · ".join(parts)
+def support_phone(cursor, client_id):
+    """Customer care line shown on the pay page — the company phone when one
+    is saved, otherwise the account phone."""
+    cursor.execute(
+        "SELECT phone FROM isp_company_settings WHERE client_id = %s",
+        (client_id,),
+    )
+    phone = str((cursor.fetchone() or {}).get("phone") or "").strip()
+    if not phone:
+        cursor.execute("SELECT phone FROM isp_clients WHERE id = %s", (client_id,))
+        phone = str((cursor.fetchone() or {}).get("phone") or "").strip()
+    return phone
 
 
 def hotspot_pick(offer, checked, customize):
@@ -1170,10 +1175,7 @@ def hotspot_pick(offer, checked, customize):
 <input type="radio" name="pkg" value="{esc(offer['id'])}"{' checked' if checked else ''}>
 <span class=tick></span>
 {thumb}
-<span class=pd><span class="nm">{esc(offer['name'])}</span>
-<span class="sp">{int(offer['download_mbps'])} Mbps ↓ · {int(offer['upload_mbps'])} Mbps ↑ · {esc(validity_label(offer['validity_amount'], offer['validity_unit']))}</span>
-<span class="sp">{esc(hotspot_offer_detail(offer))}</span>
-{f'<span class="sp">{esc(hotspot_limit_label(offer))}</span>' if hotspot_limit_label(offer) else ''}</span>
+<span class=pd><span class="nm">{esc(offer['name'])}</span></span>
 <span class="pr">KSh {esc(ksh(price))}</span></label>"""
     if customize:
         each = unit_label(offer["validity_amount"], offer["validity_unit"])
@@ -1212,7 +1214,7 @@ def hotspot_quote(package, payload):
     return {"devices": devices, "periods": periods, "amount": amount, "seconds": periods * seconds}
 
 
-def hotspot_page(device, offers, ctx, payment):
+def hotspot_page(device, offers, ctx, payment, support=""):
     single = [offer for offer in offers if int(offer["devices"] or 0) == 1]
     multi = [offer for offer in offers if int(offer["devices"] or 0) != 1]
     mode = "one" if single else "multi"
@@ -1243,17 +1245,13 @@ def hotspot_page(device, offers, ctx, payment):
         picker = f"""{tabs}
 <div id="list-one"{'' if mode == 'one' else ' style="display:none"'}>{single_rows or '<p class=note>No single-device packages are on sale — try a multiple-device option.</p>'}</div>
 <div id="list-multi"{'' if mode == 'multi' else ' style="display:none"'}>{multi_rows or '<p class=note>No multiple-device packages are on sale — pick a single-device bundle.</p>'}</div>"""
-    site = esc(f"{device['name']} · {device['site']}".strip(" ·"))
-    lead = f"You're connected to <b>{site}</b>. " if site else ""
     stk = ""
     if payment:
         stk = """
-<p class=sect>Pay with M-Pesa</p>
 <label for=phone>M-Pesa phone number</label>
 <input id=phone inputmode=tel autocomplete=tel placeholder="0712 345 678">
 <button id=paybtn type=button onclick="pay()">Pay with M-Pesa</button>
-<div id=msg aria-live=polite></div>
-<p class=hint>You will get a prompt on the phone to approve. The page updates itself when the payment lands and your internet switches on.</p>"""
+<div id=msg aria-live=polite></div>"""
     else:
         stk = """<p class=note>Online payment is not configured on this network yet. Ask the provider to save M-Pesa details under payment settings.</p>"""
     ctx_json = json.dumps(
@@ -1339,24 +1337,17 @@ function legacy(t){{
  document.body.removeChild(ta);
 }}
 let connecting=false;
-async function go(){{
+function go(){{
  if(connecting)return;
  const b=paidBody||{{}};
- if(b.loginUrl){{location.href=b.loginUrl;return;}}
  if(!b.purchase)return;
  connecting=true;
  const btn=document.getElementById('donebtn');
- const note=document.getElementById('cmsg');
- if(btn){{btn.disabled=true;btn.textContent='Connecting…';}}
- try{{
-  const r=await fetch('/hotspot/connect',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{purchase:b.purchase}})}});
-  const c=await r.json();
-  if(c.loginUrl){{location.href=c.loginUrl;return;}}
-  if(c.state==='connected'){{location.href='/thank-you?purchase='+encodeURIComponent(b.purchase);return;}}
-  if(note)note.textContent=c.error||'Could not connect yet — try again.';
- }}catch(e){{if(note)note.textContent='Could not reach the router — try again.';}}
- connecting=false;
- if(btn){{btn.disabled=false;btn.textContent='Done — connect';}}
+ if(btn){{btn.disabled=true;btn.textContent='Opening your receipt…';}}
+ // The thank-you page asks for the router grant a few seconds after it
+ // renders — authorizing here would let the OS close the captive window
+ // before the receipt and voucher codes are ever seen.
+ location.href='/thank-you?purchase='+encodeURIComponent(b.purchase)+'&connect=1';
 }}
 function paid(b){{
  paidBody=b;
@@ -1378,12 +1369,15 @@ async function redeem(){{
  const rmsg=document.getElementById('rmsg');
  if(!code){{rmsg.innerHTML='<div class=err>Enter the voucher code.</div>';return;}}
  const btn=document.getElementById('redeembtn');
- btn.disabled=true;btn.textContent='Connecting…';
- rmsg.innerHTML='<div class=note>Connecting this device…</div>';
+ btn.disabled=true;btn.textContent='Checking…';
+ rmsg.innerHTML='<div class=note>Checking the voucher…</div>';
  try{{
-  const r=await fetch('/hotspot/redeem',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{device:CTX.device,ip:CTX.ip,mac:CTX.mac,code:code}})}});
+  const r=await fetch('/hotspot/redeem',{{method:'POST',headers:{{'Content-Type':'application/json'}},body:JSON.stringify({{device:CTX.device,ip:CTX.ip,mac:CTX.mac,code:code,check:1}})}});
   const b=await r.json();
-  if(b.state==='connected'){{location.href='/thank-you?purchase='+encodeURIComponent(b.purchase);return;}}
+  if(b.state==='redeemed'&&b.purchase){{
+   location.href='/thank-you?purchase='+encodeURIComponent(b.purchase)+'&connect=1&vcode='+encodeURIComponent(code)+'&ip='+encodeURIComponent(CTX.ip)+'&mac='+encodeURIComponent(CTX.mac);
+   return;
+  }}
   rmsg.innerHTML='<div class=err>'+(b.error||'That voucher could not be used.')+'</div>';
  }}catch(e){{rmsg.innerHTML='<div class=err>Could not reach the router — try again.</div>';}}
  btn.disabled=false;btn.textContent='Connect';
@@ -1444,14 +1438,18 @@ refresh();
 <button id=redeembtn type=button onclick="redeem()">Connect</button>
 </div>
 <div id=rmsg aria-live=polite></div>"""
-    body = f"""<span class="ic blue">{ICON_WIFI}</span>
-<span class="badge blue">Wi-Fi hotspot</span>
-<h1>Choose a bundle to get online</h1>
-<p class=sub>{lead}Pick a bundle and pay — then tap Done — connect on the receipt to go online.</p>
-<p class=sect>Wi-Fi bundles</p>
+    phone = str(support or "").strip()
+    care = ""
+    if phone:
+        care = (
+            f'<p class=hint style="text-align:center">Need help? Call '
+            f'<a href="tel:{esc(phone)}" style="color:#1d4ed8;font-weight:700">{esc(phone)}</a></p>'
+        )
+    body = f"""<h1>Choose a bundle</h1>
 {picker}
 {stk}
 {redeem}
+{care}
 {script}"""
     return page("Get online", body).replace(b"</style>", HOTSPOT_CSS.encode() + b"</style>")
 
@@ -2063,9 +2061,10 @@ class PortalHandler(BaseHTTPRequestHandler):
                     )
                 offers = hotspot_packages(cursor, device["client_id"], device["id"])
                 payment = daraja_settings(cursor, device["client_id"])
+                phone = support_phone(cursor, device["client_id"])
         finally:
             db.close()
-        self._send(hotspot_page(device, offers, ctx, payment))
+        self._send(hotspot_page(device, offers, ctx, payment, phone))
 
     def do_POST(self):
         if self.throttled("portal-pay", 20):
@@ -2196,7 +2195,18 @@ class PortalHandler(BaseHTTPRequestHandler):
         finally:
             db.close()
         if purchase:
-            return self._send(thankyou_hotspot_page(receipt, adverts))
+            connect = None
+            if query.get("connect", [""])[0] in ("1", "true"):
+                vcode = normalize_voucher_code(query.get("vcode", [""])[0])
+                if vcode:
+                    connect = {
+                        "code": vcode,
+                        "ip": str(query.get("ip", [""])[0])[:45],
+                        "mac": str(query.get("mac", [""])[0]).upper()[:20],
+                    }
+                else:
+                    connect = {"purchase": purchase}
+            return self._send(thankyou_hotspot_page(receipt, adverts, connect))
         return self._send(thankyou_page(voucher, adverts))
 
     def pay_offers(self):
@@ -2647,9 +2657,9 @@ class PortalHandler(BaseHTTPRequestHandler):
             db.close()
 
     def hotspot_connect(self):
-        """The Done click on the paid receipt screen — authorize the buying
-        device only now. Holding the grant until this tap keeps the captive
-        window open while the voucher codes are on screen."""
+        """Authorize the buying device — called from the thank-you page a few
+        seconds after it renders. Holding the grant until the receipt is on
+        screen keeps the OS from closing the captive window first."""
         try:
             length = int(self.headers.get("Content-Length") or 0)
             payload = json.loads(self.rfile.read(min(length, 8192)) or b"{}")
@@ -2762,6 +2772,15 @@ class PortalHandler(BaseHTTPRequestHandler):
                     return self._send(b'{"error":"That voucher code was not recognised."}', 404, "application/json")
                 if voucher["status"] != "issued":
                     return self._send(b'{"error":"That voucher was already used."}', 400, "application/json")
+                if payload.get("check"):
+                    # Validation only — the thank-you page lands first, then a
+                    # bare call (no 'check') spends the code and connects. The
+                    # delay keeps the captive window open for the receipt.
+                    return self._send(
+                        json.dumps({"state": "redeemed", "purchase": voucher["purchase_id"]}).encode(),
+                        200,
+                        "application/json",
+                    )
                 cursor.execute(
                     """
                     UPDATE hotspot_vouchers

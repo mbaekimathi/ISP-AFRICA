@@ -518,13 +518,14 @@ class SettingsTests(unittest.TestCase):
 
 
 class ListTests(unittest.TestCase):
-    def test_isp_summary_masks_phone(self):
+    def test_isp_summary_shows_owner_full_phone(self):
+        # The owner reads this page — masking their own payout number would
+        # be data they can't verify.
         db = MiniDb()
         db.insert("isp_payout_settings", **settings_row())
         out = gateway_api.isp_summary(db.cursor(), "c1")
         self.assertEqual(out["mode"], "company_gateway")
-        self.assertTrue(out["destination"]["value"].startswith("2547"))
-        self.assertNotEqual(out["destination"]["value"], "254700999888")
+        self.assertEqual(out["destination"]["value"], "254700999888")
 
     def test_pending_changes_masks_and_shapes(self):
         db = MiniDb()

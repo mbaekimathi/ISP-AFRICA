@@ -1212,9 +1212,11 @@ CUSTODY_SQL = """
 """
 
 
-def custody_rows(cursor, client_id=None, status=None, limit=200, offset=0):
+def custody_rows(cursor, client_id=None, status=None, limit=200, offset=0, mask=True):
     """Pooled payments with the custody status the ledgers show — every row
-    answers 'where is this money right now'."""
+    answers 'where is this money right now'. mask=False for the account
+    owner: an ISP reading its own feed needs the real payer number to
+    reconcile who paid."""
     sql = f"""
         SELECT p.id, p.client_id, p.source, p.channel, p.msisdn, p.amount,
                p.mpesa_receipt, p.checkout_id, p.status, p.confirmed_at, p.created_at,
@@ -1244,8 +1246,9 @@ def custody_rows(cursor, client_id=None, status=None, limit=200, offset=0):
     params += [int(limit), int(offset)]
     cursor.execute(sql, params)
     rows = list(cursor.fetchall())
-    for row in rows:
-        row["msisdn"] = mask_msisdn(row.get("msisdn"))
+    if mask:
+        for row in rows:
+            row["msisdn"] = mask_msisdn(row.get("msisdn"))
     return rows
 
 
@@ -1375,7 +1378,7 @@ def list_ledger(cursor, client_id, limit=200, offset=0):
     return list(cursor.fetchall())
 
 
-def list_payouts(cursor, client_id=None, status=None, limit=200, offset=0):
+def list_payouts(cursor, client_id=None, status=None, limit=200, offset=0, mask=True):
     sql = """
         SELECT po.id, po.batch_id, po.client_id, po.destination_type, po.destination_value,
                po.account_reference, po.amount, po.status, po.mpesa_receipt, po.last_error,
@@ -1398,9 +1401,10 @@ def list_payouts(cursor, client_id=None, status=None, limit=200, offset=0):
     params += [int(limit), int(offset)]
     cursor.execute(sql, params)
     rows = list(cursor.fetchall())
-    for row in rows:
-        if row.get("destination_type") == "phone":
-            row["destination_value"] = mask_msisdn(row["destination_value"])
+    if mask:
+        for row in rows:
+            if row.get("destination_type") == "phone":
+                row["destination_value"] = mask_msisdn(row["destination_value"])
     return rows
 
 
@@ -1558,9 +1562,9 @@ def isp_gateway_summary(cursor, client_id):
         (client_id, client_id),
     )
     unbatched = (cursor.fetchone() or {}).get("n", 0)
+    # No masking — the owner reads this page and needs the real number to
+    # confirm payouts go to the right phone/paybill.
     destination = dict(settings)
-    if destination.get("destination_type") == "phone":
-        destination["destination_value"] = mask_msisdn(destination["destination_value"])
     return {
         "mode": settings.get("gateway_mode"),
         "balance": str(latest["balance_after"]) if latest else "0.00",
@@ -1619,8 +1623,8 @@ def isp_payout_settings_row(cursor, client_id):
             "settle_schedule": "[]",
             "last_settled_at": None,
         }
-    if row.get("destination_type") == "phone":
-        row["destination_value"] = mask_msisdn(row["destination_value"])
+    # Owner-only view — the real destination is shown so the settings page
+    # can confirm the number payouts actually go to.
     row["settle_schedule"] = _parse_schedule(row.get("settle_schedule"))
     override = row.get("min_payout_override")
     row["min_payout_override"] = None if override is None else str(override)

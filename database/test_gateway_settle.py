@@ -110,6 +110,13 @@ class MiniCursor:
                     pending_change_effective_at=None,
                 )
                 self.rowcount = 1
+        elif flat.startswith("SELECT COUNT(*) AS n") and "FROM gateway_payouts" in flat:
+            # _pending_payouts — queued/in-flight payouts for one client.
+            rows = [p for p in d.table("gateway_payouts")
+                    if p["client_id"] == args[0]
+                    and p["status"] in ("queued", "submitting", "submitted")]
+            self._result = [{"n": len(rows),
+                             "total": sum((p["amount"] for p in rows), Decimal("0"))}]
         elif flat.startswith("SELECT COUNT(*) AS n"):
             # _held_in_window / _unbatched_collections — unbatched confirmed
             # collections; the in-window variant carries the hold hours arg.
