@@ -1,6 +1,6 @@
-import { Globe, Menu, UserRound } from "lucide-react";
-import { useCallback, useState } from "react";
-import { Link, Navigate, Outlet, useLocation } from "react-router-dom";
+import { ArrowLeft, Globe, Menu, UserRound } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
+import { Link, Navigate, Outlet, useLocation, useNavigate } from "react-router-dom";
 import { Logo } from "@/components/brand/Logo";
 import { AppSidebar } from "@/components/layout/AppSidebar";
 import { NotificationBell } from "@/components/layout/NotificationBell";
@@ -9,7 +9,7 @@ import { LiveClock } from "@/components/ui/LiveClock";
 import { LiveLoad } from "@/components/ui/LiveLoad";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { clientPage } from "@/lib/accounts";
-import { employeeHomePath } from "@/lib/employees";
+import { employeeHomePath, readEmployeeSession, type PublicEmployee } from "@/lib/employees";
 import { useAuth } from "@/providers/AuthProvider";
 import { useEmployeeAuth } from "@/providers/EmployeeAuthProvider";
 
@@ -136,10 +136,40 @@ function linksForPage(pathname: string, advertsEnabled: boolean) {
 
 export function ClientLayout() {
   const { user, ready, logout } = useAuth();
-  const { employee, ready: employeeReady } = useEmployeeAuth();
+  const { employee, ready: employeeReady, resume } = useEmployeeAuth();
   const location = useLocation();
+  const navigate = useNavigate();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
+  const [staffSession, setStaffSession] = useState<PublicEmployee | null>(null);
+  const [resumingStaff, setResumingStaff] = useState(false);
+
+  useEffect(() => {
+    if (!ready || !employeeReady || !user || employee) {
+      setStaffSession(null);
+      return;
+    }
+    let cancelled = false;
+    readEmployeeSession().then((account) => {
+      if (!cancelled) setStaffSession(account);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, employeeReady, user, employee]);
+
+  const returnToStaff = useCallback(() => {
+    setResumingStaff(true);
+    resume()
+      .then((account) => {
+        if (account) {
+          navigate(employeeHomePath(account));
+        } else {
+          setStaffSession(null);
+        }
+      })
+      .finally(() => setResumingStaff(false));
+  }, [resume, navigate]);
   const clientSidebar = linksForPage(
     pagePath(location.pathname, user?.dashboardCode),
     Boolean(user?.advertsEnabled),
@@ -227,6 +257,18 @@ export function ClientLayout() {
             </Link>
             <LiveClock />
             <div className="ml-auto flex items-center gap-2 border-l border-border pl-3 max-sm:border-l-0 max-sm:pl-0">
+              {staffSession ? (
+                <button
+                  type="button"
+                  onClick={returnToStaff}
+                  disabled={resumingStaff}
+                  className="inline-flex items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1.5 text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-accent transition duration-fast ease-out hover:bg-accent/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
+                  title={`Back to staff console — ${staffSession.firstName} ${staffSession.lastName}`}
+                >
+                  <ArrowLeft className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span className="hidden sm:inline">Staff console</span>
+                </button>
+              ) : null}
               <NotificationBell
                 feedPath="/api/notifications/feed"
                 to={clientPage(user, "/account/settings/isp-notifications")}

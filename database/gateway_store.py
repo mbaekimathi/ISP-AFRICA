@@ -680,6 +680,50 @@ def fail_collection(cursor, checkout_id, status="failed", reason="", raw=None):
     return cursor.rowcount > 0
 
 
+def record_collection_receipt(cursor, checkout_id, receipt):
+    """Land the real M-Pesa receipt on every row a payment left behind.
+
+    The portal poll often wins the claim before the callback delivers the
+    receipt, leaving the Daraja checkout id (ws_CO_…) where the M-Pesa code
+    belongs — on the ledger row, the portal request, and any payment or
+    invoice the renewal already wrote. First write wins: an existing receipt
+    is never overwritten, and a receipt already booked on another payment
+    keeps its ledger home."""
+    receipt = str(receipt or "").strip()
+    checkout_id = str(checkout_id or "")[:64]
+    if not receipt or not checkout_id:
+        return
+    try:
+        cursor.execute(
+            """
+            UPDATE gateway_payments
+            SET mpesa_receipt = %s
+            WHERE checkout_id = %s AND (mpesa_receipt IS NULL OR mpesa_receipt = '')
+            """,
+            (receipt[:40], checkout_id),
+        )
+    except pymysql.MySQLError:
+        # The unique key says this receipt already belongs to another
+        # payment — nothing to move.
+        pass
+    cursor.execute(
+        "UPDATE pppoe_stk_requests SET mpesa_code = %s WHERE checkout_id = %s AND mpesa_code = ''",
+        (receipt[:20], checkout_id),
+    )
+    cursor.execute(
+        "UPDATE hotspot_purchases SET mpesa_code = %s WHERE checkout_id = %s AND mpesa_code = ''",
+        (receipt[:20], checkout_id),
+    )
+    cursor.execute(
+        "UPDATE pppoe_payments SET mpesa_reference = %s WHERE mpesa_reference = %s",
+        (receipt[:40], checkout_id[:40]),
+    )
+    cursor.execute(
+        "UPDATE pppoe_invoices SET mpesa_reference = %s WHERE mpesa_reference = %s",
+        (receipt[:40], checkout_id[:40]),
+    )
+
+
 def record_c2b_unmatched(cursor, receipt, amount, msisdn, bill_reference, raw):
     """A C2B confirmation we cannot attribute — suspense queue for the
     director's operations panel. Duplicate receipts dedupe on the unique key."""
@@ -755,6 +799,52 @@ def mark_payment_verified(cursor, checkout_id):
     off this, so a Daraja hiccup never turns into a query loop."""
     cursor.execute(
         "UPDATE gateway_payments SET last_verified_at = NOW() WHERE checkout_id = %s",
+        (str(checkout_id or "")[:64],),
+    )
+
+
+def direct_stk_candidates(cursor, stale_minutes=3, recheck_after_minutes=30,
+                          younger_than_hours=24, limit=25):
+    """Non-pooled STK rows still waiting on an answer — pending requests whose
+    poller went away are re-verified every pass, and failed ones on the same
+    spaced schedule as pooled failures (a premature callback can mark a
+    payment that landed late). Pooled rows are excluded: gateway_payments
+    owns their rechecks."""
+    rows = []
+    for table, source in (("pppoe_stk_requests", "pppoe"), ("hotspot_purchases", "hotspot")):
+        cursor.execute(
+            f"""
+            SELECT r.checkout_id, r.client_id, r.created_at, r.status, %s AS source
+            FROM {table} r
+            WHERE r.created_at > DATE_SUB(NOW(), INTERVAL %s HOUR)
+              AND NOT EXISTS (
+                SELECT 1 FROM gateway_payments g WHERE g.checkout_id = r.checkout_id
+              )
+              AND (
+                (r.status = 'pending'
+                 AND r.created_at < DATE_SUB(NOW(), INTERVAL %s MINUTE))
+                OR
+                (r.status = 'failed'
+                 AND (r.last_verified_at IS NULL
+                      OR r.last_verified_at < DATE_SUB(NOW(), INTERVAL %s MINUTE)))
+              )
+            ORDER BY r.created_at
+            LIMIT %s
+            """,
+            (source, int(younger_than_hours), int(stale_minutes),
+             int(recheck_after_minutes), int(limit)),
+        )
+        rows.extend(cursor.fetchall())
+    return rows
+
+
+def mark_direct_verified(cursor, source, checkout_id):
+    """Stamp the last stkpushquery check on a non-pooled request row."""
+    table = {"pppoe": "pppoe_stk_requests", "hotspot": "hotspot_purchases"}.get(source)
+    if not table:
+        return
+    cursor.execute(
+        f"UPDATE {table} SET last_verified_at = NOW() WHERE checkout_id = %s",
         (str(checkout_id or "")[:64],),
     )
 

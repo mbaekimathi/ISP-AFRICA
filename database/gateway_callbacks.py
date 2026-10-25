@@ -113,15 +113,17 @@ def _metadata(stk_callback):
 
 
 def process_stk(connect, payload):
-    """Verify an Express callback with stkpushquery, then credit exactly once.
+    """Verify an Express callback, then credit exactly once.
 
-    The callback itself never proves the money moved — or that it stayed put.
-    It only tells us to go ask Daraja: a cancel/timeout ResultCode can arrive
-    while the phone still completes the charge (PIN entered late), so success
-    and failure callbacks alike go through the query before anything writes.
-    Whoever wins the FOR UPDATE claim — this processor, a phone poll, or the
-    sweep — writes the one collection ledger entry and runs the one
-    subscriber credit."""
+    Two grades of evidence arrive here. A ResultCode 0 callback carrying an
+    MpesaReceiptNumber is Daraja's settled-transaction notice over the
+    secret-gated endpoint — the receipt only exists once the money moved, and
+    stkpushquery can still be answering for the earlier prompt timeout after
+    a late PIN, so that callback is credited directly. Anything else (a
+    failure report, or a success without metadata) is only a prompt to go ask
+    Daraja: stkpushquery decides before anything writes. Whoever wins the FOR
+    UPDATE claim — this processor, a phone poll, or the sweep — writes the
+    one collection ledger entry and runs the one subscriber credit."""
     import portal_server
 
     callback = ((payload or {}).get("Body") or {}).get("stkCallback") or {}
@@ -130,7 +132,7 @@ def process_stk(connect, payload):
         return
     result_code = str(callback.get("ResultCode", ""))
     meta = _metadata(callback)
-    receipt = meta.get("MpesaReceiptNumber")
+    receipt = str(meta.get("MpesaReceiptNumber") or "").strip()[:40]
     amount = meta.get("Amount")
     msisdn = str(meta.get("PhoneNumber") or "")
     raw = json.dumps(payload)
@@ -138,6 +140,9 @@ def process_stk(connect, payload):
         with db.cursor() as cursor:
             settings = portal_server.daraja_settings(cursor, _payment_client(cursor, checkout_id))
     if not settings or not settings.get("gateway_pool"):
+        return
+    if result_code == "0" and receipt:
+        _credit_stk(connect, checkout_id, receipt, amount, msisdn, raw)
         return
     verified = _verify_stk(settings, checkout_id)
     if verified is None:
@@ -184,7 +189,14 @@ def _credit_stk(connect, checkout_id, receipt, amount, msisdn, raw):
             outcome = gateway_store.confirm_collection(
                 cursor, checkout_id, receipt=receipt, amount=amount, msisdn=msisdn, raw=raw
             )
-            if outcome in (None, "already"):
+            if outcome is None:
+                db.commit()
+                return
+            # The poll often won the claim before this callback delivered the
+            # receipt — land the real M-Pesa code everywhere the checkout id
+            # was standing in for it, so billings never shows ws_CO_… codes.
+            gateway_store.record_collection_receipt(cursor, checkout_id, receipt)
+            if outcome == "already":
                 db.commit()
                 return
             if outcome == "unmatched":
@@ -538,16 +550,21 @@ def parse_account_balance(result):
 
 
 def sweep(connect):
-    """Resolve pooled STK rows the phone stopped polling. Verified payments
-    still credit; expired prompts fail so the ops views stay honest."""
+    """Resolve STK rows nobody is still asking about — pooled payments parked
+    in gateway_payments, and non-pooled requests whose portal poll went away.
+    Verified payments still credit; expired prompts fail so the ops views
+    stay honest."""
     import portal_server
 
     with connect() as db:
         with db.cursor() as cursor:
             stale = gateway_store.stale_initiated_payments(cursor, STK_STALE_MINUTES)
             recheck = gateway_store.failed_payment_rechecks(cursor, STK_STALE_MINUTES)
+            direct = gateway_store.direct_stk_candidates(cursor, STK_STALE_MINUTES)
             clients = {
-                row["client_id"] for row in stale + recheck if row.get("client_id")
+                row["client_id"]
+                for row in stale + recheck + direct
+                if row.get("client_id")
             }
             settings_by_client = {}
             for client_id in clients:
@@ -558,13 +575,12 @@ def sweep(connect):
             settings = settings_by_client.get(row.get("client_id"))
             if not settings or not settings.get("gateway_pool"):
                 continue
-            age_ok = (time.time() - row["created_at"].timestamp()) < STK_EXPIRE_MINUTES * 60
             verified = _verify_stk(settings, checkout_id)
             if verified is None:
                 continue
             if verified == "paid":
                 _credit_stk(connect, checkout_id, None, None, "", None)
-            elif not age_ok:
+            elif not _age_ok(row):
                 _fail_stk(connect, checkout_id, "expired", "The prompt expired before it was paid.", None)
         except Exception as error:
             print(f"event=gateway-sweep checkout={str(row.get('checkout_id'))[-6:]} error={type(error).__name__}", flush=True)
@@ -588,3 +604,67 @@ def sweep(connect):
                 _credit_stk(connect, checkout_id, None, None, "", None)
         except Exception as error:
             print(f"event=gateway-sweep checkout={str(row.get('checkout_id'))[-6:]} error={type(error).__name__}", flush=True)
+    # Non-pooled requests (the client's own Daraja) have no gateway row — when
+    # the browser that was polling goes away this is the only code left asking
+    # Daraja. Same rule as pooled: a verified 'paid' credits, an expired prompt
+    # fails, everything else waits for the next pass.
+    for row in direct:
+        try:
+            checkout_id = row["checkout_id"]
+            settings = settings_by_client.get(row.get("client_id"))
+            if not settings or settings.get("gateway_pool"):
+                continue
+            verified = _verify_stk(settings, checkout_id)
+            if verified is None:
+                continue
+            with connect() as db:
+                with db.cursor() as cursor:
+                    gateway_store.mark_direct_verified(cursor, row["source"], checkout_id)
+                db.commit()
+            if verified == "paid":
+                _fulfil_direct(connect, checkout_id)
+            elif row["status"] == "pending" and not _age_ok(row):
+                _fail_direct(connect, row["source"], checkout_id, verified)
+        except Exception as error:
+            print(f"event=gateway-sweep checkout={str(row.get('checkout_id'))[-6:]} error={type(error).__name__}", flush=True)
+
+
+def _age_ok(row):
+    created = row.get("created_at")
+    try:
+        return (time.time() - created.timestamp()) < STK_EXPIRE_MINUTES * 60
+    except (AttributeError, TypeError):
+        return False
+
+
+def _fulfil_direct(connect, checkout_id):
+    """Credit a verified non-pooled payment — fulfil_stk_credit's claim
+    guards make a repeat call a no-op, so the poll and this sweep can never
+    double-credit."""
+    pending = None
+    vouchers = []
+    with connect() as db:
+        with db.cursor() as cursor:
+            pending, vouchers = fulfil_stk_credit(cursor, checkout_id)
+            db.commit()
+    if pending:
+        _authorize_hotspot(connect, pending, vouchers)
+
+
+def _fail_direct(connect, source, checkout_id, reason):
+    """Expired non-pooled prompt — mirror the portal's failed outcome so the
+    row stops looking open."""
+    reason = str(reason or "The prompt expired before it was paid.")[:255]
+    with connect() as db:
+        with db.cursor() as cursor:
+            if source == "pppoe":
+                cursor.execute(
+                    "UPDATE pppoe_stk_requests SET status = 'failed', last_error = %s WHERE checkout_id = %s AND status = 'pending'",
+                    (reason, str(checkout_id or "")[:64]),
+                )
+            else:
+                cursor.execute(
+                    "UPDATE hotspot_purchases SET status = 'failed' WHERE checkout_id = %s AND status = 'pending'",
+                    (str(checkout_id or "")[:64],),
+                )
+            db.commit()

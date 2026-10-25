@@ -8,6 +8,7 @@ Live-DB uniqueness/locking is covered separately by test_gateway_db.py.
 import json
 import sys
 import unittest
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -101,6 +102,35 @@ class MiniCursor:
                 if row.get("checkout_id") == args[0]:
                     row["last_verified_at"] = "now"
                     self.rowcount += 1
+        elif flat.startswith("UPDATE gateway_payments SET mpesa_receipt"):
+            row = self.find_payment(checkout=args[1])
+            if row and not row.get("mpesa_receipt"):
+                row["mpesa_receipt"] = args[0]
+                self.rowcount = 1
+        elif "AS source" in flat and "FROM pppoe_stk_requests" in flat:
+            rows = [
+                r for r in d.table("pppoe_stk_requests")
+                if r.get("status") in ("pending", "failed")
+                and not any(p.get("checkout_id") == r.get("checkout_id")
+                            for p in d.table("gateway_payments"))
+            ]
+            self._result = [
+                {"checkout_id": r["checkout_id"], "client_id": r["client_id"],
+                 "created_at": r.get("created_at"), "status": r["status"], "source": "pppoe"}
+                for r in rows
+            ]
+        elif "AS source" in flat and "FROM hotspot_purchases" in flat:
+            rows = [
+                r for r in d.table("hotspot_purchases")
+                if r.get("status") in ("pending", "failed")
+                and not any(p.get("checkout_id") == r.get("checkout_id")
+                            for p in d.table("gateway_payments"))
+            ]
+            self._result = [
+                {"checkout_id": r["checkout_id"], "client_id": r["client_id"],
+                 "created_at": r.get("created_at"), "status": r["status"], "source": "hotspot"}
+                for r in rows
+            ]
         elif "status IN ('failed', 'cancelled')" in flat and "FROM gateway_payments" in flat:
             rows = [
                 p for p in d.table("gateway_payments")
@@ -220,6 +250,26 @@ class MiniCursor:
                 if row["checkout_id"] == args[-1] and row["status"] == "pending":
                     row["status"] = "failed"
                     self.rowcount += 1
+        elif flat.startswith("UPDATE pppoe_stk_requests SET mpesa_code"):
+            for row in d.table("pppoe_stk_requests"):
+                if row["checkout_id"] == args[1] and not row.get("mpesa_code"):
+                    row["mpesa_code"] = args[0]
+                    self.rowcount += 1
+        elif flat.startswith("UPDATE pppoe_stk_requests SET last_verified_at"):
+            for row in d.table("pppoe_stk_requests"):
+                if row["checkout_id"] == args[0]:
+                    row["last_verified_at"] = "now"
+                    self.rowcount += 1
+        elif flat.startswith("UPDATE pppoe_payments"):
+            for row in d.table("pppoe_payments"):
+                if row.get("mpesa_reference") == args[1]:
+                    row["mpesa_reference"] = args[0]
+                    self.rowcount += 1
+        elif flat.startswith("UPDATE pppoe_invoices"):
+            for row in d.table("pppoe_invoices"):
+                if row.get("mpesa_reference") == args[1]:
+                    row["mpesa_reference"] = args[0]
+                    self.rowcount += 1
         elif "FROM pppoe_stk_requests" in flat:
             rows = [r for r in d.table("pppoe_stk_requests") if r["checkout_id"] == args[0]]
             self._result = [_clone(rows[0])] if rows else []
@@ -241,6 +291,16 @@ class MiniCursor:
             for row in d.table("hotspot_purchases"):
                 if row["checkout_id"] == args[0] and row["status"] == "pending":
                     row["status"] = "failed"
+                    self.rowcount += 1
+        elif flat.startswith("UPDATE hotspot_purchases SET mpesa_code"):
+            for row in d.table("hotspot_purchases"):
+                if row["checkout_id"] == args[1] and not row.get("mpesa_code"):
+                    row["mpesa_code"] = args[0]
+                    self.rowcount += 1
+        elif flat.startswith("UPDATE hotspot_purchases SET last_verified_at"):
+            for row in d.table("hotspot_purchases"):
+                if row["checkout_id"] == args[0]:
+                    row["last_verified_at"] = "now"
                     self.rowcount += 1
         return 1
 
@@ -310,19 +370,19 @@ class FakeConnect:
 
 
 def stk_callback(checkout="ws_CO_1", code="0", receipt="QXX123", amount=500, phone=254700123456):
+    items = [
+        {"Name": "Amount", "Value": amount},
+        {"Name": "PhoneNumber", "Value": phone},
+    ]
+    if receipt:
+        items.insert(1, {"Name": "MpesaReceiptNumber", "Value": receipt})
     return {
         "Body": {
             "stkCallback": {
                 "CheckoutRequestID": checkout,
                 "ResultCode": code,
                 "ResultDesc": "ok" if code == "0" else "declined",
-                "CallbackMetadata": {
-                    "Item": [
-                        {"Name": "Amount", "Value": amount},
-                        {"Name": "MpesaReceiptNumber", "Value": receipt},
-                        {"Name": "PhoneNumber", "Value": phone},
-                    ]
-                },
+                "CallbackMetadata": {"Item": items},
             }
         }
     }
@@ -619,7 +679,67 @@ class CreditPathTests(unittest.TestCase):
         self.assertEqual(payment["status"], "failed")
         self.assertEqual(payment.get("last_verified_at"), "now")
 
-    def test_process_stk_paid_verifies_then_credits(self):
+    def seed_direct_pppoe(self, status="pending", age_minutes=10):
+        db = MiniDb()
+        db.insert("pppoe_stk_requests", id="req-1", client_id="client-1",
+                  subscriber_id="sub-1", package_id="pkg-1", package_price=Decimal("500.00"),
+                  amount=Decimal("500.00"), checkout_id="ws_CO_1", mpesa_code="",
+                  status=status, package_name="Monthly",
+                  created_at=datetime.now() - timedelta(minutes=age_minutes))
+        db.insert("pppoe_subscribers", id="sub-1", package_id="pkg-1")
+        return db
+
+    def test_sweep_heals_direct_pending_payment(self):
+        """Own-Daraja requests have no gateway row — when no browser is left
+        polling, the sweep is the only code asking Daraja; 'paid' credits."""
+        db = self.seed_direct_pppoe()
+        settings = {"environment": "sandbox"}  # no gateway_pool — own Daraja
+        with patch("portal_server.daraja_settings", return_value=settings), patch(
+            "portal_server.stk_query_shared", return_value=({"ResultCode": "0", "ResultDesc": "ok"}, True)
+        ), patch("pppoe_store.renew") as renew:
+            gateway_callbacks.sweep(FakeConnect(db))
+            renew.assert_called_once()
+        self.assertEqual(db.table("pppoe_stk_requests")[0]["status"], "paid")
+
+    def test_sweep_heals_direct_failed_payment(self):
+        """A premature failure callback marks an own-Daraja request failed —
+        the spaced recheck still credits it once Daraja reports paid."""
+        db = self.seed_direct_pppoe(status="failed")
+        settings = {"environment": "sandbox"}
+        with patch("portal_server.daraja_settings", return_value=settings), patch(
+            "portal_server.stk_query_shared", return_value=({"ResultCode": "0", "ResultDesc": "ok"}, True)
+        ), patch("pppoe_store.renew") as renew:
+            gateway_callbacks.sweep(FakeConnect(db))
+            renew.assert_called_once()
+        self.assertEqual(db.table("pppoe_stk_requests")[0]["status"], "paid")
+
+    def test_sweep_expires_direct_pending_prompt(self):
+        """A prompt abandoned past its window fails on a confirmed failure —
+        interim answers just get re-asked on the next pass."""
+        db = self.seed_direct_pppoe(age_minutes=45)
+        settings = {"environment": "sandbox"}
+        with patch("portal_server.daraja_settings", return_value=settings), patch(
+            "portal_server.stk_query_shared",
+            return_value=({"ResultCode": "1032", "ResultDesc": "Request cancelled by user"}, True),
+        ), patch("pppoe_store.renew") as renew:
+            gateway_callbacks.sweep(FakeConnect(db))
+            renew.assert_not_called()
+        self.assertEqual(db.table("pppoe_stk_requests")[0]["status"], "failed")
+
+    def test_sweep_leaves_open_direct_prompt_alone(self):
+        """A still-young pending request is not failed on a query answer — the
+        prompt may still be open on the phone."""
+        db = self.seed_direct_pppoe(age_minutes=10)
+        settings = {"environment": "sandbox"}
+        with patch("portal_server.daraja_settings", return_value=settings), patch(
+            "portal_server.stk_query_shared",
+            return_value=({"ResultCode": "1032", "ResultDesc": "Request cancelled by user"}, True),
+        ), patch("pppoe_store.renew") as renew:
+            gateway_callbacks.sweep(FakeConnect(db))
+            renew.assert_not_called()
+        self.assertEqual(db.table("pppoe_stk_requests")[0]["status"], "pending")
+
+    def test_process_stk_paid_callback_credits(self):
         db = self.seed_pppoe()
         settings = {"gateway_pool": True, "environment": "sandbox"}
         with patch("portal_server.daraja_settings", return_value=settings), patch(
@@ -633,14 +753,48 @@ class CreditPathTests(unittest.TestCase):
         self.assertEqual(len(db.table("gateway_ledger_entries")), 1)
         self.assertEqual(db.table("pppoe_stk_requests")[0]["status"], "paid")
 
+    def test_process_stk_receipt_beats_a_stale_query(self):
+        """The money wins: a callback carrying the MpesaReceiptNumber is
+        Daraja's settled-payment notice — a query still answering for the
+        earlier prompt timeout must not veto it."""
+        db = self.seed_pppoe()
+        settings = {"gateway_pool": True, "environment": "sandbox"}
+        with patch("portal_server.daraja_settings", return_value=settings), patch(
+            "portal_server.stk_query_shared",
+            return_value=({"ResultCode": "1037", "ResultDesc": "DS timeout"}, True),
+        ), patch("pppoe_store.renew") as renew:
+            gateway_callbacks.process_stk(FakeConnect(db), stk_callback(code="0"))
+            renew.assert_called_once()
+        payment = db.table("gateway_payments")[0]
+        self.assertEqual(payment["status"], "confirmed")
+        self.assertEqual(payment["mpesa_receipt"], "QXX123")
+        self.assertEqual(db.table("pppoe_stk_requests")[0]["status"], "paid")
+
+    def test_process_stk_receipt_backfills_poll_claimed_row(self):
+        """The poll won the claim before the callback arrived — the callback's
+        receipt still lands on the payment and the request afterwards."""
+        db = self.seed_pppoe()
+        settings = {"gateway_pool": True, "environment": "sandbox"}
+        cursor = db.cursor()
+        gateway_store.confirm_collection(cursor, "ws_CO_1")
+        cursor.find_payment(checkout="ws_CO_1")["mpesa_receipt"] = None
+        with patch("portal_server.daraja_settings", return_value=settings):
+            gateway_callbacks.process_stk(FakeConnect(db), stk_callback())
+        payment = cursor.find_payment(checkout="ws_CO_1")
+        self.assertEqual(payment["status"], "confirmed")
+        self.assertEqual(payment["mpesa_receipt"], "QXX123")
+        self.assertEqual(db.table("pppoe_stk_requests")[0]["mpesa_code"], "QXX123")
+
     def test_process_stk_rejected_query_does_not_credit(self):
+        """A success callback WITHOUT a receipt proves nothing — the query
+        keeps its veto and the row fails."""
         db = self.seed_pppoe()
         settings = {"gateway_pool": True, "environment": "sandbox"}
         with patch("portal_server.daraja_settings", return_value=settings), patch(
             "portal_server.stk_query_shared",
             return_value=({"ResultCode": "1", "ResultDesc": "failed"}, True),
         ), patch("pppoe_store.renew") as renew:
-            gateway_callbacks.process_stk(FakeConnect(db), stk_callback())
+            gateway_callbacks.process_stk(FakeConnect(db), stk_callback(receipt=None))
             renew.assert_not_called()
         self.assertEqual(db.table("gateway_payments")[0]["status"], "failed")
 
@@ -650,7 +804,7 @@ class CreditPathTests(unittest.TestCase):
         with patch("portal_server.daraja_settings", return_value=settings), patch(
             "portal_server.stk_query_shared", side_effect=TimeoutError("down")
         ), patch("pppoe_store.renew") as renew:
-            gateway_callbacks.process_stk(FakeConnect(db), stk_callback())
+            gateway_callbacks.process_stk(FakeConnect(db), stk_callback(receipt=None))
             renew.assert_not_called()
         self.assertEqual(db.table("gateway_payments")[0]["status"], "initiated")
 
@@ -663,7 +817,7 @@ class CreditPathTests(unittest.TestCase):
             "portal_server.stk_query_shared",
             return_value=({"errorCode": "500.001.1001", "errorMessage": "processing"}, True),
         ), patch("pppoe_store.renew") as renew:
-            gateway_callbacks.process_stk(FakeConnect(db), stk_callback())
+            gateway_callbacks.process_stk(FakeConnect(db), stk_callback(receipt=None))
             renew.assert_not_called()
         self.assertEqual(db.table("gateway_payments")[0]["status"], "initiated")
 

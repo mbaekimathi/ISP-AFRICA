@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Check, Smartphone, Wifi } from "lucide-react";
+import { Check, Eye, EyeOff, Smartphone, Wifi } from "lucide-react";
 import { Link } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { FormField, FormPicker } from "@/components/ui/FormField";
@@ -59,6 +59,8 @@ function offerDetail(offer: Offer) {
 type HotspotPayment = {
   id: string;
   kind: string;
+  method?: string;
+  customer?: string;
   contact: string;
   detail: string;
   reference: string;
@@ -71,7 +73,15 @@ type HotspotReport = {
   transactions: HotspotPayment[];
   total: number;
   collected: string;
+  outstanding?: string;
 };
+
+function typeLabel(item: HotspotPayment) {
+  if (item.kind === "stk" || item.kind === "gateway" || item.method === "stk") return "M-Pesa";
+  if (item.kind === "invoice") return "Invoice";
+  if (item.method === "manual") return "Manual";
+  return "";
+}
 
 const paymentStatusTone: Record<string, "active" | "due" | "critical" | "neutral"> = {
   paid: "active",
@@ -85,11 +95,19 @@ const copy = {
     title: "PPPoE-payment",
     description: "The page a PPPoE customer uses to pay for access.",
     lead: "Pay for this PPPoE connection. Access continues after the payment is confirmed.",
+    reportTitle: "PPPoE payments",
+    reportLead: "Every recharge on this account — M-Pesa prompts and manual payments.",
+    reportEmpty: "No payments yet — customer recharges and manual entries appear here.",
+    contactColumn: "Customer",
   },
   hotspot: {
     title: "Hotspot-payment",
     description: "The page a customer uses to pay after connecting to the Wi-Fi.",
     lead: "You are connected to the Wi-Fi. Choose a package and pay to get online.",
+    reportTitle: "Hotspot payments",
+    reportLead: "Every hotspot sale on this account — paid, pending, and failed M-Pesa requests.",
+    reportEmpty: "No hotspot payments yet — sales from the captive page appear here.",
+    contactColumn: "Phone",
   },
 } as const;
 
@@ -124,6 +142,7 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
   const [prompt, setPrompt] = useState<{ name: string; price: string; phone: string; detail?: string } | null>(null);
   const [report, setReport] = useState<HotspotReport | null>(null);
   const [reportError, setReportError] = useState("");
+  const [portalOpen, setPortalOpen] = useState(false);
 
   useEffect(() => {
     let stopped = false;
@@ -155,9 +174,8 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
   const isHotspot = kind === "hotspot";
 
   useEffect(() => {
-    if (!isHotspot) return;
     let stopped = false;
-    apiRequest<HotspotReport>("/api/billings/transactions?service=hotspot")
+    apiRequest<HotspotReport>(`/api/billings/transactions?service=${kind}`)
       .then((body) => {
         if (!stopped) setReport(body);
       })
@@ -167,7 +185,7 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
     return () => {
       stopped = true;
     };
-  }, [isHotspot]);
+  }, [kind]);
 
   const singleOffers = offers.filter((item) => deviceCount(item) === 1);
   const multiOffers = offers.filter((item) => deviceCount(item) !== 1);
@@ -216,16 +234,20 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
           <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
             <Wifi className="h-5 w-5" aria-hidden="true" />
           </span>
-          <div>
+          <div className="min-w-0 flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{view.title}</h1>
               <StatusBadge tone={kind === "pppoe" ? "active" : "neutral"}>{kind === "pppoe" ? "PPPoE" : "Hotspot"}</StatusBadge>
             </div>
             <p className="mt-1 text-sm leading-6 text-muted-foreground">{view.lead}</p>
           </div>
+          <SecondaryButton type="button" className="mt-1 shrink-0" onClick={() => setPortalOpen((open) => !open)}>
+            {portalOpen ? <EyeOff className="h-4 w-4" aria-hidden="true" /> : <Eye className="h-4 w-4" aria-hidden="true" />}
+            {portalOpen ? "Hide portal" : "View portal"}
+          </SecondaryButton>
         </div>
 
-        {prompt && chosen ? (
+        {portalOpen && prompt && chosen ? (
           <section
             className="grid justify-items-center gap-4 rounded-2xl border border-border bg-surface p-6 text-center shadow-card"
             aria-live="polite"
@@ -267,7 +289,7 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
               Choose another package
             </SecondaryButton>
           </section>
-        ) : (
+        ) : portalOpen ? (
           <form
             className="grid gap-5 rounded-2xl border border-border bg-surface p-5 shadow-card sm:p-6"
             onSubmit={(event) => {
@@ -426,73 +448,86 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
               still decide which Paybill or Till receives the money.
             </p>
           </form>
-        )}
+        ) : null}
       </div>
 
-      {isHotspot ? (
-        <section className="mx-auto mt-10 w-full max-w-5xl">
-          <div className="flex flex-wrap items-baseline justify-between gap-2">
-            <div>
-              <h2 className="text-base font-semibold tracking-tight sm:text-lg">Hotspot payments</h2>
-              <p className="mt-1 text-sm leading-6 text-muted-foreground">
-                Every hotspot sale on this account — paid, pending, and failed M-Pesa requests.
-              </p>
-            </div>
-            {report ? (
-              <p className="text-xs text-muted-foreground">
-                {report.total} payments · Collected {money(report.collected)}
-              </p>
-            ) : null}
+      <section className="mx-auto mt-10 w-full max-w-5xl">
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <div>
+            <h2 className="text-base font-semibold tracking-tight sm:text-lg">{view.reportTitle}</h2>
+            <p className="mt-1 text-sm leading-6 text-muted-foreground">{view.reportLead}</p>
           </div>
-          {reportError ? (
-            <p className="mt-4 notice" role="alert">
-              {reportError}
+          {report ? (
+            <p className="text-xs text-muted-foreground">
+              {report.total} payments · Collected {money(report.collected)}
+              {Number(report.outstanding ?? 0) > 0 ? ` · Outstanding ${money(report.outstanding ?? "0")}` : ""}
             </p>
           ) : null}
-          <div className="table-wrap mt-4">
-            <table className="data-table min-w-[56rem]">
-              <thead className="border-b border-border text-xs text-muted-foreground">
+        </div>
+        {reportError ? (
+          <p className="mt-4 notice" role="alert">
+            {reportError}
+          </p>
+        ) : null}
+        <div className="table-wrap mt-4">
+          <table className="data-table min-w-[56rem]">
+            <thead className="border-b border-border text-xs text-muted-foreground">
+              <tr>
+                <th className="px-3 py-3 font-medium">Date</th>
+                <th className="px-3 py-3 font-medium">{view.contactColumn}</th>
+                <th className="px-3 py-3 font-medium">Package</th>
+                <th className="px-3 py-3 font-medium">M-Pesa code</th>
+                <th className="px-3 py-3 text-right font-medium">Amount</th>
+                <th className="px-3 py-3 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody>
+              {!report && !reportError ? (
                 <tr>
-                  <th className="px-3 py-3 font-medium">Date</th>
-                  <th className="px-3 py-3 font-medium">Phone</th>
-                  <th className="px-3 py-3 font-medium">Package</th>
-                  <th className="px-3 py-3 font-medium">M-Pesa code</th>
-                  <th className="px-3 py-3 text-right font-medium">Amount</th>
-                  <th className="px-3 py-3 font-medium">Status</th>
+                  <td colSpan={6} className="px-3 py-6 text-muted-foreground">
+                    Loading payments…
+                  </td>
                 </tr>
-              </thead>
-              <tbody>
-                {!report && !reportError ? (
-                  <tr>
-                    <td colSpan={6} className="px-3 py-6 text-muted-foreground">
-                      Loading payments…
-                    </td>
-                  </tr>
-                ) : null}
-                {report?.transactions.length === 0 ? (
-                  <tr>
-                    <td colSpan={6} className="px-3 py-6 text-muted-foreground">
-                      No hotspot payments yet — sales from the captive page appear here.
-                    </td>
-                  </tr>
-                ) : null}
-                {report?.transactions.map((item) => (
-                  <tr key={item.id} className="border-b border-border last:border-0">
-                    <td className="whitespace-nowrap px-3 py-3">{item.createdAt}</td>
-                    <td className="px-3 py-3">{item.contact || "—"}</td>
-                    <td className="px-3 py-3">{item.detail || "—"}</td>
-                    <td className="px-3 py-3 text-xs text-muted-foreground">{item.reference || "—"}</td>
-                    <td className="px-3 py-3 text-right font-semibold">{money(item.amount)}</td>
-                    <td className="px-3 py-3">
-                      <StatusBadge tone={paymentStatusTone[item.status] ?? "neutral"}>{item.status}</StatusBadge>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-      ) : null}
+              ) : null}
+              {report?.transactions.length === 0 ? (
+                <tr>
+                  <td colSpan={6} className="px-3 py-6 text-muted-foreground">
+                    {view.reportEmpty}
+                  </td>
+                </tr>
+              ) : null}
+              {report?.transactions.map((item) => (
+                <tr key={item.id} className="border-b border-border last:border-0">
+                  <td className="whitespace-nowrap px-3 py-3">{item.createdAt}</td>
+                  <td className="px-3 py-3">
+                    {isHotspot ? (
+                      item.contact || "—"
+                    ) : (
+                      <>
+                        {item.customer || item.contact || "—"}
+                        {item.contact && item.contact !== item.customer ? (
+                          <span className="block text-xs text-muted-foreground">{item.contact}</span>
+                        ) : null}
+                      </>
+                    )}
+                  </td>
+                  <td className="px-3 py-3">
+                    {item.detail || "—"}
+                    {!isHotspot && typeLabel(item) ? (
+                      <span className="block text-xs text-muted-foreground">{typeLabel(item)}</span>
+                    ) : null}
+                  </td>
+                  <td className="px-3 py-3 text-xs text-muted-foreground">{item.reference || "—"}</td>
+                  <td className="px-3 py-3 text-right font-semibold">{money(item.amount)}</td>
+                  <td className="px-3 py-3">
+                    <StatusBadge tone={paymentStatusTone[item.status] ?? "neutral"}>{item.status}</StatusBadge>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </section>
     </div>
   );
 }

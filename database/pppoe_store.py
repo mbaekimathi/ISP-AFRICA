@@ -145,6 +145,9 @@ def ensure_schema(cursor):
     cursor.execute("SHOW COLUMNS FROM pppoe_stk_requests LIKE 'mpesa_code'")
     if cursor.fetchone() is None:
         cursor.execute("ALTER TABLE pppoe_stk_requests ADD COLUMN mpesa_code VARCHAR(20) NOT NULL DEFAULT ''")
+    cursor.execute("SHOW COLUMNS FROM pppoe_stk_requests LIKE 'last_verified_at'")
+    if cursor.fetchone() is None:
+        cursor.execute("ALTER TABLE pppoe_stk_requests ADD COLUMN last_verified_at DATETIME NULL")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS pppoe_vouchers (
@@ -2620,6 +2623,7 @@ def list_transactions(cursor, client_id, query):
             {
                 "id": f"pay-{item['id']}",
                 "kind": "payment",
+                "method": item["method"],
                 "detail": item.get("package_name") or item["method"],
                 "reference": item.get("mpesa_code") or item["mpesa_reference"] or "",
                 "amount": format(Decimal(item["amount"]), ".2f"),

@@ -1806,6 +1806,7 @@ def ensure_schema():
                 ("mpesa_code", "mpesa_code VARCHAR(20) NOT NULL DEFAULT ''"),
                 ("deleted", "deleted TINYINT NOT NULL DEFAULT 0"),
                 ("ended_at", "ended_at TIMESTAMP NULL"),
+                ("last_verified_at", "last_verified_at DATETIME NULL"),
             ):
                 cursor.execute("SHOW COLUMNS FROM hotspot_purchases LIKE %s", (column,))
                 if cursor.fetchone() is None:
