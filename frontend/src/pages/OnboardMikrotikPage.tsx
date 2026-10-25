@@ -7,20 +7,10 @@ import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
 import { buildWinboxScript, backupName } from "@/lib/winboxScript";
 
-const roles = [
-  { value: "hotspot", label: "Hotspot" },
-  { value: "pppoe", label: "PPPoE" },
-  { value: "static", label: "Static IP" },
-  { value: "dhcp", label: "DHCP" },
-] as const;
-
-type DeviceRole = (typeof roles)[number]["value"];
-
 type DeviceRecord = {
   id: string;
   name: string;
   site: string;
-  role: string;
   routerosVersion: "" | "7" | "6";
   tunnelIp: string;
   publicKey: string;
@@ -61,7 +51,6 @@ export function OnboardMikrotikPage() {
   usePageMeta("Onboard Mikrotik — ISP CENTRIC", "Name the router, copy one WinBox script, and paste it once.");
   const [name, setName] = useState("");
   const [site, setSite] = useState("");
-  const [role, setRole] = useState<DeviceRole[]>([]);
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const [device, setDevice] = useState<DeviceRecord | null>(null);
@@ -97,8 +86,8 @@ export function OnboardMikrotikPage() {
 
   async function createDevice() {
     setError("");
-    if (!name.trim() || !site.trim() || role.length === 0) {
-      setError("Enter the router name, site, and how customers connect.");
+    if (!name.trim() || !site.trim()) {
+      setError("Enter the router name and site.");
       return;
     }
     setPending(true);
@@ -108,7 +97,6 @@ export function OnboardMikrotikPage() {
         body: JSON.stringify({
           name,
           site,
-          role: roles.filter((item) => role.includes(item.value)).map((item) => item.value),
           routerosVersion: "",
         }),
       });
@@ -199,27 +187,6 @@ export function OnboardMikrotikPage() {
               <FormField id="device-site" label="Site">
                 <input id="device-site" className="field" value={site} maxLength={80} onChange={(event) => setSite(event.target.value)} />
               </FormField>
-              <fieldset className="grid gap-2">
-                <legend className="text-sm font-medium text-foreground">How customers connect</legend>
-                <p id="device-role-hint" className="text-sm text-muted-foreground">Select every method this router uses.</p>
-                <div className="mt-1 grid gap-2">
-                  {roles.map((item) => (
-                    <label key={item.value} className="flex min-h-11 items-center gap-2 rounded-lg border border-border px-3 text-sm">
-                      <input
-                        type="checkbox"
-                        name="device-role"
-                        value={item.value}
-                        checked={role.includes(item.value)}
-                        onChange={(event) => {
-                          const value = item.value;
-                          setRole((current) => (event.target.checked ? [...current, value] : current.filter((entry) => entry !== value)));
-                        }}
-                      />
-                      {item.label}
-                    </label>
-                  ))}
-                </div>
-              </fieldset>
               <PrimaryButton type="submit" disabled={pending}>
                 {pending ? "Preparing script…" : "Generate script"}
               </PrimaryButton>

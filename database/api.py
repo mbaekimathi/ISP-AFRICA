@@ -3754,8 +3754,6 @@ class Handler(BaseHTTPRequestHandler):
             if item not in allowed:
                 raise ApiError(400, "Choose how customers connect.")
             chosen.append(item)
-        if not chosen:
-            raise ApiError(400, "Choose how customers connect.")
         role = ",".join(item for item in allowed if item in chosen)
         if len(role) > 40:
             raise ApiError(400, "Choose fewer connection methods.")

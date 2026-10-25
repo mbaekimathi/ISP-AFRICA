@@ -61,7 +61,8 @@ function pagePath(pathname: string, code: string | null | undefined) {
 }
 
 function linksForPage(pathname: string, advertsEnabled: boolean) {
-  if (pathname === "/dashboard" || pathname.endsWith("/dashboard")) return sectionLinks;
+  if (pathname === "/dashboard" || pathname.endsWith("/dashboard"))
+    return advertsEnabled ? [...sectionLinks, advertsLink] : sectionLinks;
   const router = pathname.match(/^\/mikrotiks\/([^/]+)/);
   if (router && router[1] !== "onboard" && router[1] !== "import-clients") {
     const id = router[1];

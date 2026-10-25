@@ -896,7 +896,7 @@ export function MikrotikRouterSetupPage() {
       {error ? <p className="mb-4 notice" role="alert">{error}</p> : null}
       {device ? (
         <p className="mb-4 text-sm text-muted-foreground">
-          {device.role || "No access method"} · tunnel {device.tunnelIp} ({device.tunnelStatus}) · RouterOS {device.routerosVersion || "unknown"}
+          Tunnel {device.tunnelIp} ({device.tunnelStatus}) · RouterOS {device.routerosVersion || "unknown"}
         </p>
       ) : null}
       {readingSetup ? <p className="mb-4 text-sm text-muted-foreground">Reading this router…</p> : null}
