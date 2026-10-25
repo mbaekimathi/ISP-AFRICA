@@ -2,6 +2,7 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import { ClientLayout } from "@/components/layout/ClientLayout";
 import { EmployeeLayout } from "@/components/layout/EmployeeLayout";
 import { PublicLayout } from "@/components/layout/PublicLayout";
+import { CompanyAdvertsPage } from "@/pages/employee/CompanyAdvertsPage";
 import { CompanyCommunicationsPage } from "@/pages/employee/CompanyCommunicationsPage";
 import { CompanyNotificationsPage } from "@/pages/employee/CompanyNotificationsPage";
 import { CompanyNotificationSettingsPage } from "@/pages/employee/CompanyNotificationSettingsPage";
@@ -28,6 +29,7 @@ import { PppoeCustomerPage } from "@/pages/PppoeCustomerPage";
 import { PppoeCustomerTransactionsPage } from "@/pages/PppoeCustomerTransactionsPage";
 import { PppoeRemoteAccessPage } from "@/pages/PppoeRemoteAccessPage";
 import { PppoeRegisterPage } from "@/pages/PppoeRegisterPage";
+import { IspAdvertsPage } from "@/pages/IspAdvertsPage";
 import { IspCompanyPage } from "@/pages/IspCompanyPage";
 import { IspThemePage } from "@/pages/IspThemePage";
 import { IspPackagePage } from "@/pages/IspPackagePage";
@@ -142,6 +144,8 @@ export function App() {
             <Route path="/:code/account/settings/isp-notifications" element={<IspNotificationsPage />} />
             <Route path="/account/settings/isp-notifications/settings" element={<IspNotificationSettingsPage />} />
             <Route path="/:code/account/settings/isp-notifications/settings" element={<IspNotificationSettingsPage />} />
+            <Route path="/account/settings/isp-adverts" element={<IspAdvertsPage />} />
+            <Route path="/:code/account/settings/isp-adverts" element={<IspAdvertsPage />} />
             <Route path="/reviews" element={<ReviewsPage />} />
             <Route path="/:code/reviews" element={<ReviewsPage />} />
           </Route>
@@ -159,6 +163,7 @@ export function App() {
             <Route path="/:role/:code/company-settings/billings/gateway" element={<CompanyGatewayPage />} />
             <Route path="/:role/:code/company-settings/billings/gateway/charges" element={<CompanyChargesPage />} />
             <Route path="/:role/:code/company-settings/communications" element={<CompanyCommunicationsPage />} />
+            <Route path="/:role/:code/company-settings/adverts" element={<CompanyAdvertsPage />} />
             <Route path="/:role/:code/company-settings/notifications" element={<CompanyNotificationsPage />} />
             <Route path="/:role/:code/company-settings/notifications/settings" element={<CompanyNotificationSettingsPage />} />
             <Route path="/:role/:code/reviews" element={<EmployeeReviewsPage />} />
@@ -182,6 +187,7 @@ export function App() {
             <Route path="company-settings/billings/gateway" element={<CompanyGatewayPage />} />
             <Route path="company-settings/billings/gateway/charges" element={<CompanyChargesPage />} />
             <Route path="company-settings/communications" element={<CompanyCommunicationsPage />} />
+            <Route path="company-settings/adverts" element={<CompanyAdvertsPage />} />
             <Route path="company-settings/notifications" element={<CompanyNotificationsPage />} />
             <Route path="company-settings/notifications/settings" element={<CompanyNotificationSettingsPage />} />
             <Route path="company-settings/isp-notifications" element={<Navigate to="/employee/company-settings/notifications" replace />} />

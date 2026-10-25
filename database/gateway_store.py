@@ -255,6 +255,7 @@ def ensure_schema(cursor):
           status ENUM('queued', 'submitted', 'confirmed', 'failed', 'timed_out', 'needs_review', 'submitting') NOT NULL DEFAULT 'queued',
           attempt_count INT NOT NULL DEFAULT 0,
           last_error VARCHAR(255) NOT NULL DEFAULT '',
+          note VARCHAR(160) NOT NULL DEFAULT '',
           submitted_at DATETIME NULL,
           confirmed_at DATETIME NULL,
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
@@ -366,6 +367,14 @@ def ensure_schema(cursor):
             "ALTER TABLE gateway_payouts MODIFY COLUMN status "
             "ENUM('queued','submitted','confirmed','failed','timed_out','needs_review','submitting') "
             "NOT NULL DEFAULT 'queued'"
+        )
+
+    # Manual transfers carry the director's reason — surfaced on the payout
+    # row and sent to Daraja as the remarks.
+    cursor.execute("SHOW COLUMNS FROM gateway_payouts LIKE 'note'")
+    if cursor.fetchone() is None:
+        cursor.execute(
+            "ALTER TABLE gateway_payouts ADD COLUMN note VARCHAR(160) NOT NULL DEFAULT ''"
         )
 
     # Append-only ledger: corrections are reversing entries, so the DB itself
@@ -875,6 +884,8 @@ def mark_payout_undelivered(cursor, payout_id, status, error):
         """,
         (status, str(error or "")[:255], payout_id),
     )
+    if cursor.rowcount and status == "failed":
+        refund_manual_payout(cursor, payout_id)
     return cursor.rowcount > 0
 
 
@@ -915,6 +926,41 @@ def _share(total, basis, part, is_last, remaining):
     )
 
 
+def refund_manual_payout(cursor, payout_id):
+    """Undo the up-front debit of a manual transfer that terminally failed
+    before money moved — a 'reversal' entry returns the amount to the pool.
+    (payout_id, 'reversal') is unique, so a second call is a no-op. Only for
+    payouts in manual:* batches; 'failed' means Daraja rejected it or it
+    never reached Daraja — needs_review rows are NOT refunded, they may be
+    in flight."""
+    cursor.execute(
+        "SELECT * FROM gateway_payouts WHERE id = %s", (payout_id,)
+    )
+    row = cursor.fetchone()
+    if not row or row["status"] != "failed":
+        return False
+    cursor.execute(
+        "SELECT * FROM settlement_batches WHERE id = %s", (row["batch_id"],)
+    )
+    batch = cursor.fetchone() or {}
+    if not str(batch.get("batch_key") or "").startswith("manual:"):
+        return False
+    balance = _last_balance(cursor, row["client_id"]) + Decimal(str(row["amount"]))
+    try:
+        cursor.execute(
+            """
+            INSERT INTO gateway_ledger_entries
+              (id, client_id, payout_id, type, amount, balance_after)
+            VALUES (%s, %s, %s, %s, %s, %s)
+            """,
+            (str(uuid.uuid4()), row["client_id"], payout_id, "reversal",
+             row["amount"], balance),
+        )
+    except pymysql.MySQLError:
+        return False  # already refunded
+    return True
+
+
 def finalize_payout_outcome(cursor, payout, receipt=None):
     """Ledger + batch rollup for a terminal payout result, inside the caller's
     transaction. Exactly-once: unique (payout_id, type) keys turn a second
@@ -922,18 +968,21 @@ def finalize_payout_outcome(cursor, payout, receipt=None):
 
     On 'confirmed' the client's pool drains by three entries: payout (-sent),
     commission (-company's cut share), payout_fee (-estimated fee share), so a
-    fully-delivered batch returns the running balance to where it started."""
-    if payout["status"] == "confirmed":
+    fully-delivered batch returns the running balance to where it started.
+    Manual transfers debited the pool up front — a confirmed manual payout
+    writes nothing, a failed one is refunded by a reversal entry."""
+    cursor.execute(
+        "SELECT * FROM settlement_batches WHERE id = %s", (payout["batch_id"],)
+    )
+    batch = cursor.fetchone() or {}
+    manual = str(batch.get("batch_key") or "").startswith("manual:")
+    if payout["status"] == "confirmed" and not manual:
         # Same per-client serializer confirm_collection uses — the running
         # balance_after stays consistent across concurrent finalizations.
         cursor.execute(
             "SELECT client_id FROM isp_payout_settings WHERE client_id = %s FOR UPDATE",
             (payout["client_id"],),
         )
-        cursor.execute(
-            "SELECT * FROM settlement_batches WHERE id = %s", (payout["batch_id"],)
-        )
-        batch = cursor.fetchone() or {}
         cursor.execute(
             "SELECT id, amount FROM gateway_payouts WHERE batch_id = %s ORDER BY created_at, id",
             (payout["batch_id"],),
@@ -979,6 +1028,8 @@ def finalize_payout_outcome(cursor, payout, receipt=None):
                 )
             except pymysql.MySQLError:
                 pass  # (payout_id, type) already written — duplicate result
+    elif manual and payout["status"] == "failed":
+        refund_manual_payout(cursor, payout["id"])
     rollup_batch(cursor, payout["batch_id"])
     release_failed_batch(cursor, payout["batch_id"])
 
@@ -1163,6 +1214,7 @@ def client_custody(cursor, client_id=None):
         SELECT s.client_id, s.settlement_mode, s.hold_hours, s.destination_type,
                s.destination_value, s.account_reference, s.pending_change,
                s.pending_change_effective_at, s.min_payout_override, s.gateway_mode,
+               s.settle_every_n_tx, s.settle_schedule, s.last_settled_at,
                c.first_name, c.last_name
         FROM isp_payout_settings s
         LEFT JOIN isp_clients c ON c.id = s.client_id {where}
@@ -1213,11 +1265,18 @@ def client_directory(cursor):
 
 
 def list_ledger(cursor, client_id, limit=200, offset=0):
+    """Ledger entries with the M-Pesa code of the underlying transaction —
+    the code is what people recognise, not our internal ids."""
     cursor.execute(
         """
-        SELECT id, client_id, payment_id, payout_id, type, amount, balance_after, created_at
-        FROM gateway_ledger_entries WHERE client_id = %s
-        ORDER BY seq DESC LIMIT %s OFFSET %s
+        SELECT e.id, e.client_id, e.payment_id, e.payout_id, e.type, e.amount,
+               e.balance_after, e.created_at,
+               COALESCE(p.mpesa_receipt, po.mpesa_receipt) AS mpesa_receipt
+        FROM gateway_ledger_entries e
+        LEFT JOIN gateway_payments p ON p.id = e.payment_id
+        LEFT JOIN gateway_payouts po ON po.id = e.payout_id
+        WHERE e.client_id = %s
+        ORDER BY e.seq DESC LIMIT %s OFFSET %s
         """,
         (client_id, int(limit), int(offset)),
     )
@@ -1228,8 +1287,8 @@ def list_payouts(cursor, client_id=None, status=None, limit=200, offset=0):
     sql = """
         SELECT po.id, po.batch_id, po.client_id, po.destination_type, po.destination_value,
                po.account_reference, po.amount, po.status, po.mpesa_receipt, po.last_error,
-               po.attempt_count, po.submitted_at, po.confirmed_at, po.created_at,
-               b.status AS batch_status
+               po.note, po.attempt_count, po.submitted_at, po.confirmed_at, po.created_at,
+               b.status AS batch_status, b.batch_key AS batch_key
         FROM gateway_payouts po
         LEFT JOIN settlement_batches b ON b.id = po.batch_id
     """
@@ -1730,6 +1789,7 @@ def fail_payout_manually(cursor, payout_id, actor_id):
         "WHERE id = %s",
         (payout_id,),
     )
+    refund_manual_payout(cursor, payout_id)
     rollup_batch(cursor, row["batch_id"])
     release_failed_batch(cursor, row["batch_id"])
     audit(cursor, None, "employee", actor_id, "payout.mark_failed",

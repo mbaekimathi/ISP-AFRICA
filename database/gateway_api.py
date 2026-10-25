@@ -39,9 +39,15 @@ def overview(cursor):
 
 
 def clients(cursor):
+    import gateway_settle
+
+    rows = gateway_store.client_custody(cursor)
+    gateway_settle.held_reasons(cursor, rows)
+    company = gateway_store.company_gateway_row(cursor) or {}
     return {
-        "clients": gateway_store.client_custody(cursor),
+        "clients": rows,
         "directory": gateway_store.client_directory(cursor),
+        "maxPayoutPerTx": str(company.get("max_payout_per_tx") or ""),
     }
 
 
@@ -248,6 +254,24 @@ def check_payout(cursor, payout_id, actor_id):
 
 def mark_payout_failed(cursor, payout_id, actor_id):
     return gateway_store.fail_payout_manually(cursor, payout_id, actor_id)
+
+
+def manual_transfer(cursor, payload, actor_id):
+    """Director sends part of a client's held pool to its configured
+    destination — outside the schedule. Validation of the shape happens
+    here; the money rules live in gateway_settle.manual_transfer."""
+    import gateway_settle
+
+    amount = payload.get("amount")
+    if amount in (None, ""):
+        return None, "Enter the amount to transfer."
+    try:
+        amount = Decimal(str(amount))
+    except (InvalidOperation, TypeError, ValueError):
+        return None, "Enter a valid amount."
+    reason = str(payload.get("reason") or "")[:160]
+    return gateway_settle.manual_transfer(
+        cursor, payload.get("clientId"), amount, reason, actor_id)
 
 
 def assign_suspense(cursor, payment_id, payload, actor_id):

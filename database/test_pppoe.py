@@ -101,10 +101,11 @@ class VoucherCursor:
                 for v in self.vouchers.values()
                 if v["checkout_id"] == args[0]
             ]
-        elif flat.startswith("SELECT v.code, v.amount, v.status, v.issued_at, v.used_at"):
+        elif flat.startswith("SELECT v.code, v.client_id, v.amount, v.status, v.issued_at, v.used_at"):
             self._result = [
                 {
                     "code": v["code"],
+                    "client_id": "client-1",
                     "amount": v["amount"],
                     "status": v["status"],
                     "issued_at": None,

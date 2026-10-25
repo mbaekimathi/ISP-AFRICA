@@ -1,6 +1,7 @@
 """Offline tests for the settlement scheduler — MiniDb emulates the exact
 SQL gateway_settle runs, including FOR UPDATE guards and time windows."""
 
+import json
 import os
 import sys
 import unittest
@@ -109,6 +110,28 @@ class MiniCursor:
                     pending_change_effective_at=None,
                 )
                 self.rowcount = 1
+        elif flat.startswith("SELECT COUNT(*) AS n"):
+            # _held_in_window / _unbatched_collections — unbatched confirmed
+            # collections; the in-window variant carries the hold hours arg.
+            client_id = args[0]
+            hold = int(args[1]) if len(args) > 1 else None
+            linked = {be["ledger_entry_id"] for be in d.table("settlement_batch_entries")}
+            in_window = []
+            for e in d.table("gateway_ledger_entries"):
+                if e["client_id"] != client_id or e["id"] in linked or e["type"] != "collection":
+                    continue
+                p = next((x for x in d.table("gateway_payments") if x["id"] == e.get("payment_id")), None)
+                if not p or p["status"] != "confirmed":
+                    continue
+                confirmed = p.get("confirmed_at") or e.get("created_at") or d.now
+                if hold is not None and confirmed <= d.now - timedelta(hours=hold):
+                    continue
+                in_window.append(confirmed)
+            if hold is not None:
+                self._result = [{"n": len(in_window),
+                                 "earliest": min(in_window) if in_window else None}]
+            else:
+                self._result = [{"n": len(in_window)}]
         elif "FROM gateway_ledger_entries" in flat and "LEFT JOIN settlement_batch_entries" in flat:
             client_id = args[0]
             hold = int(args[1]) if len(args) > 1 else None
@@ -224,13 +247,14 @@ class MiniCursor:
                  "type": kind, "amount": amount, "balance_after": balance})
             self.rowcount = 1
         elif flat.startswith("INSERT INTO gateway_payouts"):
-            (pid, batch, client, dtype, dval, aref, amount, idem) = args
+            (pid, batch, client, dtype, dval, aref, amount, idem, *extra) = args
             status = "queued"
             if not any(p["idempotency_key"] == idem for p in d.table("gateway_payouts")):
                 d.table("gateway_payouts").append(
                     {"id": pid, "batch_id": batch, "client_id": client, "destination_type": dtype,
                      "destination_value": dval, "account_reference": aref, "amount": amount,
-                     "idempotency_key": idem, "status": status})
+                     "idempotency_key": idem, "note": (extra[0] if extra else ""),
+                     "status": status})
             self.rowcount = 1
         elif flat.startswith("INSERT INTO gateway_audit_log"):
             d.table("gateway_audit_log").append({"id": args[0], "action": args[5]})
@@ -877,6 +901,171 @@ class ManualFailTests(unittest.TestCase):
             db.cursor(), payout["id"], "emp-1")
         self.assertIsNone(result)
         self.assertIn("submitted", error)
+
+
+def seed_balance(db, cid, amount):
+    """A confirmed collection that leaves `amount` sitting in the pool."""
+    seed_payment(db, cid, amount, f"e-{amount}")
+    db.table("gateway_ledger_entries")[-1]["balance_after"] = Decimal(str(amount))
+
+
+class ManualTransferTests(unittest.TestCase):
+    def test_transfer_debits_pool_and_queues_payout(self):
+        db = seed_db()
+        seed_balance(db, "c1", "500")
+        result, error = gateway_settle.manual_transfer(
+            db.cursor(), "c1", "300", "early release", "emp-1")
+        self.assertIsNone(error)
+        self.assertEqual(result["amount"], "300.00")
+        self.assertEqual(result["balanceAfter"], "200.00")
+        self.assertEqual(result["payouts"], 1)
+        batch = db.table("settlement_batches")[0]
+        self.assertTrue(batch["batch_key"].startswith("manual:"))
+        payout = db.table("gateway_payouts")[0]
+        self.assertEqual(payout["amount"], Decimal("300.00"))
+        self.assertEqual(payout["status"], "queued")
+        self.assertEqual(payout["note"], "early release")
+        self.assertEqual(payout["destination_value"], "254700999888")
+        debit = db.table("gateway_ledger_entries")[-1]
+        self.assertEqual(debit["type"], "adjustment")
+        self.assertEqual(debit["amount"], Decimal("-300.00"))
+        self.assertEqual(debit["balance_after"], Decimal("200.00"))
+        self.assertEqual(debit["payout_id"], payout["id"])
+
+    def test_split_over_max_per_tx_sends_multiple(self):
+        db = seed_db()
+        db.table("company_daraja_settings")[0]["max_payout_per_tx"] = Decimal("100")
+        seed_balance(db, "c1", "500")
+        result, error = gateway_settle.manual_transfer(
+            db.cursor(), "c1", "250", "", "emp-1")
+        self.assertIsNone(error)
+        self.assertEqual(result["payouts"], 3)
+        total = sum(p["amount"] for p in db.table("gateway_payouts"))
+        self.assertEqual(total, Decimal("250.00"))
+
+    def test_refuses_over_balance(self):
+        db = seed_db()
+        seed_balance(db, "c1", "500")
+        result, error = gateway_settle.manual_transfer(
+            db.cursor(), "c1", "600", "", "emp-1")
+        self.assertIsNone(result)
+        self.assertIn("500", error)
+        self.assertEqual(db.table("gateway_payouts"), [])
+
+    def test_refuses_without_destination(self):
+        db = seed_db()
+        db.table("isp_payout_settings")[0]["destination_value"] = ""
+        seed_balance(db, "c1", "500")
+        result, error = gateway_settle.manual_transfer(
+            db.cursor(), "c1", "100", "", "emp-1")
+        self.assertIsNone(result)
+        self.assertIn("destination", error)
+
+    def test_refuses_when_halted(self):
+        db = seed_db()
+        db.table("company_daraja_settings")[0]["kill_switch"] = 1
+        seed_balance(db, "c1", "500")
+        result, error = gateway_settle.manual_transfer(
+            db.cursor(), "c1", "100", "", "emp-1")
+        self.assertIsNone(result)
+        self.assertIn("halted", error)
+
+    def test_confirmed_manual_payout_writes_no_ledger(self):
+        db = seed_db()
+        seed_balance(db, "c1", "500")
+        gateway_settle.manual_transfer(db.cursor(), "c1", "300", "", "emp-1")
+        payout = db.table("gateway_payouts")[0]
+        payout["status"] = "confirmed"
+        gateway_store.finalize_payout_outcome(db.cursor(), dict(payout))
+        written = [e for e in db.table("gateway_ledger_entries")
+                   if e["type"] in ("payout", "commission", "payout_fee")]
+        self.assertEqual(written, [])
+        self.assertEqual(db.table("settlement_batches")[0]["status"], "paid")
+
+    def test_failed_manual_payout_refunds_pool(self):
+        db = seed_db()
+        seed_balance(db, "c1", "500")
+        gateway_settle.manual_transfer(db.cursor(), "c1", "300", "", "emp-1")
+        payout = db.table("gateway_payouts")[0]
+        payout["status"] = "failed"
+        gateway_store.finalize_payout_outcome(db.cursor(), dict(payout))
+        reversal = db.table("gateway_ledger_entries")[-1]
+        self.assertEqual(reversal["type"], "reversal")
+        self.assertEqual(reversal["amount"], Decimal("300.00"))
+        self.assertEqual(reversal["balance_after"], Decimal("500.00"))
+        # Refund is exactly-once too.
+        gateway_store.refund_manual_payout(db.cursor(), payout["id"])
+        self.assertEqual(
+            sum(1 for e in db.table("gateway_ledger_entries") if e["type"] == "reversal"), 1)
+
+
+class HeldReasonTests(unittest.TestCase):
+    def _row(self, db, **overrides):
+        row = client_row()
+        row.update(overrides)
+        return row
+
+    def test_nothing_held_returns_none(self):
+        db = seed_db()
+        row = self._row(db, balance="0.00")
+        self.assertIsNone(gateway_settle.held_reason(db.cursor(), row, company()))
+
+    def test_kill_switch_explains_hold(self):
+        db = seed_db()
+        row = self._row(db, balance="500")
+        reason = gateway_settle.held_reason(
+            db.cursor(), row, company(kill_switch=1))
+        self.assertEqual(reason["code"], "kill_switch")
+
+    def test_missing_destination(self):
+        db = seed_db()
+        row = self._row(db, balance="500", destination_value="")
+        reason = gateway_settle.held_reason(db.cursor(), row, company())
+        self.assertEqual(reason["code"], "no_destination")
+
+    def test_below_minimum_explains_carry(self):
+        db = seed_db()
+        seed_balance(db, "c1", "50")
+        row = self._row(db, balance="50")
+        reason = gateway_settle.held_reason(db.cursor(), row, company())
+        self.assertEqual(reason["code"], "minimum")
+        self.assertIn("100", reason["message"])
+
+    def test_delayed_window_explains_hold(self):
+        db = seed_db()
+        db.table("isp_payout_settings")[0].update(
+            settlement_mode="delayed", hold_hours=24)
+        recent = db.now - timedelta(hours=10)
+        seed_payment(db, "c1", "500", "e-1", confirmed_at=recent)
+        row = self._row(db, balance="500", settlement_mode="delayed")
+        reason = gateway_settle.held_reason(db.cursor(), row, company())
+        self.assertEqual(reason["code"], "hold")
+        self.assertIn("24h", reason["message"])
+
+    def test_transaction_threshold(self):
+        db = seed_db()
+        seed_balance(db, "c1", "500")
+        row = self._row(db, balance="500", settlement_mode="transactions",
+                        settle_every_n_tx=3)
+        reason = gateway_settle.held_reason(db.cursor(), row, company())
+        self.assertEqual(reason["code"], "threshold")
+        self.assertIn("3", reason["message"])
+
+    def test_scheduled_not_due(self):
+        db = seed_db()
+        seed_balance(db, "c1", "500")
+        schedule = json.dumps([{"day": "sunday", "time": "23:59"}])
+        row = self._row(db, balance="500", settlement_mode="scheduled",
+                        settle_schedule=schedule, last_settled_at=db.now)
+        reason = gateway_settle.held_reason(db.cursor(), row, company())
+        self.assertEqual(reason["code"], "schedule")
+
+    def test_eligible_reports_auto_settle(self):
+        db = seed_db()
+        seed_balance(db, "c1", "1000")
+        row = self._row(db, balance="1000")
+        reason = gateway_settle.held_reason(db.cursor(), row, company())
+        self.assertEqual(reason["code"], "eligible")
 
 
 if __name__ == "__main__":

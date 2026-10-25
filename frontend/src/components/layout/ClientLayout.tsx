@@ -33,6 +33,12 @@ const settingsLinks = [
   { label: "Communications", to: "/account/settings/isp-communications" },
 ];
 
+const advertsLink = { label: "Adverts", to: "/account/settings/isp-adverts" };
+
+const advertLinks = [
+  { label: "Adverts", to: "/account/settings/isp-adverts" },
+];
+
 const ispCompanyLinks = [
   { label: "Company", to: "/account/settings/isp-company/company" },
   { label: "Theme", to: "/account/settings/isp-company/theme" },
@@ -54,7 +60,7 @@ function pagePath(pathname: string, code: string | null | undefined) {
   return pathname;
 }
 
-function linksForPage(pathname: string) {
+function linksForPage(pathname: string, advertsEnabled: boolean) {
   if (pathname === "/dashboard" || pathname.endsWith("/dashboard")) return sectionLinks;
   const router = pathname.match(/^\/mikrotiks\/([^/]+)/);
   if (router && router[1] !== "onboard" && router[1] !== "import-clients") {
@@ -120,7 +126,9 @@ function linksForPage(pathname: string) {
   }
   if (pathname.startsWith("/account/settings/isp-notifications")) return notificationLinks;
   if (pathname.endsWith("/account/settings/isp-communications")) return communicationsLinks;
-  if (pathname === "/account/settings" || pathname.endsWith("/account/settings")) return settingsLinks;
+  if (pathname.endsWith("/account/settings/isp-adverts")) return advertLinks;
+  if (pathname === "/account/settings" || pathname.endsWith("/account/settings"))
+    return advertsEnabled ? [...settingsLinks, advertsLink] : settingsLinks;
   if (pathname.endsWith("/account/settings/isp-company")) return ispCompanyLinks;
   return [];
 }
@@ -131,7 +139,10 @@ export function ClientLayout() {
   const location = useLocation();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const closeSidebar = useCallback(() => setSidebarOpen(false), []);
-  const clientSidebar = linksForPage(pagePath(location.pathname, user?.dashboardCode)).map((item) => ({
+  const clientSidebar = linksForPage(
+    pagePath(location.pathname, user?.dashboardCode),
+    Boolean(user?.advertsEnabled),
+  ).map((item) => ({
     ...item,
     to: user ? clientPage(user, item.to) : item.to,
   }));

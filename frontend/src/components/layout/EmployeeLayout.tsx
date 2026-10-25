@@ -22,6 +22,11 @@ const companyLinks = [
   { label: "Packages", to: "/employee/company-settings/packages" },
   { label: "Payments", to: "/employee/company-settings/payments" },
   { label: "Communications", to: "/employee/company-settings/communications" },
+  { label: "Adverts", to: "/employee/company-settings/adverts" },
+];
+
+const companyAdvertsLinks = [
+  { label: "Adverts", to: "/employee/company-settings/adverts" },
 ];
 
 const companyProfileLinks = [
@@ -61,6 +66,7 @@ function employeeSidebarItems(pathname: string, director: boolean) {
   if (path === "/company-settings/payments") return companyPaymentsLinks;
   if (path.startsWith("/company-settings/notifications")) return companyNotificationLinks;
   if (path === "/company-settings/communications") return companyCommunicationsLinks;
+  if (path === "/company-settings/adverts") return companyAdvertsLinks;
   if (path === "/company-settings") return companyLinks;
   if (path === "/company-settings/profile") return companyProfileLinks;
   return [];

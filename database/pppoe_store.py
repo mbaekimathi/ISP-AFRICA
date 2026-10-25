@@ -670,7 +670,7 @@ def voucher_detail(cursor, code, client_id=None):
     params = (str(code or "").strip().upper()[:20], client_id) if client_id else (str(code or "").strip().upper()[:20],)
     cursor.execute(
         f"""
-        SELECT v.code, v.amount, v.status, v.issued_at, v.used_at,
+        SELECT v.code, v.client_id, v.amount, v.status, v.issued_at, v.used_at,
                COALESCE(NULLIF(v.package_name, ''), p.name, 'Subscription') AS package_name,
                s.first_name, s.last_name, s.pppoe_username
         FROM pppoe_vouchers v

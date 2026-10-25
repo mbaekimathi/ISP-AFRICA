@@ -1,11 +1,14 @@
+import * as Dialog from "@radix-ui/react-dialog";
 import {
   AlertTriangle,
   ArrowLeftRight,
   Download,
   FileWarning,
+  HandCoins,
   Landmark,
   ReceiptText,
   ScrollText,
+  Send,
   ShieldCheck,
   Timer,
   Wallet,
@@ -41,6 +44,9 @@ type PaymentRow = {
   confirmed_at: string | null;
   created_at: string;
   batch_id: string | null;
+  transfers_total: number | null;
+  transfers_confirmed: number | null;
+  transfer_receipt: string | null;
 };
 
 type PayoutRow = {
@@ -54,6 +60,7 @@ type PayoutRow = {
   status: string;
   mpesa_receipt: string | null;
   last_error: string;
+  note: string | null;
   batch_status: string | null;
   submitted_at: string | null;
   confirmed_at: string | null;
@@ -120,7 +127,40 @@ type GatewaySettings = {
 
 type DirectoryEntry = { id: string; name: string; email: string; status: string };
 
-type Tab = "payments" | "payouts" | "batches" | "suspense" | "pending" | "audit" | "notices" | "settings";
+type HeldRow = {
+  client_id: string;
+  name: string | null;
+  balance: string;
+  settlement_mode: string;
+  hold_hours: number | null;
+  destination_type: string | null;
+  destination_value: string | null;
+  account_reference: string | null;
+  gateway_mode: string;
+  hold: { code: string; message: string } | null;
+};
+
+type Tab = "held" | "payments" | "payouts" | "batches" | "suspense" | "pending" | "audit" | "notices" | "settings";
+
+const holdTone: Record<string, StatusTone> = {
+  eligible: "pending",
+  kill_switch: "critical",
+  suspended: "critical",
+  unconfigured: "critical",
+  no_destination: "overdue",
+  residual: "due",
+  hold: "due",
+  threshold: "due",
+  schedule: "due",
+  minimum: "due",
+};
+
+const settlementLabel: Record<string, string> = {
+  immediate: "Immediate",
+  delayed: "Delayed",
+  transactions: "Every N payments",
+  scheduled: "Scheduled",
+};
 
 const custodyTone: Record<string, StatusTone> = {
   delivered: "active",
@@ -189,7 +229,10 @@ function pendingChangeText(raw: string) {
 export function CompanyGatewayPage() {
   usePageMeta("COMPANY GATEWAY BILLINGS — ISP CENTRIC", "Pooled collections, settlements, and payouts across every ISP.");
   const [overview, setOverview] = useState<Overview | null>(null);
-  const [tab, setTab] = useState<Tab>("payments");
+  const [tab, setTab] = useState<Tab>("held");
+  const [heldRows, setHeldRows] = useState<HeldRow[] | null>(null);
+  const [maxPerTx, setMaxPerTx] = useState("");
+  const [transferFor, setTransferFor] = useState<HeldRow | null>(null);
   const [payments, setPayments] = useState<PaymentRow[] | null>(null);
   const [payouts, setPayouts] = useState<PayoutRow[] | null>(null);
   const [batches, setBatches] = useState<BatchRow[] | null>(null);
@@ -218,6 +261,15 @@ export function CompanyGatewayPage() {
     const fail = (cause: unknown) =>
       setMessage(cause instanceof Error ? cause.message : "That view could not be loaded.");
     const base = "/api/employee/company/gateway";
+    if (tab === "held") {
+      apiRequest<{ clients: HeldRow[]; directory: DirectoryEntry[]; maxPayoutPerTx: string }>(`${base}/clients`)
+        .then((b) => {
+          setHeldRows(b.clients);
+          setDirectory((current) => current ?? b.directory);
+          setMaxPerTx(b.maxPayoutPerTx || "");
+        })
+        .catch(fail);
+    }
     if (tab === "payments") apiRequest<{ payments: PaymentRow[] }>(`${base}/payments`).then((b) => setPayments(b.payments)).catch(fail);
     if (tab === "payouts") apiRequest<{ payouts: PayoutRow[] }>(`${base}/payouts`).then((b) => setPayouts(b.payouts)).catch(fail);
     if (tab === "batches") apiRequest<{ batches: BatchRow[] }>(`${base}/batches`).then((b) => setBatches(b.batches)).catch(fail);
@@ -339,6 +391,7 @@ export function CompanyGatewayPage() {
           value={tab}
           onChange={(id) => setTab(id as Tab)}
           options={[
+            { id: "held", label: `Held${overview?.heldByClient.length ? ` (${overview.heldByClient.length})` : ""}` },
             { id: "payments", label: "Payments" },
             { id: "payouts", label: "Payouts" },
             { id: "batches", label: "Batches" },
@@ -350,6 +403,85 @@ export function CompanyGatewayPage() {
           ]}
         />
       </div>
+
+      {tab === "held" ? (
+        <section className="card mt-4 overflow-hidden">
+          <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+            <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><HandCoins className="h-4 w-4" /></span>
+            <h2 className="text-sm font-semibold">Held balances</h2>
+            <p className="ml-auto text-xs text-muted-foreground">
+              Why each client's money is still in the pool — send it any time with a manual transfer
+            </p>
+          </header>
+          <DataTable
+            head={["Client", "Held", "Settlement", "Destination", "Why it's held", ""]}
+            loading={heldRows === null}
+            empty={(heldRows ?? []).length === 0 && "No clients are pooled on the company gateway."}
+          >
+            {(heldRows ?? []).map((row) => {
+              const transferable =
+                Number(row.balance) > 0 &&
+                !!row.destination_type &&
+                !!row.destination_value &&
+                overview?.gatewayStatus === "active" &&
+                !overview?.killSwitch;
+              return (
+                <tr key={row.client_id}>
+                  <td className="px-5 py-3">
+                    <div className="text-sm font-medium">{row.name || "Unnamed client"}</div>
+                    <div className="font-mono text-xs text-muted-foreground">{row.client_id.slice(0, 8)}</div>
+                  </td>
+                  <td className="px-5 py-3 text-right font-semibold tabular">{money(row.balance)}</td>
+                  <td className="px-5 py-3 text-sm">
+                    {settlementLabel[row.settlement_mode] || row.settlement_mode}
+                    {row.settlement_mode === "delayed" ? ` · ${row.hold_hours ?? 24}h` : ""}
+                  </td>
+                  <td className="px-5 py-3 text-sm">
+                    {row.destination_type ? (
+                      <>
+                        <span className="tabular">{row.destination_type} {row.destination_value}</span>
+                        {row.account_reference ? (
+                          <div className="text-xs text-muted-foreground">ref {row.account_reference}</div>
+                        ) : null}
+                      </>
+                    ) : (
+                      <span className="text-muted-foreground">Not set</span>
+                    )}
+                  </td>
+                  <td className="max-w-80 px-5 py-3">
+                    {row.hold ? (
+                      <div className="flex items-start gap-2">
+                        <StatusBadge tone={holdTone[row.hold.code] ?? "neutral"}>{row.hold.code}</StatusBadge>
+                        <span className="text-xs text-muted-foreground">{row.hold.message}</span>
+                      </div>
+                    ) : Number(row.balance) > 0 ? (
+                      <span className="text-xs text-muted-foreground">Not pooled.</span>
+                    ) : (
+                      <span className="text-xs text-muted-foreground">Nothing held.</span>
+                    )}
+                  </td>
+                  <td className="px-5 py-3">
+                    <SecondaryButton
+                      type="button"
+                      disabled={!transferable}
+                      title={
+                        Number(row.balance) <= 0
+                          ? "Nothing is held for this client"
+                          : !row.destination_type
+                            ? "Set a payout destination first"
+                            : "Send held funds to this client's account now"
+                      }
+                      onClick={() => setTransferFor(row)}
+                    >
+                      <Send className="h-3.5 w-3.5" aria-hidden="true" /> Transfer…
+                    </SecondaryButton>
+                  </td>
+                </tr>
+              );
+            })}
+          </DataTable>
+        </section>
+      ) : null}
 
       {tab === "payments" ? (
         <section className="card mt-4 overflow-hidden">
@@ -374,7 +506,15 @@ export function CompanyGatewayPage() {
                 <td className="px-5 py-3 font-mono text-xs">{row.mpesa_receipt || "—"}</td>
                 <td className="px-5 py-3 text-right font-semibold tabular">{money(row.amount)}</td>
                 <td className="px-5 py-3">{row.status}</td>
-                <td className="px-5 py-3"><StatusBadge tone={custodyTone[row.custody] ?? "neutral"}>{row.custody}</StatusBadge></td>
+                <td className="px-5 py-3">
+                  <StatusBadge tone={custodyTone[row.custody] ?? "neutral"}>{row.custody}</StatusBadge>
+                  {row.transfers_total ? (
+                    <div className="mt-0.5 text-[11px] text-muted-foreground">
+                      {row.transfers_confirmed}/{row.transfers_total} payout{row.transfers_total === 1 ? "" : "s"}
+                      {row.transfer_receipt ? <> · <span className="font-mono">{row.transfer_receipt}</span></> : null}
+                    </div>
+                  ) : null}
+                </td>
               </tr>
             ))}
           </DataTable>
@@ -401,6 +541,7 @@ export function CompanyGatewayPage() {
                 <td className="px-5 py-3">
                   <div className="tabular">{row.destination_type} {row.destination_value}</div>
                   {row.account_reference ? <div className="text-xs text-muted-foreground">ref {row.account_reference}</div> : null}
+                  {row.note ? <div className="text-xs text-muted-foreground">“{row.note}”</div> : null}
                 </td>
                 <td className="px-5 py-3 text-right font-semibold tabular">{money(row.amount)}</td>
                 <td className="px-5 py-3"><StatusBadge tone={payoutTone[row.status] ?? "neutral"}>{row.status}</StatusBadge></td>
@@ -486,7 +627,7 @@ export function CompanyGatewayPage() {
                 <td className="px-5 py-3">{row.channel}</td>
                 <td className="px-5 py-3 tabular">{row.msisdn || "—"}</td>
                 <td className="px-5 py-3 font-mono text-xs">{row.mpesa_receipt || "—"}</td>
-                <td className="px-5 py-3 text-xs text-muted-foreground">{row.account_reference || row.checkout_id || "—"}</td>
+                <td className="px-5 py-3 text-xs text-muted-foreground">{row.account_reference || "—"}</td>
                 <td className="px-5 py-3 text-right font-semibold tabular">{money(row.amount)}</td>
                 <td className="px-5 py-3">
                   {assigning === row.id ? (
@@ -603,7 +744,154 @@ export function CompanyGatewayPage() {
           onError={(text) => setMessage(text)}
         />
       ) : null}
+
+      {transferFor ? (
+        <TransferDialog
+          row={transferFor}
+          maxPerTx={maxPerTx}
+          onClose={() => setTransferFor(null)}
+          onSent={(result) => {
+            setTransferFor(null);
+            loadOverview();
+            apiRequest<{ clients: HeldRow[] }>("/api/employee/company/gateway/clients")
+              .then((b) => setHeldRows(b.clients))
+              .catch(() => setHeldRows(null));
+            setMessage(
+              `Sent ${money(result.amount)} to ${result.destination}` +
+                (result.payouts > 1 ? ` — split into ${result.payouts} payouts.` : ".") +
+                (result.floatShort ? " The payout float looks short — the transfer stays queued until it covers." : ""),
+            );
+          }}
+        />
+      ) : null}
     </div>
+  );
+}
+
+type TransferResult = {
+  ok: boolean;
+  batchId: string;
+  amount: string;
+  payouts: number;
+  destination: string;
+  floatShort: boolean;
+  balanceAfter: string;
+};
+
+function TransferDialog({
+  row,
+  maxPerTx,
+  onClose,
+  onSent,
+}: {
+  row: HeldRow;
+  maxPerTx: string;
+  onClose: () => void;
+  onSent: (result: TransferResult) => void;
+}) {
+  const [amount, setAmount] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const parsed = Number(amount);
+  const balance = Number(row.balance);
+  const valid = Number.isFinite(parsed) && parsed > 0 && parsed <= balance;
+  const splits = Number.isFinite(Number(maxPerTx)) && Number(maxPerTx) > 0 && parsed > Number(maxPerTx)
+    ? Math.ceil(parsed / Number(maxPerTx))
+    : 1;
+  const destination = row.destination_type
+    ? `${row.destination_type} ${row.destination_value}${row.account_reference ? ` ref ${row.account_reference}` : ""}`
+    : "—";
+
+  function submit() {
+    if (!valid || busy) return;
+    setBusy(true);
+    setError("");
+    apiRequest<TransferResult>("/api/employee/company/gateway/transfer", {
+      method: "POST",
+      body: JSON.stringify({ clientId: row.client_id, amount: parsed, reason: reason.trim() }),
+    })
+      .then(onSent)
+      .catch((cause: unknown) => setError(cause instanceof Error ? cause.message : "The transfer could not be sent."))
+      .finally(() => setBusy(false));
+  }
+
+  return (
+    <Dialog.Root open onOpenChange={(next) => { if (!next && !busy) onClose(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="dialog-overlay" />
+        <Dialog.Content className="dialog-content">
+          <Dialog.Title className="text-base font-semibold text-foreground">
+            Manual transfer — {row.name || row.client_id.slice(0, 8)}
+          </Dialog.Title>
+          <Dialog.Description className="mt-2 text-sm text-muted-foreground">
+            Send held funds to this client's payout account now, ahead of the settlement schedule.
+          </Dialog.Description>
+
+          <div className="mt-4 grid gap-3 rounded-xl border border-border bg-surface-raised/60 p-3 text-sm">
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-muted-foreground">Held balance</span>
+              <span className="font-semibold tabular">{money(row.balance)}</span>
+            </div>
+            <div className="flex items-center justify-between gap-3">
+              <span className="text-muted-foreground">Sends to</span>
+              <span className="tabular">{destination}</span>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-1.5">
+            <label className="text-sm font-medium" htmlFor="transfer-amount">Amount (KES)</label>
+            <div className="flex items-center gap-2">
+              <input
+                id="transfer-amount"
+                className="field"
+                inputMode="decimal"
+                placeholder="0.00"
+                value={amount}
+                onChange={(event) => setAmount(event.target.value)}
+                autoFocus
+              />
+              <SecondaryButton type="button" onClick={() => setAmount(String(balance))}>
+                All
+              </SecondaryButton>
+            </div>
+            {amount && !valid ? (
+              <p className="text-xs text-destructive">Enter an amount between 0 and {money(row.balance)}.</p>
+            ) : null}
+            {splits > 1 ? (
+              <p className="text-xs text-muted-foreground">
+                Above the per-transaction cap — this sends as {splits} separate payouts.
+              </p>
+            ) : null}
+          </div>
+
+          <div className="mt-4 grid gap-1.5">
+            <label className="text-sm font-medium" htmlFor="transfer-reason">Reason (optional)</label>
+            <input
+              id="transfer-reason"
+              className="field"
+              maxLength={160}
+              placeholder="e.g. Early settlement request"
+              value={reason}
+              onChange={(event) => setReason(event.target.value)}
+            />
+            <p className="text-xs text-muted-foreground">Shown on the payout record and sent as the M-Pesa remarks.</p>
+          </div>
+
+          {error ? <p className="notice mt-4" role="alert">{error}</p> : null}
+
+          <div className="mt-5 flex items-center justify-end gap-2">
+            <SecondaryButton type="button" disabled={busy} onClick={onClose}>
+              Cancel
+            </SecondaryButton>
+            <PrimaryButton type="button" disabled={!valid || busy} onClick={submit}>
+              {busy ? "Sending…" : "Send transfer"}
+            </PrimaryButton>
+          </div>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }
 

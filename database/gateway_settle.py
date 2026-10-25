@@ -79,7 +79,7 @@ def lock_client_settings(cursor, client_id):
         SELECT client_id, settlement_mode, hold_hours, destination_type,
                destination_value, account_reference, min_payout_override,
                pending_change, pending_change_effective_at,
-               settle_every_n_tx, settle_schedule, last_settled_at
+               settle_every_n_tx, settle_schedule, last_settled_at, gateway_mode
         FROM isp_payout_settings WHERE client_id = %s FOR UPDATE
         """,
         (client_id,),
@@ -401,7 +401,7 @@ def execute_payouts(db, cursor, client, limit=25, notify=None):
 def _send_payout(client, payout, result_url, timeout_url):
     amount = payout["amount"]
     destination = payout["destination_value"]
-    remarks = f"ISP settlement {str(payout['id'])[:8]}"
+    remarks = str(payout.get("note") or f"ISP settlement {str(payout['id'])[:8]}")[:97]
     if payout["destination_type"] == "phone":
         return client.b2c(destination, amount, result_url, timeout_url, remarks=remarks)
     if payout["destination_type"] == "paybill":
@@ -551,6 +551,255 @@ def settle_client(db, cursor, client_id, company, notify=None):
         )
     db.commit()
     return {"batch": batch_id, "net": plan["net"], "payouts": len(plan["amounts"]), "shortfall": shortfall}
+
+
+def manual_transfer(cursor, client_id, amount, reason, actor_id, notify=None):
+    """Director-initiated payout to a client's configured destination, sent
+    outside the settlement schedule. The pool is debited up front with an
+    'adjustment' entry — the per-client settings lock serializes this against
+    settle_client, and the unbatched adjustment shrinks the next scheduled
+    batch by the same amount so the money can't be paid out twice. A failed
+    payout is returned by a 'reversal' entry (refund_manual_payout).
+
+    Amounts above the max-per-transaction cap split into several queued
+    payouts; the scheduler's execute_payouts submits them like any batch."""
+    notify = notify or _default_notify
+    company = company_gateway_settings(cursor)
+    if not company:
+        return None, "The company gateway is not configured."
+    if company["status"] != "active" or company["kill_switch"]:
+        return None, "The gateway is halted — resume it before sending transfers."
+    client_id = str(client_id or "").strip()
+    if not client_id:
+        return None, "Choose the client to pay."
+    row = lock_client_settings(cursor, client_id)
+    if not row:
+        return None, "That client has no payout settings."
+    if row.get("gateway_mode") != "company_gateway":
+        return None, "That client is not pooled on the company gateway."
+    applied = apply_pending_change(cursor, row)
+    if applied:
+        row["destination_type"] = applied.get("destination_type")
+        row["destination_value"] = str(applied.get("destination_value") or "")[:32]
+        row["account_reference"] = str(applied.get("account_reference") or "")[:32]
+    if not row.get("destination_type") or not row.get("destination_value"):
+        return None, "Set this client's payout destination first."
+    try:
+        amount = _money(amount)
+    except Exception:
+        return None, "Enter a valid amount."
+    if amount <= 0:
+        return None, "Enter an amount above zero."
+    balance = gateway_store._last_balance(cursor, client_id)
+    if amount > balance:
+        return None, f"Only KES {balance} is held for this client."
+    reason = str(reason or "").strip()[:160]
+    batch_key = f"manual:{client_id}:{uuid.uuid4().hex[:20]}"
+    batch_id = str(uuid.uuid4())
+    import datetime as _dt
+
+    now = _dt.datetime.now()
+    cursor.execute(
+        """
+        INSERT INTO settlement_batches
+          (id, client_id, batch_key, period_from, period_to, gross, commission,
+           payout_fee, net, status)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'processing')
+        """,
+        (batch_id, client_id, batch_key[:80], now, now, amount, 0, 0, amount),
+    )
+    max_tx = _money(company["max_payout_per_tx"])
+    count = max(1, int((amount / max_tx).to_integral_value(rounding=ROUND_CEILING))) if max_tx > 0 else 1
+    payout_ids = []
+    for index, part in enumerate(split_amount(amount, int(count))):
+        idempotency_key = hashlib.sha256(f"{batch_key}:{index}".encode()).hexdigest()[:64]
+        payout_id = str(uuid.uuid4())
+        payout_ids.append(payout_id)
+        cursor.execute(
+            """
+            INSERT INTO gateway_payouts
+              (id, batch_id, client_id, destination_type, destination_value,
+               account_reference, amount, idempotency_key, note, status)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, 'queued')
+            """,
+            (
+                payout_id,
+                batch_id,
+                client_id,
+                row["destination_type"],
+                str(row["destination_value"])[:32],
+                str(row.get("account_reference") or "")[:32],
+                part,
+                idempotency_key,
+                reason,
+            ),
+        )
+    # Debit now — the unbatched adjustment flows into the next scheduled
+    # plan_batch as `other`, reducing that payout by exactly this amount.
+    cursor.execute(
+        """
+        INSERT INTO gateway_ledger_entries
+          (id, client_id, payout_id, type, amount, balance_after)
+        VALUES (%s, %s, %s, %s, %s, %s)
+        """,
+        (str(uuid.uuid4()), client_id, payout_ids[0], "adjustment", -amount, balance - amount),
+    )
+    gateway_store.audit(
+        cursor, client_id, "employee", actor_id, "transfer.manual",
+        new={"batchId": batch_id, "amount": str(amount), "payouts": count,
+             "reason": reason or None},
+    )
+    destination = (
+        gateway_store.mask_msisdn(row["destination_value"])
+        if row["destination_type"] == "phone"
+        else f"{row['destination_type']} {row['destination_value']}"
+    )
+    detail = f"KES {amount} sent to {destination}"
+    if reason:
+        detail = f"{detail} — {reason}"
+    notify(
+        cursor, "client", "manual_transfer", "A manual transfer was sent to you",
+        detail, client_id=client_id,
+    )
+    shortfall = _balance_shortfall(company, amount)
+    if shortfall:
+        notify(
+            cursor, "company", "low_float",
+            "Payout float is short of a manual transfer",
+            f"Queued KES {amount} for {client_id[:8]} against a last-known float of KES {company['last_known_balance']}.",
+            client_id=client_id,
+        )
+    return {
+        "ok": True,
+        "batchId": batch_id,
+        "amount": str(amount),
+        "payouts": int(count),
+        "destination": str(destination),
+        "floatShort": bool(shortfall),
+        "balanceAfter": str(balance - amount),
+    }, None
+
+
+def _held_in_window(cursor, client_id, hold_hours):
+    """Confirmed collections still inside the delayed-settlement hold —
+    count and the earliest release time."""
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS n,
+               MIN(COALESCE(p.confirmed_at, e.created_at)) AS earliest
+        FROM gateway_ledger_entries e
+        LEFT JOIN gateway_payments p ON p.id = e.payment_id
+        LEFT JOIN settlement_batch_entries be ON be.ledger_entry_id = e.id
+        WHERE e.client_id = %s AND be.ledger_entry_id IS NULL
+          AND e.type = 'collection' AND p.status = 'confirmed'
+          AND COALESCE(p.confirmed_at, e.created_at) >
+              DATE_SUB(NOW(), INTERVAL %s HOUR)
+        """,
+        (client_id, max(1, int(hold_hours or 24))),
+    )
+    row = cursor.fetchone() or {}
+    earliest = row.get("earliest")
+    releases = None
+    if earliest is not None:
+        import datetime as _dt
+
+        releases = earliest + _dt.timedelta(hours=max(1, int(hold_hours or 24)))
+    return int(row.get("n") or 0), releases
+
+
+def _unbatched_collections(cursor, client_id):
+    cursor.execute(
+        """
+        SELECT COUNT(*) AS n FROM gateway_ledger_entries e
+        LEFT JOIN gateway_payments p ON p.id = e.payment_id
+        LEFT JOIN settlement_batch_entries be ON be.ledger_entry_id = e.id
+        WHERE e.client_id = %s AND be.ledger_entry_id IS NULL
+          AND e.type = 'collection' AND p.status = 'confirmed'
+        """,
+        (client_id,),
+    )
+    return int((cursor.fetchone() or {}).get("n") or 0)
+
+
+def _describe_schedule(schedule_text):
+    try:
+        entries = json.loads(schedule_text or "[]")
+    except ValueError:
+        entries = []
+    parts = []
+    for entry in entries[:4]:
+        day = str((entry or {}).get("day") or "")
+        label = "daily" if day == "daily" else day[:3].title()
+        parts.append(f"{label} {entry.get('time') or ''}".strip())
+    suffix = ", ".join(part for part in parts if part)
+    return suffix or "no times set"
+
+
+def held_reason(cursor, row, company, bands=None):
+    """Why a pooled client's balance hasn't settled yet — mirrors the checks
+    settle_client runs, in the same order. Returns {code, message} or None
+    when nothing is held."""
+    balance = _money(row.get("balance"))
+    if balance <= 0 or row.get("gateway_mode") != "company_gateway":
+        return None
+    if not company:
+        return {"code": "unconfigured", "message": "The company gateway is not configured."}
+    if company["kill_switch"]:
+        return {"code": "kill_switch", "message": "All payouts are halted by the gateway kill switch."}
+    if company["status"] != "active":
+        return {"code": "suspended",
+                "message": f"The gateway is {company['status']} — payouts resume when it is active."}
+    if not row.get("destination_type") or not row.get("destination_value"):
+        return {"code": "no_destination",
+                "message": "No payout destination is set — money waits for one."}
+    client_id = row["client_id"]
+    mode = row.get("settlement_mode")
+    hold_hours = row.get("hold_hours")
+    entries = eligible_entries(cursor, client_id, mode, hold_hours)
+    if not entries:
+        if mode == "delayed" and _unbatched_collections(cursor, client_id):
+            held, releases = _held_in_window(cursor, client_id, hold_hours)
+            when = releases.strftime("%Y-%m-%d %H:%M") if releases else "later"
+            return {"code": "hold",
+                    "message": f"Each payment is held {max(1, int(hold_hours or 24))}h after confirmation — "
+                               f"{held} release{'s' if held != 1 else ''} next at ~{when}."}
+        return {"code": "residual",
+                "message": "No payments left to batch — release this balance with a manual transfer."}
+    if mode == "transactions":
+        threshold = max(1, int(row.get("settle_every_n_tx") or 0))
+        collected = sum(1 for entry in entries if entry["type"] == "collection")
+        if collected < threshold:
+            return {"code": "threshold",
+                    "message": f"Settles after {threshold} payments per batch — {collected} collected so far."}
+    elif mode == "scheduled" and not schedule_due(
+        row.get("settle_schedule"), row.get("last_settled_at")
+    ):
+        return {"code": "schedule",
+                "message": f"Waits for the next scheduled settlement ({_describe_schedule(row.get('settle_schedule'))})."}
+    plan = plan_batch(entries, company, row, bands or [])
+    if not plan:
+        minimum = row.get("min_payout_override")
+        minimum = _money(minimum) if minimum is not None else _money(company["min_payout"])
+        return {"code": "minimum",
+                "message": f"Below the KES {minimum} minimum payout after commission and fees."}
+    message = "Settles automatically on the next run."
+    if mode == "delayed":
+        held, releases = _held_in_window(cursor, client_id, hold_hours)
+        if held:
+            when = releases.strftime("%Y-%m-%d %H:%M") if releases else "later"
+            message += f" {held} more payment{'s' if held != 1 else ''} still inside the hold — first releases ~{when}."
+    if _balance_shortfall(company, plan["net"]):
+        message += " The payout float looks short of this amount."
+    return {"code": "eligible", "message": message}
+
+
+def held_reasons(cursor, rows):
+    """Attach the hold explanation to each client_custody row in place."""
+    company = company_gateway_settings(cursor)
+    bands = gateway_store.fee_bands(cursor)
+    for row in rows:
+        row["hold"] = held_reason(cursor, row, company, bands)
+    return rows
 
 
 def _balance_shortfall(company, net):

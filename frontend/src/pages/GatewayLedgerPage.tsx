@@ -74,6 +74,7 @@ type LedgerRow = {
   balance_after: string;
   payment_id: string | null;
   payout_id: string | null;
+  mpesa_receipt: string | null;
   created_at: string;
 };
 
@@ -421,7 +422,10 @@ export function GatewayLedgerPage() {
                     {(entries ?? []).map((row) => (
                       <tr key={row.id}>
                         <td className="whitespace-nowrap px-5 py-3 tabular">{row.created_at}</td>
-                        <td className="px-5 py-3">{ledgerLabel[row.type] ?? row.type}</td>
+                        <td className="px-5 py-3">
+                          {ledgerLabel[row.type] ?? row.type}
+                          {row.mpesa_receipt ? <div className="font-mono text-xs text-muted-foreground">{row.mpesa_receipt}</div> : null}
+                        </td>
                         <td className={`px-5 py-3 text-right font-semibold tabular ${Number(row.amount) < 0 ? "text-destructive" : "text-success"}`}>
                           {signedMoney(row.amount)}
                         </td>

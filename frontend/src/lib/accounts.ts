@@ -25,6 +25,7 @@ export type PublicAccount = {
   status: AccountStatus;
   clientCode: string | null;
   dashboardCode: string | null;
+  advertsEnabled: boolean;
 };
 
 export function clientPage(account: Pick<PublicAccount, "dashboardCode">, path: string) {

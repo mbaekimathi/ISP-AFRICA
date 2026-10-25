@@ -131,6 +131,11 @@ button:disabled{background:#c7d2e0;box-shadow:none;cursor:default;transform:none
 .voucher code{display:inline-block;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:21px;font-weight:800;letter-spacing:.12em;color:#1d4ed8;background:#eef2f7;padding:4px 12px;border-radius:8px}
 .vcode{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;font-weight:700;letter-spacing:.08em;color:#1d4ed8}
 .foot{margin-top:16px;text-align:center;font-size:11px;font-weight:600;letter-spacing:.08em;color:rgba(255,255,255,.5)}
+.advs{display:grid;gap:8px}
+.adv{display:block;border:1px solid #e2e8f0;border-radius:12px;overflow:hidden;text-decoration:none;color:#1d4ed8;transition:border-color .15s,box-shadow .15s}
+.adv:hover{border-color:#1d4ed8;box-shadow:0 0 0 3px rgba(37,99,235,.12)}
+.adv img{display:block;width:100%;height:auto}
+.adv span{display:block;padding:12px 14px;font-size:14px;font-weight:600}
 @media(max-width:420px){body{padding:14px}.card{padding:22px 18px;border-radius:20px}h1{font-size:19px}}
 """
 
@@ -764,7 +769,52 @@ def unknown_page():
     )
 
 
-def thankyou_page(voucher):
+def advert_rows(cursor, client_id):
+    """Enabled partner adverts for a client's pages — the client's own
+    partners first, then the company partners. Empty unless advertising
+    was enabled for the account."""
+    cursor.execute("SELECT adverts_enabled FROM isp_clients WHERE id = %s", (client_id,))
+    row = cursor.fetchone()
+    if not row or not int(row["adverts_enabled"]):
+        return []
+    cursor.execute(
+        """
+        SELECT partner_name, website, image_data_url FROM isp_client_adverts
+        WHERE client_id = %s AND enabled = 1
+        ORDER BY partner_name
+        """,
+        (client_id,),
+    )
+    adverts = list(cursor.fetchall())
+    cursor.execute(
+        """
+        SELECT partner_name, website, image_data_url FROM company_adverts
+        WHERE enabled = 1
+        ORDER BY partner_name
+        """
+    )
+    return adverts + cursor.fetchall()
+
+
+def adverts_html(adverts):
+    """Clickable partner banners for the thank-you pages — each one opens
+    the partner's website."""
+    if not adverts:
+        return ""
+    cards = "".join(
+        f'<a class=adv href="{esc(advert["website"])}">'
+        + (
+            f'<img src="{esc(advert["image_data_url"])}" alt="{esc(advert["partner_name"])}">'
+            if advert.get("image_data_url")
+            else f'<span>{esc(advert["partner_name"])}</span>'
+        )
+        + "</a>"
+        for advert in adverts
+    )
+    return f'<p class=sect>Our partners</p><div class=advs>{cards}</div>'
+
+
+def thankyou_page(voucher, adverts=None):
     if not voucher:
         return page(
             "Thank you",
@@ -772,7 +822,7 @@ def thankyou_page(voucher):
 <span class="badge ok">Paid</span>
 <h1>Thank you for your payment</h1>
 <p class=sub>Your payment was received and your internet is reconnecting now.</p>
-<p class=hint>You can close this window and start browsing.</p></div>""",
+<p class=hint>You can close this window and start browsing.</p></div>{adverts_html(adverts)}""",
         )
     name = esc(f"{voucher['first_name']} {voucher['last_name']}".strip()) or "Customer"
     used = voucher["status"] == "used"
@@ -794,11 +844,12 @@ def thankyou_page(voucher):
 <div class=row><span>Amount paid</span><span>KSh {esc(ksh(voucher['amount']))}</span></div>
 <div class=row><span>Account</span><span>{esc(voucher['pppoe_username'])}</span></div>
 <p class=note>{state} Keep it as your receipt.</p>
+{adverts_html(adverts)}
 <p class=hint style="text-align:center">You can close this window and start browsing.</p>""",
     )
 
 
-def thankyou_hotspot_page(receipt):
+def thankyou_hotspot_page(receipt, adverts=None):
     if not receipt:
         return page(
             "Thank you",
@@ -806,7 +857,7 @@ def thankyou_hotspot_page(receipt):
 <span class="badge ok">Paid</span>
 <h1>Thank you for your payment</h1>
 <p class=sub>Your payment was received and this device is connected.</p>
-<p class=hint>You can close this window and start browsing.</p></div>""",
+<p class=hint>You can close this window and start browsing.</p></div>{adverts_html(adverts)}""",
         )
     vouchers = receipt["vouchers"]
     listing = "".join(
@@ -831,7 +882,8 @@ def thankyou_hotspot_page(receipt):
 <p class=sect>Voucher{'' if len(vouchers) == 1 else 's'} for this purchase</p>
 {listing}
 {share}
-<p class=note>A voucher is spent once its device starts surfing and cannot be used again.</p>""",
+<p class=note>A voucher is spent once its device starts surfing and cannot be used again.</p>
+{adverts_html(adverts)}""",
     )
 
 
@@ -1503,7 +1555,7 @@ def hotspot_receipt(cursor, purchase_id, client_id=None):
     params = (str(purchase_id or "")[:36], client_id) if client_id else (str(purchase_id or "")[:36],)
     cursor.execute(
         f"""
-        SELECT pu.id, pu.amount, pu.devices,
+        SELECT pu.id, pu.client_id, pu.amount, pu.devices,
                COALESCE(p.name, c.name, 'Wi-Fi bundle') AS package_name
         FROM hotspot_purchases pu
         LEFT JOIN isp_packages p ON p.id = pu.package_id
@@ -1848,11 +1900,13 @@ class PortalHandler(BaseHTTPRequestHandler):
             with db.cursor() as cursor:
                 receipt = hotspot_receipt(cursor, purchase) if purchase else None
                 voucher = pppoe_store.voucher_detail(cursor, code) if code else None
+                client_id = (receipt or {}).get("client_id") or (voucher or {}).get("client_id")
+                adverts = advert_rows(cursor, client_id) if client_id else []
         finally:
             db.close()
         if purchase:
-            return self._send(thankyou_hotspot_page(receipt))
-        return self._send(thankyou_page(voucher))
+            return self._send(thankyou_hotspot_page(receipt, adverts))
+        return self._send(thankyou_page(voucher, adverts))
 
     def pay_offers(self):
         """Fresh offer fingerprint for an open pay page — the page reloads

@@ -901,6 +901,35 @@ def public_company(row):
     }
 
 
+def clean_advert(payload):
+    name = str(payload.get("name", "")).strip()
+    website = str(payload.get("website", "")).strip()
+    image = str(payload.get("imageDataUrl", "") or "")
+    if not name or len(name) > 120:
+        raise ApiError(400, "Enter the partner name.")
+    if website and "://" not in website:
+        website = f"https://{website}"
+    if not website or len(website) > 255 or not website.lower().startswith(("http://", "https://")):
+        raise ApiError(400, "Enter the partner website link.")
+    if any(ord(character) < 32 or character.isspace() for character in website):
+        raise ApiError(400, "Enter the partner website link.")
+    if not image.startswith("data:image/") or len(image) > 200_000:
+        raise ApiError(400, "Choose an image for the advert.")
+    return {"name": name, "website": website, "image": image}
+
+
+def public_advert(row):
+    return {
+        "id": row["id"],
+        "name": row["partner_name"],
+        "website": row["website"],
+        "imageDataUrl": row.get("image_data_url") or "",
+        "enabled": bool(row["enabled"]),
+        "createdAt": stamp(row["created_at"]) or str(row["created_at"]),
+        "updatedAt": stamp(row["updated_at"]) or str(row["updated_at"]),
+    }
+
+
 def clean_other_gateway(payload, existing):
     provider = str(payload.get("provider", "")).strip()
     if not provider or len(provider) > 80 or any(ord(character) < 32 for character in provider):
@@ -1329,6 +1358,9 @@ def ensure_schema():
                 cursor.execute(f"SHOW COLUMNS FROM {table} LIKE 'photo_data_url'")
                 if cursor.fetchone() is None:
                     cursor.execute(f"ALTER TABLE {table} ADD COLUMN photo_data_url MEDIUMTEXT NULL")
+            cursor.execute("SHOW COLUMNS FROM isp_clients LIKE 'adverts_enabled'")
+            if cursor.fetchone() is None:
+                cursor.execute("ALTER TABLE isp_clients ADD COLUMN adverts_enabled TINYINT NOT NULL DEFAULT 0")
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS isp_sessions (
@@ -1872,6 +1904,34 @@ def ensure_schema():
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS company_adverts (
+                  id CHAR(36) NOT NULL PRIMARY KEY,
+                  partner_name VARCHAR(120) NOT NULL,
+                  website VARCHAR(255) NOT NULL DEFAULT '',
+                  image_data_url MEDIUMTEXT NULL,
+                  enabled TINYINT NOT NULL DEFAULT 1,
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_client_adverts (
+                  id CHAR(36) NOT NULL PRIMARY KEY,
+                  client_id CHAR(36) NOT NULL,
+                  partner_name VARCHAR(120) NOT NULL,
+                  website VARCHAR(255) NOT NULL DEFAULT '',
+                  image_data_url MEDIUMTEXT NULL,
+                  enabled TINYINT NOT NULL DEFAULT 1,
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                  KEY idx_client_advert (client_id)
+                )
+                """
+            )
             router_jobs.ensure_tables(cursor)
             pppoe_store.ensure_schema(cursor)
             gateway_store.ensure_schema(cursor)
@@ -2037,6 +2097,7 @@ def public_client(row):
         "status": row["status"],
         "clientCode": row["client_code"],
         "dashboardCode": display_account_code(row["client_code"]),
+        "advertsEnabled": bool(row.get("adverts_enabled")),
     }
 
 
@@ -2678,6 +2739,19 @@ class Handler(BaseHTTPRequestHandler):
             return self.read_company_profile(cursor, token.get("isp_employee_session")), None
         if method == "POST" and path == "/api/employee/company/profile":
             return self.save_company_profile(cursor, payload, token.get("isp_employee_session")), None
+        if method == "GET" and path == "/api/employee/company/adverts":
+            return self.read_company_adverts(cursor, token.get("isp_employee_session")), None
+        if method == "POST" and path == "/api/employee/company/adverts":
+            return {"advert": self.create_company_advert(cursor, payload, token.get("isp_employee_session"))}, None
+        if method == "POST" and path == "/api/employee/company/adverts/clients":
+            return self.save_advert_client(cursor, payload, token.get("isp_employee_session")), None
+        if method == "POST" and path.startswith("/api/employee/company/adverts/"):
+            return self.change_company_advert(
+                cursor,
+                path.removeprefix("/api/employee/company/adverts/").strip("/"),
+                payload,
+                token.get("isp_employee_session"),
+            )
         if method == "GET" and path == "/api/employee/company/notifications":
             return self.read_company_notifications(cursor, token.get("isp_employee_session")), None
         if method == "POST" and path == "/api/employee/company/notifications":
@@ -2839,6 +2913,17 @@ class Handler(BaseHTTPRequestHandler):
             return self.save_communication(cursor, payload, token.get("isp_client_session")), None
         if method == "POST" and path == "/api/communications/test":
             return {"test": self.test_communication(cursor, payload, token.get("isp_client_session"))}, None
+        if method == "GET" and path == "/api/adverts":
+            return self.read_adverts(cursor, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/adverts":
+            return {"advert": self.create_advert(cursor, payload, token.get("isp_client_session"))}, None
+        if method == "POST" and path.startswith("/api/adverts/"):
+            return self.change_advert(
+                cursor,
+                path.removeprefix("/api/adverts/").strip("/"),
+                payload,
+                token.get("isp_client_session"),
+            )
         if method == "GET" and path == "/api/notifications":
             return self.read_notifications(cursor, token.get("isp_client_session")), None
         if method == "POST" and path == "/api/notifications":
@@ -4068,7 +4153,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/thank-you",
                 "Connected / thank-you page",
                 "Shown once the guest is online after a payment or voucher — it confirms the connection and lists the voucher code for each paid device slot.",
-                portal_server.thankyou_hotspot_page(receipt),
+                portal_server.thankyou_hotspot_page(receipt, portal_server.advert_rows(cursor, client_id)),
             ),
             (
                 "error",
@@ -4161,7 +4246,7 @@ class Handler(BaseHTTPRequestHandler):
                 "/thank-you",
                 "Thank-you page",
                 "Shown after a payment lands — it lists the single-use voucher receipt.",
-                portal_server.thankyou_page(voucher),
+                portal_server.thankyou_page(voucher, portal_server.advert_rows(cursor, client_id)),
             ),
             (
                 "error",
@@ -4199,7 +4284,9 @@ class Handler(BaseHTTPRequestHandler):
                     {"code": "M3TB-8RHZ-6CJV", "status": "issued"},
                 ],
             }
-            return PreviewPage(portal_server.thankyou_hotspot_page(receipt).decode("utf-8"))
+            return PreviewPage(
+                portal_server.thankyou_hotspot_page(receipt, portal_server.advert_rows(cursor, client_id)).decode("utf-8")
+            )
         voucher = (pppoe_store.voucher_detail(cursor, code, client_id) if code else None) or {
             "first_name": "Amina",
             "last_name": "Wanjiku",
@@ -4209,7 +4296,9 @@ class Handler(BaseHTTPRequestHandler):
             "amount": "500.00",
             "pppoe_username": "amina.wanjiku",
         }
-        return PreviewPage(portal_server.thankyou_page(voucher).decode("utf-8"))
+        return PreviewPage(
+            portal_server.thankyou_page(voucher, portal_server.advert_rows(cursor, client_id)).decode("utf-8")
+        )
 
     def preview_support_phone(self, cursor, client_id):
         """The customer care line shown on preview help pages — the company
@@ -4734,6 +4823,78 @@ class Handler(BaseHTTPRequestHandler):
         # Probe the saved endpoint only — an arbitrary URL here would make the
         # server an unauthenticated network-reachability oracle.
         return probe_communication(channel, row)
+
+    def require_advert_client(self, cursor, token):
+        client_id = session_account_id(cursor, token, "client")
+        if not client_id:
+            raise ApiError(401, "Sign in to the ISP client account before managing adverts.")
+        cursor.execute("SELECT status, adverts_enabled FROM isp_clients WHERE id = %s", (client_id,))
+        account = cursor.fetchone()
+        if not account or account["status"] != "approved":
+            raise ApiError(403, "That account is still waiting for approval.")
+        if not int(account["adverts_enabled"]):
+            raise ApiError(403, "Advertising is not enabled for this account.")
+        return client_id
+
+    def isp_advert_row(self, cursor, client_id, advert_id):
+        cursor.execute(
+            "SELECT * FROM isp_client_adverts WHERE id = %s AND client_id = %s",
+            (advert_id, client_id),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise ApiError(404, "That partner advert was not found.")
+        return row
+
+    def read_adverts(self, cursor, token):
+        client_id = self.require_advert_client(cursor, token)
+        cursor.execute(
+            "SELECT * FROM isp_client_adverts WHERE client_id = %s ORDER BY partner_name",
+            (client_id,),
+        )
+        return {"adverts": [public_advert(row) for row in cursor.fetchall()]}
+
+    def create_advert(self, cursor, payload, token):
+        client_id = self.require_advert_client(cursor, token)
+        fields = clean_advert(payload)
+        advert_id = str(uuid.uuid4())
+        cursor.execute(
+            """
+            INSERT INTO isp_client_adverts (id, client_id, partner_name, website, image_data_url)
+            VALUES (%s, %s, %s, %s, %s)
+            """,
+            (advert_id, client_id, fields["name"], fields["website"], fields["image"]),
+        )
+        return public_advert(self.isp_advert_row(cursor, client_id, advert_id))
+
+    def change_advert(self, cursor, advert_path, payload, token):
+        client_id = self.require_advert_client(cursor, token)
+        advert_id, _, action = advert_path.partition("/")
+        self.isp_advert_row(cursor, client_id, advert_id)
+        if action == "edit":
+            fields = clean_advert(payload)
+            cursor.execute(
+                """
+                UPDATE isp_client_adverts
+                SET partner_name = %s, website = %s, image_data_url = %s
+                WHERE id = %s AND client_id = %s
+                """,
+                (fields["name"], fields["website"], fields["image"], advert_id, client_id),
+            )
+            return {"advert": public_advert(self.isp_advert_row(cursor, client_id, advert_id))}, None
+        if action in ("enable", "disable"):
+            cursor.execute(
+                "UPDATE isp_client_adverts SET enabled = %s WHERE id = %s AND client_id = %s",
+                (1 if action == "enable" else 0, advert_id, client_id),
+            )
+            return {"advert": public_advert(self.isp_advert_row(cursor, client_id, advert_id))}, None
+        if action == "delete":
+            cursor.execute(
+                "DELETE FROM isp_client_adverts WHERE id = %s AND client_id = %s",
+                (advert_id, client_id),
+            )
+            return {"ok": True}, None
+        raise ApiError(404, "That account request was not found.")
 
     def require_notification_client(self, cursor, token):
         client_id = session_account_id(cursor, token, "client")
@@ -5480,7 +5641,7 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 connection.autocommit(True)
             return result
-        if method == "POST" and leaf in ("settings", "payouts/check", "payouts/mark-failed", "charges"):
+        if method == "POST" and leaf in ("settings", "payouts/check", "payouts/mark-failed", "charges", "transfer"):
             # Gateway ops writes — one transaction wraps the update + audit.
             connection = cursor.connection
             connection.autocommit(False)
@@ -5491,6 +5652,9 @@ class Handler(BaseHTTPRequestHandler):
                 elif leaf == "charges":
                     result, error = gateway_api.save_charges(
                         cursor, payload, employee_id)
+                elif leaf == "transfer":
+                    result, error = gateway_api.manual_transfer(
+                        cursor, payload, employee_id)
                 elif leaf == "payouts/check":
                     result, error = gateway_api.check_payout(
                         cursor, str(payload.get("payoutId") or ""), employee_id)
@@ -5500,6 +5664,16 @@ class Handler(BaseHTTPRequestHandler):
                 if error:
                     raise ApiError(400, error)
                 connection.commit()
+                if leaf == "transfer":
+                    # Best effort: submit the queued payouts now instead of
+                    # waiting for the next minute-tick. Anything that can't
+                    # go (no callback URL, Daraja down) stays queued safely.
+                    try:
+                        company = gateway_settle.company_gateway_settings(cursor)
+                        gateway_settle.execute_payouts(
+                            connection, cursor, gateway_settle.company_client(company))
+                    except Exception:
+                        pass
             except Exception:
                 connection.rollback()
                 raise
@@ -5641,6 +5815,86 @@ class Handler(BaseHTTPRequestHandler):
             ),
         )
         return self.read_company_profile(cursor, token)
+
+    def company_advert_row(self, cursor, advert_id):
+        cursor.execute("SELECT * FROM company_adverts WHERE id = %s", (advert_id,))
+        row = cursor.fetchone()
+        if not row:
+            raise ApiError(404, "That partner advert was not found.")
+        return row
+
+    def read_company_adverts(self, cursor, token):
+        self.require_company_employee(cursor, token, "company adverts")
+        cursor.execute("SELECT * FROM company_adverts ORDER BY partner_name")
+        adverts = [public_advert(row) for row in cursor.fetchall()]
+        cursor.execute(
+            """
+            SELECT id, first_name, last_name, status, adverts_enabled
+            FROM isp_clients
+            ORDER BY first_name, last_name
+            """
+        )
+        clients = [
+            {
+                "id": row["id"],
+                "name": f"{row['first_name']} {row['last_name']}".strip(),
+                "status": row["status"],
+                "advertsEnabled": bool(row.get("adverts_enabled")),
+            }
+            for row in cursor.fetchall()
+        ]
+        return {"adverts": adverts, "clients": clients}
+
+    def create_company_advert(self, cursor, payload, token):
+        self.require_company_employee(cursor, token, "company adverts", write=True)
+        fields = clean_advert(payload)
+        advert_id = str(uuid.uuid4())
+        cursor.execute(
+            """
+            INSERT INTO company_adverts (id, partner_name, website, image_data_url)
+            VALUES (%s, %s, %s, %s)
+            """,
+            (advert_id, fields["name"], fields["website"], fields["image"]),
+        )
+        return public_advert(self.company_advert_row(cursor, advert_id))
+
+    def change_company_advert(self, cursor, advert_path, payload, token):
+        self.require_company_employee(cursor, token, "company adverts", write=True)
+        advert_id, _, action = advert_path.partition("/")
+        self.company_advert_row(cursor, advert_id)
+        if action == "edit":
+            fields = clean_advert(payload)
+            cursor.execute(
+                """
+                UPDATE company_adverts
+                SET partner_name = %s, website = %s, image_data_url = %s
+                WHERE id = %s
+                """,
+                (fields["name"], fields["website"], fields["image"], advert_id),
+            )
+            return {"advert": public_advert(self.company_advert_row(cursor, advert_id))}, None
+        if action in ("enable", "disable"):
+            cursor.execute(
+                "UPDATE company_adverts SET enabled = %s WHERE id = %s",
+                (1 if action == "enable" else 0, advert_id),
+            )
+            return {"advert": public_advert(self.company_advert_row(cursor, advert_id))}, None
+        if action == "delete":
+            cursor.execute("DELETE FROM company_adverts WHERE id = %s", (advert_id,))
+            return {"ok": True}, None
+        raise ApiError(404, "That account request was not found.")
+
+    def save_advert_client(self, cursor, payload, token):
+        self.require_company_employee(cursor, token, "company adverts", write=True)
+        client_id = str(payload.get("clientId", "")).strip()
+        cursor.execute("SELECT id FROM isp_clients WHERE id = %s", (client_id,))
+        if cursor.fetchone() is None:
+            raise ApiError(404, "That ISP client was not found.")
+        cursor.execute(
+            "UPDATE isp_clients SET adverts_enabled = %s WHERE id = %s",
+            (1 if payload.get("enabled") else 0, client_id),
+        )
+        return self.read_company_adverts(cursor, token)
 
     def company_notification_row(self, cursor):
         cursor.execute("SELECT * FROM company_notification_settings WHERE id = 1")
