@@ -1621,6 +1621,10 @@ def save_payout_settings(cursor, client_id, fields, actor_id):
               old={key: str(row.get(key)) for key in changed},
               new={key: str(value) for key, value in changed.items()})
 
+    _sync_company_status(
+        cursor, client_id, actor_id,
+        changed.get("gateway_mode", row["gateway_mode"]))
+
     outcome = "updated" if changed else "unchanged"
     if destination_change:
         if not row["destination_value"]:
@@ -1669,6 +1673,65 @@ def save_payout_settings(cursor, client_id, fields, actor_id):
               new={"destinationType": destination["destination_type"],
                    "coolingOff": outcome == "destination-pending"})
     return outcome
+
+
+def _write_company_status(cursor, client_id, actor_kind, actor_id, status, old_status):
+    cursor.execute(
+        "UPDATE company_daraja_settings SET status = %s WHERE id = 1",
+        (status,),
+    )
+    audit(cursor, client_id, actor_kind, actor_id, "gateway.status",
+          old={"status": old_status}, new={"status": status})
+
+
+def _sync_company_status(cursor, client_id, actor_id, gateway_mode):
+    """The company gateway status follows pooled usage: opting in flips
+    draft/verified to active, and when the last pooled client leaves it
+    falls back to draft. A director's explicit 'suspended' is never
+    overridden from this path — that halt is deliberate."""
+    row = company_gateway_row(cursor)
+    if not row or row["status"] == "suspended":
+        return
+    if gateway_mode == "company_gateway":
+        if row["status"] == "active":
+            return
+        status = "active"
+    else:
+        if row["status"] != "active":
+            return
+        cursor.execute(
+            """
+            SELECT COUNT(*) AS n FROM isp_payout_settings
+            WHERE gateway_mode = 'company_gateway' AND client_id <> %s
+            """,
+            (client_id,),
+        )
+        if int((cursor.fetchone() or {}).get("n") or 0):
+            return
+        status = "draft"
+    _write_company_status(
+        cursor, client_id, "client", actor_id, status, row["status"])
+
+
+def reconcile_company_status(cursor):
+    """Boot-time mirror of _sync_company_status — aligns the company status
+    with pooled usage for rows written before it was tracked automatically."""
+    row = company_gateway_row(cursor)
+    if not row or row["status"] == "suspended":
+        return
+    cursor.execute(
+        "SELECT COUNT(*) AS n FROM isp_payout_settings "
+        "WHERE gateway_mode = 'company_gateway'"
+    )
+    pooled = int((cursor.fetchone() or {}).get("n") or 0) > 0
+    if pooled and row["status"] != "active":
+        status = "active"
+    elif not pooled and row["status"] == "active":
+        status = "draft"
+    else:
+        return
+    _write_company_status(
+        cursor, None, "system", "gateway", status, row["status"])
 
 
 # --- company gateway ops settings ---------------------------------------------

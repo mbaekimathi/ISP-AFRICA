@@ -123,6 +123,10 @@ class MiniCursor:
         elif "COUNT(*) AS n FROM isp_payout_settings WHERE pending_change IS NOT NULL" in flat:
             self._result = [{"n": sum(1 for r in d.table("isp_payout_settings")
                                      if r.get("pending_change"))}]
+        elif "COUNT(*) AS n FROM isp_payout_settings WHERE gateway_mode = 'company_gateway'" in flat:
+            self._result = [{"n": sum(1 for r in d.table("isp_payout_settings")
+                                     if r.get("gateway_mode") == "company_gateway"
+                                     and r["client_id"] != args[0])}]
         elif "FROM gateway_payments p" in flat:
             rows = [p for p in d.table("gateway_payments")
                     if not args or args[0] not in {p.get("client_id"), p.get("status")} or True]
@@ -427,6 +431,41 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(row["gateway_mode"], "company_gateway")
         self.assertTrue(any(a["action"] == "settings.updated"
                             for a in db.table("gateway_audit_log")))
+
+    def test_opt_in_activates_company_gateway(self):
+        db = MiniDb()
+        db.insert("company_daraja_settings", id=1, status="draft", kill_switch=0)
+        db.insert("isp_payout_settings", **settings_row(gateway_mode="own_daraja"))
+        gateway_api.save_isp_settings(
+            db.cursor(), "c1", {"gatewayMode": "company_gateway"}, actor_id="c1")
+        self.assertEqual(db.table("company_daraja_settings")[0]["status"], "active")
+        self.assertTrue(any(a["action"] == "gateway.status"
+                            for a in db.table("gateway_audit_log")))
+
+    def test_last_pooled_client_leaving_returns_gateway_to_draft(self):
+        db = MiniDb()
+        db.insert("company_daraja_settings", id=1, status="active", kill_switch=0)
+        db.insert("isp_payout_settings", **settings_row())
+        gateway_api.save_isp_settings(
+            db.cursor(), "c1", {"gatewayMode": "own_daraja"}, actor_id="c1")
+        self.assertEqual(db.table("company_daraja_settings")[0]["status"], "draft")
+
+    def test_gateway_stays_active_while_another_client_is_pooled(self):
+        db = MiniDb()
+        db.insert("company_daraja_settings", id=1, status="active", kill_switch=0)
+        db.insert("isp_payout_settings", **settings_row())
+        db.insert("isp_payout_settings", **settings_row("c2"))
+        gateway_api.save_isp_settings(
+            db.cursor(), "c1", {"gatewayMode": "own_daraja"}, actor_id="c1")
+        self.assertEqual(db.table("company_daraja_settings")[0]["status"], "active")
+
+    def test_suspended_gateway_is_not_overridden(self):
+        db = MiniDb()
+        db.insert("company_daraja_settings", id=1, status="suspended", kill_switch=0)
+        db.insert("isp_payout_settings", **settings_row(gateway_mode="own_daraja"))
+        gateway_api.save_isp_settings(
+            db.cursor(), "c1", {"gatewayMode": "company_gateway"}, actor_id="c1")
+        self.assertEqual(db.table("company_daraja_settings")[0]["status"], "suspended")
 
     def test_first_destination_applies_immediately(self):
         db = MiniDb()

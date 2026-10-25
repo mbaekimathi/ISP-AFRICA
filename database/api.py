@@ -1947,6 +1947,7 @@ def ensure_schema():
             pppoe_store.ensure_schema(cursor)
             gateway_store.ensure_schema(cursor)
             gateway_store.backfill_gateway_modes(cursor)
+            gateway_store.reconcile_company_status(cursor)
     finally:
         db.close()
 
