@@ -401,9 +401,8 @@ class RerateTests(unittest.TestCase):
 class VoucherTests(unittest.TestCase):
     def test_voucher_code_is_readable_and_unambiguous(self):
         code = pppoe_store.voucher_code()
-        self.assertRegex(code, r"^[A-Z2-9]{4}-[A-Z2-9]{4}-[A-Z2-9]{4}$")
-        self.assertNotIn("0", code)
-        self.assertNotIn("1", code)
+        self.assertRegex(code, r"^[0-9]{4}[A-Z]$")
+        self.assertNotIn(code[-1], "ILO")
         self.assertNotEqual(code, pppoe_store.voucher_code())
 
     def test_issue_voucher_is_idempotent_per_checkout(self):
@@ -431,7 +430,7 @@ class VoucherTests(unittest.TestCase):
         detail = pppoe_store.voucher_detail(cursor, voucher["code"])
         self.assertEqual(detail["status"], "used")
         self.assertEqual(detail["package_name"], "Subscription")
-        self.assertIsNone(pppoe_store.voucher_detail(cursor, "ZZZZ-ZZZZ-ZZZZ"))
+        self.assertIsNone(pppoe_store.voucher_detail(cursor, "9999Z"))
 
 
 class DarajaCallbackTests(unittest.TestCase):

@@ -1392,7 +1392,7 @@ refresh();
     redeem = """
 <p class=sect>Have a voucher?</p>
 <div class=redeem>
-<input id=vcode placeholder="XXXX-XXXX-XXXX" autocomplete=off spellcheck=false>
+<input id=vcode placeholder="e.g. 4821K" autocomplete=off spellcheck=false maxlength=14>
 <button id=redeembtn type=button onclick="redeem()">Connect</button>
 </div>
 <div id=rmsg aria-live=polite></div>"""
@@ -1469,7 +1469,11 @@ def thankyou_url(purchase_id):
 
 
 def normalize_voucher_code(value):
-    """Accept a voucher code typed with or without dashes, in any case."""
+    """Accept a voucher code typed in any case, with or without dashes.
+
+    New codes are four digits and a letter (4821K). Older
+    XXXX-XXXX-XXXX codes are still recognised so they stay redeemable.
+    """
     raw = re.sub(r"[^A-Za-z0-9]", "", str(value or "")).upper()
     if len(raw) != 12:
         return raw
@@ -1488,7 +1492,7 @@ def issue_hotspot_vouchers(cursor, pending):
     rows = []
     for _slot in range(max(1, int(pending.get("devices") or 1))):
         code = pppoe_store.voucher_code()
-        for _attempt in range(5):
+        for _attempt in range(10):
             cursor.execute("SELECT id FROM hotspot_vouchers WHERE code = %s", (code,))
             if not cursor.fetchone():
                 break
@@ -2383,6 +2387,9 @@ class PortalHandler(BaseHTTPRequestHandler):
 
     def hotspot_redeem(self):
         """Spend an issued hotspot voucher: create its login and connect this device."""
+        # Short codes are guessable, so redeem gets a tighter limit than pay.
+        if self.throttled("portal-redeem", 6):
+            return self._send(b'{"error":"Too many tries - wait a minute."}', 429, "application/json")
         try:
             length = int(self.headers.get("Content-Length") or 0)
             payload = json.loads(self.rfile.read(min(length, 8192)) or b"{}")

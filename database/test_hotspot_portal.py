@@ -507,7 +507,7 @@ class PortalHelperTests(unittest.TestCase):
     def test_thankyou_page_shows_voucher_receipt(self):
         body = portal_server.thankyou_page(
             {
-                "code": "ABCD-2345-WXYZ",
+                "code": "4821K",
                 "amount": "500.00",
                 "status": "issued",
                 "package_name": "Home 10",
@@ -516,7 +516,7 @@ class PortalHelperTests(unittest.TestCase):
                 "pppoe_username": "0712345678",
             }
         ).decode()
-        self.assertIn("ABCD-2345-WXYZ", body)
+        self.assertIn("4821K", body)
         self.assertIn("Home 10", body)
         self.assertIn("0712345678", body)
         self.assertIn("Thank you, Amina Wanjiku!", body)
@@ -525,7 +525,7 @@ class PortalHelperTests(unittest.TestCase):
     def test_thankyou_page_marks_spent_voucher(self):
         body = portal_server.thankyou_page(
             {
-                "code": "ABCD-2345-WXYZ",
+                "code": "4821K",
                 "amount": "500.00",
                 "status": "used",
                 "package_name": "Home 10",
@@ -556,6 +556,9 @@ class HotspotVoucherTests(unittest.TestCase):
         self.assertEqual(len(inserts), 3)
 
     def test_normalize_voucher_code(self):
+        self.assertEqual(portal_server.normalize_voucher_code("4821k"), "4821K")
+        self.assertEqual(portal_server.normalize_voucher_code(" 48-21 k "), "4821K")
+        # Older XXXX-XXXX-XXXX codes are still recognised.
         self.assertEqual(portal_server.normalize_voucher_code("abcd-2345-wxyz"), "ABCD-2345-WXYZ")
         self.assertEqual(portal_server.normalize_voucher_code("abcd2345wxyz"), "ABCD-2345-WXYZ")
         self.assertEqual(portal_server.normalize_voucher_code(" ab-cd 2345 wx-yz "), "ABCD-2345-WXYZ")
@@ -603,13 +606,13 @@ class HotspotVoucherTests(unittest.TestCase):
             "devices": 2,
             "package_name": "Weekend bundle",
             "vouchers": [
-                {"code": "AAAA-2345-BBBB", "status": "used"},
-                {"code": "CCCC-2345-DDDD", "status": "issued"},
+                {"code": "4821K", "status": "used"},
+                {"code": "7359M", "status": "issued"},
             ],
         }
         body = portal_server.thankyou_hotspot_page(receipt).decode()
-        self.assertIn("AAAA-2345-BBBB", body)
-        self.assertIn("CCCC-2345-DDDD", body)
+        self.assertIn("4821K", body)
+        self.assertIn("7359M", body)
         self.assertIn("Used", body)
         self.assertIn("Ready", body)
         self.assertIn("Weekend bundle", body)

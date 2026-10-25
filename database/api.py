@@ -2362,7 +2362,7 @@ PREVIEW_STUB = """
 (function(){
 var SIG=__SIG__;
 var polls=0,onl=0,devices=1,outcome=null;
-var codes=['K7F2-9XPL-4QWD','M3TB-8RHZ-6CJV','P8QA-2NWL-7XRT','D5HC-9BJK-3MVS','T6ZR-4FDM-8QKX','W2YN-7CPL-5RGH','J9VK-3XNB-6TQD','R4GD-8KWM-2PVJ','N7SX-5QTC-9DLB','F3MH-6JRD-4WZK'];
+var codes=['4821K','7359M','2048P','6613T','9175W','3407B','5298F','1842H','8564N','2736R'];
 var realFetch=window.fetch;
 function js(o){return Promise.resolve(new Response(JSON.stringify(o),{status:200,headers:{"Content-Type":"application/json"}}));}
 function simPanel(){
@@ -4139,8 +4139,8 @@ class Handler(BaseHTTPRequestHandler):
             "package_name": first.get("name") or "Wi-Fi bundle",
             "amount": str(first.get("price") or "100.00"),
             "vouchers": [
-                {"code": "K7F2-9XPL-4QWD", "status": "issued"},
-                {"code": "M3TB-8RHZ-6CJV", "status": "issued"},
+                {"code": "4821K", "status": "issued"},
+                {"code": "7359M", "status": "issued"},
             ],
         }
         pages = [
@@ -4217,7 +4217,7 @@ class Handler(BaseHTTPRequestHandler):
             "first_name": subscriber["first_name"],
             "last_name": subscriber["last_name"],
             "status": "issued",
-            "code": "K7F2-9XPL-4QWD",
+            "code": "4821K",
             "package_name": subscriber["package_name"],
             "amount": str(subscriber["price"] or "0"),
             "pppoe_username": subscriber["pppoe_username"],
@@ -4290,8 +4290,8 @@ class Handler(BaseHTTPRequestHandler):
                 "package_name": "Wi-Fi bundle",
                 "amount": "100.00",
                 "vouchers": [
-                    {"code": "K7F2-9XPL-4QWD", "status": "used"},
-                    {"code": "M3TB-8RHZ-6CJV", "status": "issued"},
+                    {"code": "4821K", "status": "used"},
+                    {"code": "7359M", "status": "issued"},
                 ],
             }
             return PreviewPage(
@@ -4301,7 +4301,7 @@ class Handler(BaseHTTPRequestHandler):
             "first_name": "Amina",
             "last_name": "Wanjiku",
             "status": "issued",
-            "code": code or "K7F2-9XPL-4QWD",
+            "code": code or "4821K",
             "package_name": "Home 10 Mbps",
             "amount": "500.00",
             "pppoe_username": "amina.wanjiku",

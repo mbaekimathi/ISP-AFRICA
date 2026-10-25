@@ -604,12 +604,17 @@ def create_payment(cursor, client_id, subscriber_id, invoice_id, amount, method,
     )
 
 
-VOUCHER_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+VOUCHER_LETTERS = "ABCDEFGHJKMNPQRSTUVWXYZ"
 
 
 def voucher_code():
-    """Human-readable one-time voucher code, without look-alike characters."""
-    return "-".join("".join(secrets.choice(VOUCHER_ALPHABET) for _ in range(4)) for _ in range(3))
+    """Short one-time voucher code: four digits and a letter, like 4821K.
+
+    Fixed positions remove look-alike ambiguity — the last character is
+    always a letter (I, L and O excluded), the rest always digits.
+    """
+    digits = "".join(secrets.choice("0123456789") for _ in range(4))
+    return digits + secrets.choice(VOUCHER_LETTERS)
 
 
 def issue_voucher(cursor, client_id, subscriber_id, payload):
@@ -629,7 +634,7 @@ def issue_voucher(cursor, client_id, subscriber_id, payload):
             return existing
     amount = Decimal(str(payload.get("amount") or "0"))
     code = voucher_code()
-    for _attempt in range(5):
+    for _attempt in range(10):
         cursor.execute("SELECT id FROM pppoe_vouchers WHERE code = %s", (code,))
         if not cursor.fetchone():
             break
@@ -3073,7 +3078,7 @@ def issue_hotspot_voucher_rows(cursor, row, count, seconds):
     issued = []
     for _slot in range(max(1, int(count))):
         code = voucher_code()
-        for _attempt in range(5):
+        for _attempt in range(10):
             cursor.execute("SELECT id FROM hotspot_vouchers WHERE code = %s", (code,))
             if not cursor.fetchone():
                 break
