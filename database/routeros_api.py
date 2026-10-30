@@ -14,6 +14,8 @@ import secrets
 import socket
 from datetime import datetime, timedelta
 
+import wg_host
+
 API_USER = "isp-centric"
 API_PORT = 8728
 DEV_PASSWORD = "Itsispcentric@001"
@@ -1030,7 +1032,7 @@ PPPOE_NATS = (PPPOE_PORTAL_NAT_SUS, PPPOE_PORTAL_NAT_EXP)
 
 
 def _portal_target(radius):
-    host = str((radius or {}).get("address") or os.environ.get("ISP_PORTAL_IP") or "10.88.0.1")
+    host = str((radius or {}).get("address") or os.environ.get("ISP_PORTAL_IP") or wg_host.HOST_IP)
     port = int(os.environ.get("ISP_PORTAL_PORT") or 8790)
     return host, port
 IFACE_NAME = r"^[A-Za-z0-9_.:-]{1,32}$"
@@ -1841,12 +1843,13 @@ PORTAL_NAT_SKIP = "isp-centric-portal-nat-skip"
 # netmapped toward the portal into a per-router block: router 10.88.0.N maps
 # 10.10.0.H to 10.89.N.H. The portal reads the router from N and the client
 # from H, and each WireGuard peer owns only its own block.
-PORTAL_MAP_PREFIX = "10.89"
+PORTAL_MAP_PREFIX = os.environ.get("ISP_PORTAL_MAP_PREFIX") or "10.89"
+TUNNEL_PREFIX = ".".join(wg_host.HOST_IP.split(".")[:3])
 
 
 def portal_map_network(router):
     parts = str(router or "").split(".")
-    if len(parts) == 4 and parts[:3] == ["10", "88", "0"] and parts[3].isdigit() and 2 <= int(parts[3]) <= 254:
+    if len(parts) == 4 and ".".join(parts[:3]) == TUNNEL_PREFIX and parts[3].isdigit() and 2 <= int(parts[3]) <= 254:
         return f"{PORTAL_MAP_PREFIX}.{int(parts[3])}.0/24"
     return None
 
@@ -1856,7 +1859,7 @@ def portal_map_client(ip):
     parts = str(ip or "").split(".")
     if len(parts) != 4 or ".".join(parts[:2]) != PORTAL_MAP_PREFIX or not all(part.isdigit() for part in parts[2:]):
         return None
-    router = f"10.88.0.{int(parts[2])}"
+    router = f"{TUNNEL_PREFIX}.{int(parts[2])}"
     return (router, int(parts[3])) if portal_map_network(router) else None
 
 

@@ -1,6 +1,7 @@
 import base64
 import hashlib
 import hmac
+import ipaddress
 import json
 import mimetypes
 import os
@@ -37,6 +38,7 @@ import radius_server
 import router_jobs
 import routeros_api
 import webpush
+import wg_host
 
 import pymysql
 from pymysql.cursors import DictCursor
@@ -2235,11 +2237,12 @@ def wireguard_keypair():
 def next_tunnel_ip(cursor):
     cursor.execute("SELECT tunnel_ip FROM isp_mikrotik_devices")
     used = {row["tunnel_ip"] for row in cursor.fetchall()}
-    for number in range(2, 254):
-        address = f"10.88.0.{number}"
-        if address not in used:
+    network = wg_host.tunnel_network()
+    for candidate in network.hosts():
+        address = str(candidate)
+        if address != wg_host.HOST_IP and address not in used:
             return address
-    raise ApiError(409, "No free tunnel addresses are left in 10.88.0.0/24.")
+    raise ApiError(409, f"No free tunnel addresses are left in {network}.")
 
 
 # Sites whose location was not picked from a map result land on Nairobi.
@@ -4983,7 +4986,7 @@ class Handler(BaseHTTPRequestHandler):
             nas = cursor.fetchone()
             secret = routeros_api.open_password(nas["secret_sealed"]) if nas and nas.get("secret_sealed") else ""
             radius = {
-                "address": os.environ.get("ISP_RADIUS_HOST", "10.88.0.1"),
+                "address": os.environ.get("ISP_RADIUS_HOST") or wg_host.HOST_IP,
                 "secret": secret,
                 "source": row["tunnel_ip"],
             }
@@ -5435,7 +5438,7 @@ class Handler(BaseHTTPRequestHandler):
             "hotspotEnabled": bool(row.get("hotspot_enabled")),
             "hotspotBlockSharing": bool(row.get("hotspot_block_sharing")),
             "stageTested": bool(row.get("stage_tested_at")),
-            "serverTunnelIp": "10.88.0.1",
+            "serverTunnelIp": wg_host.HOST_IP,
             "endpoint": endpoint,
             "endpointPort": int(os.environ.get("ISP_WG_PORT", "51820")),
             "serverPublicKey": server_public_key,
@@ -7963,7 +7966,7 @@ def reconcile_device(connect, device):
             state = routeros_api.inspect_access(
                 device["tunnel_ip"],
                 password,
-                radius_address=os.environ.get("ISP_RADIUS_HOST", "10.88.0.1"),
+                radius_address=os.environ.get("ISP_RADIUS_HOST") or wg_host.HOST_IP,
             )
             break
         except routeros_api.RouterError as error:
@@ -8016,7 +8019,7 @@ def reconcile_device(connect, device):
                 password,
                 True,
                 radius={
-                    "address": os.environ.get("ISP_RADIUS_HOST", "10.88.0.1"),
+                    "address": os.environ.get("ISP_RADIUS_HOST") or wg_host.HOST_IP,
                     "secret": secret,
                     "source": device["tunnel_ip"],
                 },

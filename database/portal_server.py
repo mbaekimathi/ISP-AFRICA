@@ -40,6 +40,7 @@ import gateway_store
 import pppoe_service
 import pppoe_store
 import routeros_api
+import wg_host
 
 PORTAL_PORT = int(os.environ.get("ISP_PORTAL_PORT") or 8790)
 PORTAL_HOST = os.environ.get("ISP_PORTAL_HOST") or "0.0.0.0"
@@ -961,7 +962,7 @@ HOTSPOT_CSS = """
 
 
 def portal_base():
-    host = os.environ.get("ISP_PORTAL_IP") or "10.88.0.1"
+    host = os.environ.get("ISP_PORTAL_IP") or wg_host.HOST_IP
     return f"http://{host}:{PORTAL_PORT}"
 
 

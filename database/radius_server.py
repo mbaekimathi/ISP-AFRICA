@@ -21,8 +21,8 @@ import pymysql
 import pppoe_service
 import pppoe_store
 
-AUTH_PORT = 1812
-ACCT_PORT = 1813
+AUTH_PORT = int(os.environ.get("ISP_RADIUS_AUTH_PORT") or 1812)
+ACCT_PORT = int(os.environ.get("ISP_RADIUS_ACCT_PORT") or 1813)
 STATUS = {}
 
 VENDOR_MICROSOFT = 311

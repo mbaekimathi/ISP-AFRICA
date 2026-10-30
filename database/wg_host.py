@@ -6,6 +6,7 @@ on UDP 51820 at 10.88.0.1, and adds each router as a peer.
 """
 
 import base64
+import ipaddress
 import os
 import shutil
 import socket
@@ -13,12 +14,18 @@ import subprocess
 import time
 from pathlib import Path
 
-HOST_ADDRESS = "10.88.0.1/24"
-TUNNEL_NAME = "isp-centric"
+HOST_ADDRESS = (os.environ.get("ISP_WG_ADDRESS") or "10.88.0.1/24").strip()
+HOST_IP = str(ipaddress.ip_interface(HOST_ADDRESS).ip)
+TUNNEL_NAME = (os.environ.get("ISP_WG_IFACE") or "isp-centric").strip()
 ROOT = Path(__file__).resolve().parent / "wg"
 KEY_FILE = ROOT / "server.key"
 CONFIG_FILE = ROOT / f"{TUNNEL_NAME}.conf"
 SYNC_FILE = ROOT / f"{TUNNEL_NAME}.sync.conf"
+
+
+def tunnel_network():
+    """The tunnel subnet (e.g. 10.88.0.0/24) derived from HOST_ADDRESS."""
+    return ipaddress.ip_interface(HOST_ADDRESS).network
 
 
 def wireguard_keypair():
@@ -342,7 +349,7 @@ def elevate_apply(wireguard, service_config, sync_target):
                 'sc.exe query "WireGuardTunnel`$isp-centric" | Out-String | Add-Content $log',
                 f'netsh advfirewall firewall add rule name="ISP CENTRIC WireGuard" dir=in action=allow protocol=UDP localport={listen_port()} | Out-Null',
                 'netsh advfirewall firewall add rule name="ISP CENTRIC Tunnel ICMP" dir=in action=allow protocol=icmpv4 | Out-Null',
-                'route print 10.88.0.0 | Out-String | Add-Content $log',
+                f'route print {tunnel_network().network_address} | Out-String | Add-Content $log',
                 'exit $LASTEXITCODE',
             ]
         ),
