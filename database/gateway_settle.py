@@ -54,7 +54,8 @@ def company_gateway_settings(cursor):
                certificate,
                status, kill_switch, commission_percent, commission_flat,
                default_hold_hours, min_payout, max_payout_per_tx, payout_fee_estimate,
-               last_known_balance, last_balance_at, txn_fees_enabled
+               last_known_balance, last_balance_at, txn_fees_enabled,
+               manual_min, manual_max, manual_transfers_enabled
         FROM company_daraja_settings WHERE id = 1
         """
     )
@@ -621,6 +622,8 @@ def manual_transfer(cursor, client_id, amount, reason, actor_id, notify=None):
         return None, "The company gateway is not configured."
     if company["status"] != "active" or company["kill_switch"]:
         return None, "The gateway is halted — resume it before sending transfers."
+    if not company.get("manual_transfers_enabled", 1):
+        return None, "Manual transfers are switched off in gateway controls."
     client_id = str(client_id or "").strip()
     if not client_id:
         return None, "Choose the client to pay."
@@ -642,6 +645,12 @@ def manual_transfer(cursor, client_id, amount, reason, actor_id, notify=None):
         return None, "Enter a valid amount."
     if amount <= 0:
         return None, "Enter an amount above zero."
+    manual_min = _money(company.get("manual_min"))
+    manual_max = _money(company.get("manual_max"))
+    if manual_min > 0 and amount < manual_min:
+        return None, f"Manual transfers start at KES {manual_min}."
+    if manual_max > 0 and amount > manual_max:
+        return None, f"A manual transfer cannot exceed KES {manual_max}."
     balance = gateway_store._last_balance(cursor, client_id)
     if amount > balance:
         return None, f"Only KES {balance} is held for this client."
@@ -829,6 +838,7 @@ def held_reason(cursor, row, company, bands=None, audience="company"):
         return {"code": "unconfigured",
                 "message": "The payout gateway is still being configured — held money stays pooled meanwhile."
                 if client_view else "The company gateway is not configured."}
+    manual = bool(company.get("manual_transfers_enabled", 1))
     if company["kill_switch"]:
         return {"code": "kill_switch",
                 "message": "Payouts are paused by the company — they send as soon as the gateway is switched back on."
@@ -876,10 +886,14 @@ def held_reason(cursor, row, company, bands=None, audience="company"):
                                + ("they send automatically on the next settlement run."
                                   if client_view else
                                   "the scheduler submits them automatically.")}
+        if not manual:
+            detail = "it stays pooled until new collections arrive."
+        elif client_view:
+            detail = "the company can release this balance on request."
+        else:
+            detail = "release this balance with a manual transfer."
         return {"code": "residual",
-                "message": "No payments left to batch — the company can release this balance on request."
-                if client_view else
-                "No payments left to batch — release this balance with a manual transfer."}
+                "message": f"No payments left to batch — {detail}"}
     if mode == "transactions":
         threshold = max(1, int(row.get("settle_every_n_tx") or 0))
         collected = sum(1 for entry in entries if entry["type"] == "collection")
@@ -902,11 +916,14 @@ def held_reason(cursor, row, company, bands=None, audience="company"):
     plan = project_batch(entries, company, row, bands or [])
     if not plan or plan["net"] < plan["minimum"] or plan["net"] <= 0:
         if not plan:
+            if not manual:
+                detail = "it stays pooled until new collections arrive."
+            elif client_view:
+                detail = "the company can release this balance on request."
+            else:
+                detail = "release this balance with a manual transfer."
             return {"code": "residual",
-                    "message": ("Only adjustments are left to batch — the company can release this "
-                                "balance on request.")
-                    if client_view else
-                    "Only adjustments are left to batch — release this balance with a manual transfer."}
+                    "message": f"Only adjustments are left to batch — {detail}"}
         net, minimum = plan["net"], plan["minimum"]
         needed = minimum - net
         if net > 0:
@@ -918,10 +935,13 @@ def held_reason(cursor, row, company, bands=None, audience="company"):
         else:
             detail = (f"Commission, fees and adjustments leave KES {net} — "
                       f"it takes KES {needed} more in collections before there is anything to send")
-        return {"code": "minimum",
-                "message": detail + (". The company can also release the held balance manually."
-                                     if client_view else
-                                     ". A manual transfer can send the held balance any time.")}
+        if not manual:
+            suffix = ". It stays pooled until collections cover it."
+        elif client_view:
+            suffix = ". The company can also release the held balance manually."
+        else:
+            suffix = ". A manual transfer can send the held balance any time."
+        return {"code": "minimum", "message": detail + suffix}
     message = "Settles automatically on the next run."
     if mode == "delayed":
         held, releases = _held_in_window(cursor, client_id, hold_hours)

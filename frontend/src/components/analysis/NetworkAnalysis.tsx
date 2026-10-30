@@ -285,12 +285,16 @@ function RouterUsageList({
 }) {
   if (loading) {
     return (
-      <div className="panel mt-3 px-4 py-6" aria-hidden="true">
-        <div className="grid gap-3">
-          <div className="skeleton h-4 w-1/3" />
-          <div className="skeleton h-4 w-2/5" />
-          <div className="skeleton h-4 w-1/4" />
-        </div>
+      <div className="mt-3 flex gap-3 overflow-x-auto pb-2" aria-hidden="true">
+        {[0, 1, 2].map((index) => (
+          <div key={index} className="card w-64 shrink-0 px-4 py-4">
+            <div className="grid gap-3">
+              <div className="skeleton h-4 w-1/2" />
+              <div className="skeleton h-3 w-3/4" />
+              <div className="skeleton h-6 w-1/3" />
+            </div>
+          </div>
+        ))}
       </div>
     );
   }
@@ -302,48 +306,46 @@ function RouterUsageList({
   }
   const peak = Math.max(1, ...routers.map((router) => router.bytesIn + router.bytesOut));
   return (
-    <ol className="panel mt-3 divide-y divide-border overflow-hidden">
+    <ol className="mt-3 flex snap-x snap-mandatory gap-3 overflow-x-auto pb-2">
       {routers.map((router) => {
         const total = router.bytesIn + router.bytesOut;
         const online = router.tunnelStatus === "up";
         return (
-          <li key={router.id}>
+          <li key={router.id} className="w-64 shrink-0 snap-start">
             <Link
               to={home(`/mikrotiks/${router.id}`)}
-              className="block px-4 py-3.5 outline-none transition-colors duration-fast ease-out hover:bg-surface-muted/50 focus-visible:bg-surface-muted/50"
+              className="card flex h-full flex-col px-4 py-4 outline-none transition-transform duration-fast ease-out hover:-translate-y-0.5 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 focus-visible:ring-offset-background"
             >
-              <div className="flex flex-wrap items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="flex flex-wrap items-center gap-2">
-                    <p className="truncate text-sm font-semibold">{router.name}</p>
-                    <StatusBadge tone={online ? "online" : "offline"}>{online ? "Online" : "Offline"}</StatusBadge>
-                  </div>
-                  <p className="mt-0.5 text-xs text-muted-foreground">
-                    {router.site ? `${router.site} · ` : ""}
-                    {router.subscribers} PPPoE {router.subscribers === 1 ? "client" : "clients"}
-                    {router.hotspotGuests
-                      ? ` · ${router.hotspotGuests} hotspot ${router.hotspotGuests === 1 ? "guest" : "guests"}`
-                      : ""}
-                    {" · "}
-                    {router.openSessions + router.hotspotSessions} surfing
-                  </p>
-                </div>
-                <div className="text-right">
-                  <p className="text-sm font-semibold tabular">{bytes(total)}</p>
-                  <p className="mt-0.5 text-xs text-muted-foreground tabular">
-                    ↓ {bytes(router.bytesIn)} · ↑ {bytes(router.bytesOut)}
-                  </p>
-                </div>
+              <div className="flex items-center justify-between gap-2">
+                <p className="truncate text-sm font-semibold">{router.name}</p>
+                <StatusBadge tone={online ? "online" : "offline"}>{online ? "Online" : "Offline"}</StatusBadge>
               </div>
-              <div
-                className="mt-2 h-1.5 rounded-full bg-surface-muted"
-                role="img"
-                aria-label={`${bytes(total)} of ${bytes(peak)}`}
-              >
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                {router.site ? `${router.site} · ` : ""}
+                {router.subscribers} PPPoE {router.subscribers === 1 ? "client" : "clients"}
+                {router.hotspotGuests
+                  ? ` · ${router.hotspotGuests} hotspot ${router.hotspotGuests === 1 ? "guest" : "guests"}`
+                  : ""}
+                {" · "}
+                {router.openSessions + router.hotspotSessions} surfing
+              </p>
+              <div className="mt-3">
+                <p className="text-lg font-semibold tabular tracking-tight">{bytes(total)}</p>
+                <p className="mt-0.5 text-xs text-muted-foreground tabular">
+                  ↓ {bytes(router.bytesIn)} · ↑ {bytes(router.bytesOut)}
+                </p>
+              </div>
+              <div className="mt-auto pt-4">
                 <div
-                  className="h-full rounded-full bg-gradient-brand"
-                  style={{ width: `${Math.max(total > 0 ? 2 : 0, (total / peak) * 100)}%` }}
-                />
+                  className="h-1.5 rounded-full bg-surface-muted"
+                  role="img"
+                  aria-label={`${bytes(total)} of ${bytes(peak)}`}
+                >
+                  <div
+                    className="h-full rounded-full bg-gradient-brand"
+                    style={{ width: `${Math.max(total > 0 ? 2 : 0, (total / peak) * 100)}%` }}
+                  />
+                </div>
               </div>
             </Link>
           </li>

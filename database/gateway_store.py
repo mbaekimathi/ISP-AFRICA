@@ -72,6 +72,9 @@ UNDO_STATEMENTS = [
     "ALTER TABLE company_daraja_settings DROP COLUMN txn_fees_enabled",
     "ALTER TABLE company_daraja_settings DROP COLUMN public_base",
     "ALTER TABLE company_daraja_settings DROP COLUMN certificate",
+    "ALTER TABLE company_daraja_settings DROP COLUMN manual_min",
+    "ALTER TABLE company_daraja_settings DROP COLUMN manual_max",
+    "ALTER TABLE company_daraja_settings DROP COLUMN manual_transfers_enabled",
 ]
 
 
@@ -98,6 +101,9 @@ def ensure_schema(cursor):
         ("txn_fees_enabled", "txn_fees_enabled TINYINT NOT NULL DEFAULT 0"),
         ("public_base", "public_base VARCHAR(255) NOT NULL DEFAULT ''"),
         ("certificate", "certificate TEXT NULL"),
+        ("manual_min", "manual_min DECIMAL(12,2) NOT NULL DEFAULT 0"),
+        ("manual_max", "manual_max DECIMAL(12,2) NOT NULL DEFAULT 0"),
+        ("manual_transfers_enabled", "manual_transfers_enabled TINYINT NOT NULL DEFAULT 1"),
     ):
         cursor.execute("SHOW COLUMNS FROM company_daraja_settings LIKE %s", (column,))
         if cursor.fetchone() is None:
@@ -1642,7 +1648,7 @@ def _parse_schedule(schedule_text):
     return parsed if isinstance(parsed, list) else []
 
 
-def save_payout_settings(cursor, client_id, fields, actor_id):
+def save_payout_settings(cursor, client_id, fields, actor_id, actor_kind="client"):
     """Owner-only payout settings. Destination changes stage into
     pending_change with a 24h cooling-off (the settlement tick applies them);
     timing and mode changes are immediate. Everything is audited and
@@ -1713,7 +1719,7 @@ def save_payout_settings(cursor, client_id, fields, actor_id):
             f"UPDATE isp_payout_settings SET {sets} WHERE client_id = %s",
             (*changed.values(), client_id),
         )
-        audit(cursor, client_id, "client", actor_id, "settings.updated",
+        audit(cursor, client_id, actor_kind, actor_id, "settings.updated",
               old={key: str(row.get(key)) for key in changed},
               new={key: str(value) for key, value in changed.items()})
 
@@ -1837,6 +1843,7 @@ _COMPANY_GATEWAY_WRITABLE = {
     "status", "kill_switch", "commission_percent", "commission_flat",
     "default_hold_hours", "min_payout", "max_payout_per_tx",
     "payout_fee_estimate", "txn_fees_enabled",
+    "manual_min", "manual_max", "manual_transfers_enabled",
 }
 
 

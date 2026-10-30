@@ -977,6 +977,33 @@ class ManualTransferTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertIn("halted", error)
 
+    def test_refuses_when_manual_transfers_disabled(self):
+        db = seed_db()
+        db.table("company_daraja_settings")[0]["manual_transfers_enabled"] = 0
+        seed_balance(db, "c1", "500")
+        result, error = gateway_settle.manual_transfer(
+            db.cursor(), "c1", "100", "", "emp-1")
+        self.assertIsNone(result)
+        self.assertIn("switched off", error)
+
+    def test_refuses_below_manual_min(self):
+        db = seed_db()
+        db.table("company_daraja_settings")[0]["manual_min"] = Decimal("100")
+        seed_balance(db, "c1", "500")
+        result, error = gateway_settle.manual_transfer(
+            db.cursor(), "c1", "50", "", "emp-1")
+        self.assertIsNone(result)
+        self.assertIn("100", error)
+
+    def test_refuses_above_manual_max(self):
+        db = seed_db()
+        db.table("company_daraja_settings")[0]["manual_max"] = Decimal("200")
+        seed_balance(db, "c1", "500")
+        result, error = gateway_settle.manual_transfer(
+            db.cursor(), "c1", "250", "", "emp-1")
+        self.assertIsNone(result)
+        self.assertIn("200", error)
+
     def test_confirmed_manual_payout_writes_no_ledger(self):
         db = seed_db()
         seed_balance(db, "c1", "500")
@@ -1037,6 +1064,23 @@ class HeldReasonTests(unittest.TestCase):
         reason = gateway_settle.held_reason(db.cursor(), row, company())
         self.assertEqual(reason["code"], "minimum")
         self.assertIn("100", reason["message"])
+
+    def test_minimum_mentions_manual_transfer(self):
+        db = seed_db()
+        seed_balance(db, "c1", "50")
+        row = self._row(db, balance="50")
+        reason = gateway_settle.held_reason(db.cursor(), row, company())
+        self.assertEqual(reason["code"], "minimum")
+        self.assertIn("manual transfer", reason["message"].lower())
+
+    def test_minimum_without_manual_transfers(self):
+        db = seed_db()
+        seed_balance(db, "c1", "50")
+        row = self._row(db, balance="50")
+        reason = gateway_settle.held_reason(
+            db.cursor(), row, company(manual_transfers_enabled=0))
+        self.assertEqual(reason["code"], "minimum")
+        self.assertNotIn("manual transfer", reason["message"].lower())
 
     def test_delayed_window_explains_hold(self):
         db = seed_db()

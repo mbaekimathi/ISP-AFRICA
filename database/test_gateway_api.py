@@ -310,7 +310,9 @@ def settings_row(cid="c1", **overrides):
            "settlement_mode": "immediate", "hold_hours": 24,
            "destination_type": "phone", "destination_value": "254700999888",
            "account_reference": "", "min_payout_override": None,
-           "pending_change": None, "pending_change_effective_at": None}
+           "pending_change": None, "pending_change_effective_at": None,
+           "settle_every_n_tx": None, "settle_schedule": "[]",
+           "last_settled_at": None}
     row.update(overrides)
     return row
 
@@ -669,6 +671,19 @@ class CompanyGatewaySettingsTests(unittest.TestCase):
         self.assertIsNone(result)
         self.assertTrue(error)
 
+    def test_manual_transfer_fields_save(self):
+        db = self.seed()
+        result, error = gateway_api.save_company_gateway(
+            db.cursor(),
+            {"manualMin": "50", "manualMax": "2000", "manualTransfersEnabled": False},
+            "emp-1")
+        self.assertIsNone(error)
+        row = db.table("company_daraja_settings")[0]
+        self.assertEqual(row["manual_min"], Decimal("50"))
+        self.assertEqual(row["manual_max"], Decimal("2000"))
+        self.assertEqual(row["manual_transfers_enabled"], 0)
+        self.assertFalse(result["settings"]["manualTransfersEnabled"])
+
 
 class ClientDirectoryTests(unittest.TestCase):
     def test_directory_lists_all_isps(self):
@@ -678,6 +693,39 @@ class ClientDirectoryTests(unittest.TestCase):
         out = gateway_api.clients(db.cursor())
         self.assertEqual(out["directory"][0]["name"], "Ada Wanjiru")
         self.assertEqual(out["directory"][0]["id"], "c1")
+
+
+class ClientRestrictionTests(unittest.TestCase):
+    def test_director_updates_pooled_client_rules(self):
+        db = MiniDb()
+        db.insert("isp_payout_settings", **settings_row())
+        result, error = gateway_api.save_client_restrictions(
+            db.cursor(),
+            {"clientId": "c1", "settlementMode": "transactions", "settleEveryNTx": 5},
+            "emp-1")
+        self.assertIsNone(error)
+        row = db.table("isp_payout_settings")[0]
+        self.assertEqual(row["settlement_mode"], "transactions")
+        self.assertEqual(row["settle_every_n_tx"], 5)
+        self.assertTrue(any(a["action"] == "settings.updated"
+                            for a in db.table("gateway_audit_log")))
+        self.assertEqual(result["clients"][0]["settlementMode"], "transactions")
+
+    def test_rejects_non_pooled_client(self):
+        db = MiniDb()
+        db.insert("isp_payout_settings", **settings_row(gateway_mode="own_daraja"))
+        result, error = gateway_api.save_client_restrictions(
+            db.cursor(), {"clientId": "c1", "settlementMode": "immediate"}, "emp-1")
+        self.assertIsNone(result)
+        self.assertIn("pooled", error)
+        self.assertEqual(
+            db.table("isp_payout_settings")[0]["settlement_mode"], "immediate")
+
+    def test_requires_client_id(self):
+        db = MiniDb()
+        result, error = gateway_api.save_client_restrictions(db.cursor(), {}, "emp-1")
+        self.assertIsNone(result)
+        self.assertIn("clientId", error)
 
 
 class MarkFailedTests(unittest.TestCase):

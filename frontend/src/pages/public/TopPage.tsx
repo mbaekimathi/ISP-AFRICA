@@ -1,14 +1,10 @@
-import { Globe, MousePointerClick, ShieldCheck, type LucideIcon } from "lucide-react";
 import { BackgroundGlow } from "@/components/public/BackgroundGlow";
 import { CtaBand } from "@/components/public/CtaBand";
 import { LiveChip } from "@/components/public/LiveChip";
 import { OrbitGlobe } from "@/components/public/OrbitGlobe";
 import { RotatingGlobe } from "@/components/public/RotatingGlobe";
-import { Reveal } from "@/components/public/Reveal";
-import { Section } from "@/components/public/Section";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { usePageMeta } from "@/hooks/usePageMeta";
-import { cn } from "@/lib/cn";
 
 const COPY = {
   meta: {
@@ -25,26 +21,6 @@ const COPY = {
     secondaryCta: { label: "Check our features", to: "/features" },
     live: "Online",
   },
-  pillars: [
-    {
-      icon: Globe,
-      chip: "bg-primary/10 text-primary",
-      title: "Anywhere",
-      text: "Access from any device, in any country.",
-    },
-    {
-      icon: ShieldCheck,
-      chip: "bg-accent/10 text-accent",
-      title: "Secure",
-      text: "Encrypted, role-based and built to protect your customers.",
-    },
-    {
-      icon: MousePointerClick,
-      chip: "bg-success/10 text-success",
-      title: "Simple",
-      text: "Set up in minutes. No training needed.",
-    },
-  ] as { icon: LucideIcon; chip: string; title: string; text: string }[],
   cta: {
     title: "Ready in minutes.",
     description: "Create your account and bring your subscribers, billing, and routers into one place.",
@@ -82,25 +58,6 @@ export function TopPage() {
           </div>
         </div>
       </section>
-
-      <Section>
-        <div className="grid gap-4 sm:grid-cols-3">
-          {COPY.pillars.map((pillar, index) => (
-            <Reveal key={pillar.title} delay={index * 90}>
-              <div className="h-full rounded-2xl border border-border bg-surface p-6 shadow-card">
-                <span
-                  className={cn("inline-flex h-10 w-10 items-center justify-center rounded-xl", pillar.chip)}
-                  aria-hidden="true"
-                >
-                  <pillar.icon className="h-5 w-5" />
-                </span>
-                <h2 className="mt-4 text-base font-semibold text-foreground">{pillar.title}</h2>
-                <p className="mt-1.5 text-sm leading-6 text-muted-foreground">{pillar.text}</p>
-              </div>
-            </Reveal>
-          ))}
-        </div>
-      </Section>
 
       <CtaBand
         title={COPY.cta.title}

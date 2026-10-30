@@ -112,6 +112,8 @@ type NoticeRow = { id: string; kind: string; subject: string; detail: string; cr
 
 type DirectoryEntry = { id: string; name: string; email: string; status: string };
 
+type ManualRules = { enabled: boolean; min: string; max: string };
+
 type HeldRow = {
   client_id: string;
   name: string | null;
@@ -218,6 +220,7 @@ export function CompanyGatewayPage() {
   const [tab, setTab] = useState<Tab>("held");
   const [heldRows, setHeldRows] = useState<HeldRow[] | null>(null);
   const [maxPerTx, setMaxPerTx] = useState("");
+  const [manualRules, setManualRules] = useState<ManualRules | null>(null);
   const [transferFor, setTransferFor] = useState<HeldRow | null>(null);
   const [payments, setPayments] = useState<PaymentRow[] | null>(null);
   const [payouts, setPayouts] = useState<PayoutRow[] | null>(null);
@@ -247,11 +250,12 @@ export function CompanyGatewayPage() {
       setMessage(cause instanceof Error ? cause.message : "That view could not be loaded.");
     const base = "/api/employee/company/gateway";
     if (tab === "held") {
-      apiRequest<{ clients: HeldRow[]; directory: DirectoryEntry[]; maxPayoutPerTx: string }>(`${base}/clients`)
+      apiRequest<{ clients: HeldRow[]; directory: DirectoryEntry[]; maxPayoutPerTx: string; manualTransfers: ManualRules }>(`${base}/clients`)
         .then((b) => {
           setHeldRows(b.clients);
           setDirectory((current) => current ?? b.directory);
           setMaxPerTx(b.maxPayoutPerTx || "");
+          setManualRules(b.manualTransfers ?? null);
         })
         .catch(fail);
     }
@@ -407,7 +411,8 @@ export function CompanyGatewayPage() {
                 !!row.destination_type &&
                 !!row.destination_value &&
                 overview?.gatewayStatus === "active" &&
-                !overview?.killSwitch;
+                !overview?.killSwitch &&
+                manualRules?.enabled !== false;
               return (
                 <tr key={row.client_id}>
                   <td className="px-5 py-3">
@@ -452,7 +457,9 @@ export function CompanyGatewayPage() {
                           ? "Nothing is held for this client"
                           : !row.destination_type
                             ? "Set a payout destination first"
-                            : "Send held funds to this client's account now"
+                            : manualRules && !manualRules.enabled
+                              ? "Manual transfers are switched off in gateway controls"
+                              : "Send held funds to this client's account now"
                       }
                       onClick={() => setTransferFor(row)}
                     >
@@ -721,6 +728,8 @@ export function CompanyGatewayPage() {
         <TransferDialog
           row={transferFor}
           maxPerTx={maxPerTx}
+          manualMin={manualRules?.min ?? ""}
+          manualMax={manualRules?.max ?? ""}
           onClose={() => setTransferFor(null)}
           onSent={(result) => {
             setTransferFor(null);
@@ -753,11 +762,15 @@ type TransferResult = {
 function TransferDialog({
   row,
   maxPerTx,
+  manualMin,
+  manualMax,
   onClose,
   onSent,
 }: {
   row: HeldRow;
   maxPerTx: string;
+  manualMin: string;
+  manualMax: string;
   onClose: () => void;
   onSent: (result: TransferResult) => void;
 }) {
@@ -768,7 +781,10 @@ function TransferDialog({
 
   const parsed = Number(amount);
   const balance = Number(row.balance);
-  const valid = Number.isFinite(parsed) && parsed > 0 && parsed <= balance;
+  const minimum = Number(manualMin) > 0 ? Number(manualMin) : 0;
+  const ceiling = Number(manualMax) > 0 ? Math.min(balance, Number(manualMax)) : balance;
+  const valid =
+    Number.isFinite(parsed) && parsed > 0 && parsed >= minimum && parsed <= ceiling;
   const splits = Number.isFinite(Number(maxPerTx)) && Number(maxPerTx) > 0 && parsed > Number(maxPerTx)
     ? Math.ceil(parsed / Number(maxPerTx))
     : 1;
@@ -829,7 +845,9 @@ function TransferDialog({
               </SecondaryButton>
             </div>
             {amount && !valid ? (
-              <p className="text-xs text-destructive">Enter an amount between 0 and {money(row.balance)}.</p>
+              <p className="text-xs text-destructive">
+                Enter an amount between {minimum > 0 ? money(minimum) : "0"} and {money(ceiling)}.
+              </p>
             ) : null}
             {splits > 1 ? (
               <p className="text-xs text-muted-foreground">

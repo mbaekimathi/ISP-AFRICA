@@ -1,4 +1,4 @@
-import { ReceiptText, ShieldCheck } from "lucide-react";
+import { Plus, ReceiptText, ShieldCheck, SlidersHorizontal, Trash2 } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 import { Navigate } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
@@ -30,7 +30,32 @@ type GatewaySettings = {
   minPayout?: string;
   maxPayoutPerTx?: string;
   payoutFeeEstimate?: string;
+  manualMin?: string;
+  manualMax?: string;
+  manualTransfersEnabled?: boolean;
 };
+
+type ClientRules = {
+  clientId: string;
+  name: string | null;
+  balance: string;
+  settlementMode: string;
+  holdHours: number | null;
+  settleEveryNTx: number | null;
+  settleSchedule: { day: string; time: string }[];
+  minPayoutOverride: string | null;
+};
+
+const RULE_DAYS = [
+  { id: "daily", label: "Every day" },
+  { id: "monday", label: "Monday" },
+  { id: "tuesday", label: "Tuesday" },
+  { id: "wednesday", label: "Wednesday" },
+  { id: "thursday", label: "Thursday" },
+  { id: "friday", label: "Friday" },
+  { id: "saturday", label: "Saturday" },
+  { id: "sunday", label: "Sunday" },
+] as const;
 
 const emptyBand: BandDraft = { min: "", max: "", fee: "" };
 
@@ -50,6 +75,7 @@ export function CompanyGatewayControlsPage() {
   const [controlsBusy, setControlsBusy] = useState(false);
   const [enabled, setEnabled] = useState(false);
   const [bands, setBands] = useState<BandDraft[]>([]);
+  const [clientRules, setClientRules] = useState<ClientRules[] | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [pending, setPending] = useState(false);
@@ -85,6 +111,13 @@ export function CompanyGatewayControlsPage() {
           setLoaded(true);
           setError(cause instanceof Error ? cause.message : "Transaction charges could not be loaded.");
         }
+      });
+    apiRequest<{ clients: ClientRules[] }>("/api/employee/company/gateway/client-settings")
+      .then((body) => {
+        if (!stopped) setClientRules(body.clients);
+      })
+      .catch(() => {
+        if (!stopped) setClientRules([]);
       });
     return () => {
       stopped = true;
@@ -140,6 +173,9 @@ export function CompanyGatewayControlsPage() {
       if (draft.minPayout !== undefined) updates.minPayout = draft.minPayout;
       if (draft.maxPayoutPerTx !== undefined) updates.maxPayoutPerTx = draft.maxPayoutPerTx;
       if (draft.payoutFeeEstimate !== undefined) updates.payoutFeeEstimate = draft.payoutFeeEstimate;
+      if (draft.manualMin !== undefined) updates.manualMin = draft.manualMin;
+      if (draft.manualMax !== undefined) updates.manualMax = draft.manualMax;
+      if (draft.manualEnabled !== undefined) updates.manualTransfersEnabled = draft.manualEnabled === "1";
       if (Object.keys(updates).length > 0) {
         const body = await apiRequest<{ outcome: string; settings: GatewaySettings }>(
           "/api/employee/company/gateway/settings",
@@ -287,6 +323,40 @@ export function CompanyGatewayControlsPage() {
                 onChange={(e) => setDraft((d) => ({ ...d, payoutFeeEstimate: e.target.value }))}
               />
             </label>
+            <label className="grid gap-1.5 text-sm font-medium">
+              Manual transfer min (KES)
+              <input
+                className="field"
+                inputMode="decimal"
+                placeholder="0 = no minimum"
+                value={value("manualMin", settings.manualMin)}
+                onChange={(e) => setDraft((d) => ({ ...d, manualMin: e.target.value }))}
+              />
+            </label>
+            <label className="grid gap-1.5 text-sm font-medium">
+              Manual transfer max (KES)
+              <input
+                className="field"
+                inputMode="decimal"
+                placeholder="0 = no limit"
+                value={value("manualMax", settings.manualMax)}
+                onChange={(e) => setDraft((d) => ({ ...d, manualMax: e.target.value }))}
+              />
+            </label>
+            <label className="flex items-center gap-2.5 text-sm font-medium sm:col-span-2">
+              <input
+                type="checkbox"
+                checked={
+                  draft.manualEnabled !== undefined
+                    ? draft.manualEnabled === "1"
+                    : Boolean(settings.manualTransfersEnabled ?? true)
+                }
+                onChange={(e) =>
+                  setDraft((d) => ({ ...d, manualEnabled: e.target.checked ? "1" : "0" }))
+                }
+              />
+              Allow manual transfers of held balances
+            </label>
           </div>
         )}
 
@@ -394,6 +464,244 @@ export function CompanyGatewayControlsPage() {
           </PrimaryButton>
         </div>
       </section>
+
+      <ClientRulesCard
+        clients={clientRules}
+        onSaved={(clients) => {
+          setClientRules(clients);
+          setNotice("Saved.");
+          setError("");
+        }}
+        onError={(message) => {
+          setError(message);
+          setNotice("");
+        }}
+      />
     </div>
+  );
+}
+
+function ClientRulesCard({
+  clients,
+  onSaved,
+  onError,
+}: {
+  clients: ClientRules[] | null;
+  onSaved: (clients: ClientRules[]) => void;
+  onError: (message: string) => void;
+}) {
+  const [clientId, setClientId] = useState("");
+  const [mode, setMode] = useState("immediate");
+  const [hold, setHold] = useState("");
+  const [every, setEvery] = useState("");
+  const [periods, setPeriods] = useState<{ day: string; time: string }[]>([]);
+  const [minimum, setMinimum] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  function pick(id: string) {
+    setClientId(id);
+    const row = (clients ?? []).find((client) => client.clientId === id);
+    if (!row) return;
+    setMode(row.settlementMode || "immediate");
+    setHold(row.holdHours ? String(row.holdHours) : "");
+    setEvery(row.settleEveryNTx ? String(row.settleEveryNTx) : "");
+    setPeriods(row.settleSchedule ?? []);
+    setMinimum(row.minPayoutOverride ?? "");
+  }
+
+  const completePeriods = periods.filter((period) => period.day && period.time);
+  const canSave =
+    !!clientId &&
+    !busy &&
+    (mode !== "delayed" || !!hold.trim()) &&
+    (mode !== "transactions" || !!every.trim()) &&
+    (mode !== "scheduled" || completePeriods.length > 0);
+
+  function save() {
+    if (!canSave) return;
+    setBusy(true);
+    const body: Record<string, unknown> = {
+      clientId,
+      settlementMode: mode,
+      minPayoutOverride: minimum.trim(),
+    };
+    if (mode === "delayed") body.holdHours = hold.trim();
+    if (mode === "transactions") body.settleEveryNTx = every.trim();
+    if (mode === "scheduled") body.settleSchedule = completePeriods;
+    apiRequest<{ outcome: string; clients: ClientRules[] }>(
+      "/api/employee/company/gateway/client-settings",
+      { method: "POST", body: JSON.stringify(body) },
+    )
+      .then((result) => onSaved(result.clients))
+      .catch((cause: unknown) =>
+        onError(cause instanceof Error ? cause.message : "Client settlement rules could not be saved."))
+      .finally(() => setBusy(false));
+  }
+
+  return (
+    <section className="card mt-6">
+      <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+        <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><SlidersHorizontal className="h-4 w-4" /></span>
+        <h2 className="text-sm font-semibold">Client settlement rules</h2>
+        <p className="ml-auto text-xs text-muted-foreground">
+          Per-ISP limits on when pooled money sends — destinations stay with each client
+        </p>
+      </header>
+
+      {clients === null ? (
+        <p className="px-5 py-5 text-sm text-muted-foreground">Loading…</p>
+      ) : clients.length === 0 ? (
+        <p className="notice mx-5 my-5" role="status">
+          No clients are pooled on the company gateway yet.
+        </p>
+      ) : (
+        <div className="grid gap-4 px-5 py-5">
+          <label className="grid gap-1.5 text-sm font-medium sm:max-w-sm">
+            Client
+            <select
+              className="field"
+              value={clientId}
+              onChange={(event) => pick(event.target.value)}
+            >
+              <option value="">Choose a pooled client…</option>
+              {clients.map((client) => (
+                <option key={client.clientId} value={client.clientId}>
+                  {client.name || "Unnamed client"} · {client.clientId.slice(0, 8)}
+                </option>
+              ))}
+            </select>
+          </label>
+
+          {clientId ? (
+            <div className="grid gap-4 sm:grid-cols-2">
+              <label className="grid gap-1.5 text-sm font-medium">
+                Settle
+                <select
+                  className="field"
+                  value={mode}
+                  onChange={(event) => setMode(event.target.value)}
+                >
+                  <option value="immediate">As soon as money arrives</option>
+                  <option value="delayed">After a holding period</option>
+                  <option value="transactions">After a number of payments</option>
+                  <option value="scheduled">On a set schedule</option>
+                </select>
+              </label>
+              {mode === "delayed" ? (
+                <label className="grid gap-1.5 text-sm font-medium">
+                  Hold collections for (hours, 1–720)
+                  <input
+                    className="field"
+                    inputMode="numeric"
+                    value={hold}
+                    onChange={(event) =>
+                      setHold(event.target.value.replace(/\D/g, "").slice(0, 3))
+                    }
+                  />
+                </label>
+              ) : null}
+              {mode === "transactions" ? (
+                <label className="grid gap-1.5 text-sm font-medium">
+                  Pay out after every N payments (1–10,000)
+                  <input
+                    className="field"
+                    inputMode="numeric"
+                    value={every}
+                    onChange={(event) =>
+                      setEvery(event.target.value.replace(/\D/g, "").slice(0, 5))
+                    }
+                  />
+                </label>
+              ) : null}
+              <label className="grid gap-1.5 text-sm font-medium">
+                Minimum payout override (KES)
+                <input
+                  className="field"
+                  inputMode="decimal"
+                  placeholder="Company minimum"
+                  value={minimum}
+                  onChange={(event) =>
+                    setMinimum(event.target.value.replace(/[^\d.]/g, "").slice(0, 12))
+                  }
+                />
+              </label>
+              {mode === "scheduled" ? (
+                <div className="grid gap-2 sm:col-span-2">
+                  <p className="text-sm font-medium text-foreground">Payout times</p>
+                  {periods.map((period, index) => (
+                    <div key={index} className="flex items-center gap-2">
+                      <select
+                        className="field flex-1"
+                        value={period.day}
+                        aria-label={`Payout day ${index + 1}`}
+                        onChange={(event) =>
+                          setPeriods((current) =>
+                            current.map((entry, at) =>
+                              at === index ? { ...entry, day: event.target.value } : entry,
+                            ),
+                          )
+                        }
+                      >
+                        {RULE_DAYS.map((day) => (
+                          <option key={day.id} value={day.id}>
+                            {day.label}
+                          </option>
+                        ))}
+                      </select>
+                      <input
+                        type="time"
+                        className="field w-32"
+                        value={period.time}
+                        aria-label={`Payout time ${index + 1}`}
+                        onChange={(event) =>
+                          setPeriods((current) =>
+                            current.map((entry, at) =>
+                              at === index ? { ...entry, time: event.target.value } : entry,
+                            ),
+                          )
+                        }
+                      />
+                      <button
+                        type="button"
+                        className="flex h-10 w-10 shrink-0 items-center justify-center rounded-lg text-muted-foreground transition hover:bg-surface-muted hover:text-destructive"
+                        aria-label={`Remove payout time ${index + 1}`}
+                        onClick={() =>
+                          setPeriods((current) => current.filter((_, at) => at !== index))
+                        }
+                      >
+                        <Trash2 className="h-4 w-4" aria-hidden="true" />
+                      </button>
+                    </div>
+                  ))}
+                  <div>
+                    <SecondaryButton
+                      type="button"
+                      disabled={periods.length >= 24}
+                      onClick={() =>
+                        setPeriods((current) => [...current, { day: "daily", time: "09:00" }])
+                      }
+                    >
+                      <Plus className="h-4 w-4" aria-hidden="true" />
+                      Add a payout time
+                    </SecondaryButton>
+                  </div>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <p className="text-caption leading-5 text-muted-foreground">
+              Pick a client to tune when their pooled money is released — the holding period,
+              payment threshold, schedule, and their own minimum payout.
+            </p>
+          )}
+        </div>
+      )}
+
+      <div className="border-t border-border px-5 py-4">
+        <PrimaryButton type="button" disabled={!canSave} onClick={save}>
+          {busy ? "Saving…" : "Save client rules"}
+        </PrimaryButton>
+      </div>
+    </section>
   );
 }

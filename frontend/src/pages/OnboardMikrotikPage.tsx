@@ -1,16 +1,20 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 import { Link } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { PageHeader } from "@/components/ui/DetailGrid";
 import { FormField } from "@/components/ui/FormField";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
+import { cn } from "@/lib/cn";
+import { DEFAULT_LOCATION, locationSearchSource, resolveLocation, searchLocations, type LocationSuggestion } from "@/lib/places";
 import { buildWinboxScript, backupName } from "@/lib/winboxScript";
 
 type DeviceRecord = {
   id: string;
   name: string;
   site: string;
+  latitude: number | null;
+  longitude: number | null;
   routerosVersion: "" | "7" | "6";
   tunnelIp: string;
   publicKey: string;
@@ -51,6 +55,13 @@ export function OnboardMikrotikPage() {
   usePageMeta("Onboard Mikrotik — ISP CENTRIC", "Name the router, copy one WinBox script, and paste it once.");
   const [name, setName] = useState("");
   const [site, setSite] = useState("");
+  const [siteCoords, setSiteCoords] = useState<{ latitude: number; longitude: number } | null>(null);
+  const [siteSuggestions, setSiteSuggestions] = useState<LocationSuggestion[]>([]);
+  const [siteMenuOpen, setSiteMenuOpen] = useState(false);
+  const [siteSearching, setSiteSearching] = useState(false);
+  const [activeSuggestion, setActiveSuggestion] = useState(-1);
+  const pickedSite = useRef("");
+  const pickSequence = useRef(0);
   const [error, setError] = useState("");
   const [pending, setPending] = useState(false);
   const [device, setDevice] = useState<DeviceRecord | null>(null);
@@ -84,6 +95,72 @@ export function OnboardMikrotikPage() {
     };
   }, [device?.id, finished]);
 
+  useEffect(() => {
+    const query = site.trim();
+    if (query.length < 3 || site === pickedSite.current) {
+      setSiteSuggestions([]);
+      setSiteSearching(false);
+      if (query.length < 3) setSiteMenuOpen(false);
+      return;
+    }
+    const controller = new AbortController();
+    setSiteSearching(true);
+    const timer = window.setTimeout(() => {
+      searchLocations(query, controller.signal)
+        .then((results) => {
+          setSiteSuggestions(results);
+          setSiteMenuOpen(true);
+          setActiveSuggestion(-1);
+        })
+        .catch(() => {
+          if (!controller.signal.aborted) setSiteSuggestions([]);
+        })
+        .finally(() => {
+          if (!controller.signal.aborted) setSiteSearching(false);
+        });
+    }, 350);
+    return () => {
+      window.clearTimeout(timer);
+      controller.abort();
+    };
+  }, [site]);
+
+  async function chooseSiteSuggestion(suggestion: LocationSuggestion) {
+    const stamp = ++pickSequence.current;
+    pickedSite.current = suggestion.label;
+    setSite(suggestion.label.slice(0, 80));
+    setSiteMenuOpen(false);
+    setSiteSuggestions([]);
+    try {
+      const resolved = await resolveLocation(suggestion, new AbortController().signal);
+      if (pickSequence.current !== stamp) return;
+      const label = resolved.label.slice(0, 80);
+      pickedSite.current = label;
+      setSite(label);
+      if (resolved.latitude !== null && resolved.longitude !== null) {
+        setSiteCoords({ latitude: resolved.latitude, longitude: resolved.longitude });
+      }
+    } catch {
+      if (pickSequence.current === stamp) setSiteCoords(null);
+    }
+  }
+
+  function handleSiteKeys(event: KeyboardEvent<HTMLInputElement>) {
+    if (!siteMenuOpen || !siteSuggestions.length) return;
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      setActiveSuggestion((index) => Math.min(siteSuggestions.length - 1, index + 1));
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      setActiveSuggestion((index) => Math.max(-1, index - 1));
+    } else if (event.key === "Enter" && activeSuggestion >= 0) {
+      event.preventDefault();
+      void chooseSiteSuggestion(siteSuggestions[activeSuggestion]);
+    } else if (event.key === "Escape") {
+      setSiteMenuOpen(false);
+    }
+  }
+
   async function createDevice() {
     setError("");
     if (!name.trim() || !site.trim()) {
@@ -98,6 +175,8 @@ export function OnboardMikrotikPage() {
           name,
           site,
           routerosVersion: "",
+          latitude: siteCoords?.latitude ?? DEFAULT_LOCATION.latitude,
+          longitude: siteCoords?.longitude ?? DEFAULT_LOCATION.longitude,
         }),
       });
       setDevice(body.device);
@@ -184,8 +263,68 @@ export function OnboardMikrotikPage() {
               <FormField id="device-name" label="Router name">
                 <input id="device-name" className="field" value={name} maxLength={80} onChange={(event) => setName(event.target.value)} />
               </FormField>
-              <FormField id="device-site" label="Site">
-                <input id="device-site" className="field" value={site} maxLength={80} onChange={(event) => setSite(event.target.value)} />
+              <FormField
+                id="device-site"
+                label="Site"
+                hint={
+                  siteCoords
+                    ? `Coordinates ${siteCoords.latitude.toFixed(5)}, ${siteCoords.longitude.toFixed(5)}`
+                    : `Type to search ${locationSearchSource} for the location. Without a pick, Nairobi, Kenya (${DEFAULT_LOCATION.latitude}, ${DEFAULT_LOCATION.longitude}) is used.`
+                }
+              >
+                <div className="relative">
+                  <input
+                    id="device-site"
+                    className="field"
+                    value={site}
+                    maxLength={80}
+                    autoComplete="off"
+                    role="combobox"
+                    aria-autocomplete="list"
+                    aria-expanded={siteMenuOpen}
+                    aria-controls="device-site-suggestions"
+                    onChange={(event) => {
+                      pickSequence.current += 1;
+                      setSiteCoords(null);
+                      setSite(event.target.value);
+                    }}
+                    onFocus={() => {
+                      if (site.trim().length >= 3 && site !== pickedSite.current) setSiteMenuOpen(true);
+                    }}
+                    onBlur={() => window.setTimeout(() => setSiteMenuOpen(false), 150)}
+                    onKeyDown={handleSiteKeys}
+                  />
+                  {siteMenuOpen && site.trim().length >= 3 ? (
+                    <ul
+                      id="device-site-suggestions"
+                      role="listbox"
+                      className="absolute left-0 right-0 top-full z-10 mt-1 max-h-60 overflow-y-auto rounded-xl border border-border bg-surface shadow-card"
+                    >
+                      {siteSearching && !siteSuggestions.length ? (
+                        <li className="px-4 py-2 text-sm text-muted-foreground">Searching {locationSearchSource}…</li>
+                      ) : null}
+                      {!siteSearching && !siteSuggestions.length ? (
+                        <li className="px-4 py-2 text-sm text-muted-foreground">No matches — Nairobi coordinates are used.</li>
+                      ) : null}
+                      {siteSuggestions.map((suggestion, index) => {
+                        const [main, ...rest] = suggestion.label.split(",");
+                        return (
+                          <li key={suggestion.id} role="option" aria-selected={index === activeSuggestion}>
+                            <button
+                              type="button"
+                              className={cn("block w-full px-4 py-2 text-left text-sm", index === activeSuggestion && "bg-surface-muted")}
+                              onMouseDown={(event) => event.preventDefault()}
+                              onClick={() => void chooseSiteSuggestion(suggestion)}
+                            >
+                              <span className="font-medium text-foreground">{main}</span>
+                              {rest.length ? <span className="text-muted-foreground">,{rest.join(",")}</span> : null}
+                            </button>
+                          </li>
+                        );
+                      })}
+                    </ul>
+                  ) : null}
+                </div>
               </FormField>
               <PrimaryButton type="submit" disabled={pending}>
                 {pending ? "Preparing script…" : "Generate script"}

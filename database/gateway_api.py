@@ -48,6 +48,11 @@ def clients(cursor):
         "clients": rows,
         "directory": gateway_store.client_directory(cursor),
         "maxPayoutPerTx": str(company.get("max_payout_per_tx") or ""),
+        "manualTransfers": {
+            "enabled": bool(company.get("manual_transfers_enabled", 1)),
+            "min": str(company.get("manual_min") or ""),
+            "max": str(company.get("manual_max") or ""),
+        },
     }
 
 
@@ -120,6 +125,9 @@ def settings_view(cursor):
         "minPayout": str(row.get("min_payout") or ""),
         "maxPayoutPerTx": str(row.get("max_payout_per_tx") or ""),
         "payoutFeeEstimate": str(row.get("payout_fee_estimate") or ""),
+        "manualMin": str(row.get("manual_min") or ""),
+        "manualMax": str(row.get("manual_max") or ""),
+        "manualTransfersEnabled": bool(row.get("manual_transfers_enabled", 1)),
     }
 
 
@@ -155,6 +163,8 @@ def save_company_gateway(cursor, payload, actor_id):
         ("minPayout", "min_payout"),
         ("maxPayoutPerTx", "max_payout_per_tx"),
         ("payoutFeeEstimate", "payout_fee_estimate"),
+        ("manualMin", "manual_min"),
+        ("manualMax", "manual_max"),
     ):
         if key not in payload:
             continue
@@ -174,6 +184,8 @@ def save_company_gateway(cursor, payload, actor_id):
         if not 0 <= hours <= 720:
             return None, "defaultHoldHours must be between 0 and 720."
         updates["default_hold_hours"] = hours
+    if "manualTransfersEnabled" in payload:
+        updates["manual_transfers_enabled"] = 1 if payload["manualTransfersEnabled"] else 0
     result, error = gateway_store.save_company_gateway(cursor, updates, actor_id)
     if error:
         return None, error
@@ -272,6 +284,49 @@ def manual_transfer(cursor, payload, actor_id):
     reason = str(payload.get("reason") or "")[:160]
     return gateway_settle.manual_transfer(
         cursor, payload.get("clientId"), amount, reason, actor_id)
+
+
+def client_restrictions(cursor):
+    """Pooled clients and the settlement rules the director may tune —
+    everything that gates their payouts except the destination, which stays
+    owner-only."""
+    return {"clients": [
+        {
+            "clientId": row["client_id"],
+            "name": row.get("name"),
+            "balance": row.get("balance"),
+            "settlementMode": row.get("settlement_mode"),
+            "holdHours": row.get("hold_hours"),
+            "settleEveryNTx": row.get("settle_every_n_tx"),
+            "settleSchedule": gateway_store._parse_schedule(row.get("settle_schedule")),
+            "minPayoutOverride": (
+                None if row.get("min_payout_override") is None
+                else str(row["min_payout_override"])),
+        }
+        for row in gateway_store.client_custody(cursor)
+    ]}
+
+
+def save_client_restrictions(cursor, payload, actor_id):
+    """Director edit of a pooled client's settlement rules — the same fields
+    the owner controls in payment settings. The destination is never touched
+    here; it has its own cooling-off and stays owner-only."""
+    client_id = str(payload.get("clientId") or "").strip()
+    if not client_id:
+        return None, "clientId is required."
+    cursor.execute(
+        "SELECT gateway_mode FROM isp_payout_settings WHERE client_id = %s",
+        (client_id,),
+    )
+    row = cursor.fetchone()
+    if not row or row.get("gateway_mode") != "company_gateway":
+        return None, "That client is not pooled on the company gateway."
+    fields, error = _settlement_fields(payload)
+    if error:
+        return None, error
+    outcome = gateway_store.save_payout_settings(
+        cursor, client_id, fields, actor_id, actor_kind="employee")
+    return {"outcome": outcome, **client_restrictions(cursor)}, None
 
 
 def assign_suspense(cursor, payment_id, payload, actor_id):
@@ -447,11 +502,10 @@ def clean_settle_schedule(value):
     return json.dumps(cleaned), None
 
 
-def save_isp_settings(cursor, client_id, payload, actor_id):
-    """Owner-only settings write — validated here, staged in the store."""
+def _settlement_fields(payload):
+    """Validated settlement timing/limit fields for one client — shared by
+    the owner's settings write and the director's pooled-client edit."""
     fields = {}
-    if "gatewayMode" in payload:
-        fields["gateway_mode"] = str(payload["gatewayMode"])
     if "settlementMode" in payload:
         fields["settlement_mode"] = str(payload["settlementMode"])
     if "holdHours" in payload and payload["holdHours"] not in (None, ""):
@@ -491,6 +545,16 @@ def save_isp_settings(cursor, client_id, payload, actor_id):
                 return None, "minPayoutOverride must be a number."
             if fields["min_payout_override"] < 0:
                 return None, "minPayoutOverride cannot be negative."
+    return fields, None
+
+
+def save_isp_settings(cursor, client_id, payload, actor_id):
+    """Owner-only settings write — validated here, staged in the store."""
+    fields, error = _settlement_fields(payload)
+    if error:
+        return None, error
+    if "gatewayMode" in payload:
+        fields["gateway_mode"] = str(payload["gatewayMode"])
     if "destination" in payload:
         destination = payload["destination"] or {}
         fields["destination_type"] = destination.get("type")

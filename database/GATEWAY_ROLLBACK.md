@@ -52,6 +52,10 @@ ALTER TABLE company_daraja_settings DROP COLUMN last_known_balance;
 ALTER TABLE company_daraja_settings DROP COLUMN last_balance_at;
 ALTER TABLE company_daraja_settings DROP COLUMN txn_fees_enabled;
 ALTER TABLE company_daraja_settings DROP COLUMN public_base;
+ALTER TABLE company_daraja_settings DROP COLUMN certificate;
+ALTER TABLE company_daraja_settings DROP COLUMN manual_min;
+ALTER TABLE company_daraja_settings DROP COLUMN manual_max;
+ALTER TABLE company_daraja_settings DROP COLUMN manual_transfers_enabled;
 ```
 
 Re-apply by restarting `api.py` (or calling `gateway_store.ensure_schema`

@@ -9,16 +9,19 @@ import { LiveClock } from "@/components/ui/LiveClock";
 import { LiveLoad } from "@/components/ui/LiveLoad";
 import { ThemeToggle } from "@/components/ui/ThemeToggle";
 import { clientPage } from "@/lib/accounts";
+import { apiRequest } from "@/lib/api";
 import { employeeHomePath, readEmployeeSession, type PublicEmployee } from "@/lib/employees";
 import { useAuth } from "@/providers/AuthProvider";
 import { useEmployeeAuth } from "@/providers/EmployeeAuthProvider";
 
 const CODE_SEGMENT = /^\/[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}(?=\/|$)/;
+const STAFF_ROLE_SEGMENT = /^\/isp-(?:technician|customercare|manager)(?=\/|$)/;
 
 const sectionLinks = [
   { label: "Mikrotiks", to: "/mikrotiks" },
   { label: "Clients", to: "/clients" },
   { label: "Billings", to: "/billings" },
+  { label: "HR", to: "/hr" },
 ];
 
 const mikrotikLinks = [
@@ -53,11 +56,48 @@ const communicationsLinks = [
   { label: "Notifications", to: "/account/settings/isp-notifications/settings" },
 ];
 
+const hrLinks = [
+  { label: "Employees", to: "/hr" },
+  { label: "Pending approvals", to: "/hr/pending" },
+  { label: "Add employee", to: "/hr?add=1" },
+];
+
+const technicianLinks = [
+  { label: "Tickets", to: "/tickets" },
+  { label: "New client onboarding", to: "/onboard" },
+  { label: "Materials", to: "/materials" },
+  { label: "My account", to: "/account" },
+];
+
+const onboardLinks = [{ label: "Onboard client", to: "/onboard?add=1" }];
+
+const ticketLinks = [
+  { label: "New tickets", to: "/tickets?tab=new", status: "new" },
+  { label: "Onboarding", to: "/tickets?tab=onboarding", status: "onboarding" },
+  { label: "Pending activation", to: "/tickets?tab=pending", status: "pending_activation" },
+  { label: "Completed", to: "/tickets?tab=completed", status: "" },
+  { label: "Faulty tickets", to: "/faulty", status: "" },
+];
+
+const customercareLinks = [
+  { label: "Tickets", to: "/tickets" },
+  { label: "Clients", to: "/clients" },
+];
+
+
+const customerClientLinks = [
+  { label: "PPPoE clients", to: "/clients" },
+  { label: "Hotspot clients", to: "/clients/hotspot" },
+];
+
+const createTicketLinks = [{ label: "Create ticket", to: "/tickets?add=1" }];
+
 function pagePath(pathname: string, code: string | null | undefined) {
-  if (!code) return pathname;
+  const stripped = pathname.replace(STAFF_ROLE_SEGMENT, "");
+  if (!code) return stripped;
   const base = `/${code}`;
-  if (pathname === base || pathname.startsWith(`${base}/`)) return pathname.slice(base.length) || "/";
-  return pathname;
+  if (stripped === base || stripped.startsWith(`${base}/`)) return stripped.slice(base.length) || "/";
+  return stripped;
 }
 
 function linksForPage(pathname: string, advertsEnabled: boolean) {
@@ -118,6 +158,9 @@ function linksForPage(pathname: string, advertsEnabled: boolean) {
       { label: "PPPoE-clients", to: "/clients" },
     ];
   }
+  if (pathname === "/hr" || pathname === "/hr/pending" || pathname.endsWith("/hr") || pathname.endsWith("/hr/pending")) {
+    return hrLinks;
+  }
   if (pathname === "/billings" || pathname.endsWith("/billings") || pathname.endsWith("/billings/gateway")) {
     return [
       { label: "Transactions", to: "/billings" },
@@ -170,13 +213,51 @@ export function ClientLayout() {
       })
       .finally(() => setResumingStaff(false));
   }, [resume, navigate]);
-  const clientSidebar = linksForPage(
-    pagePath(location.pathname, user?.dashboardCode),
-    Boolean(user?.advertsEnabled),
-  ).map((item) => ({
-    ...item,
-    to: user ? clientPage(user, item.to) : item.to,
-  }));
+  const staffRole = user?.delegate?.kind === "isp-employee" ? user.delegate.role ?? null : null;
+  const isStaff = staffRole !== null;
+  const [ticketCounts, setTicketCounts] = useState<Record<string, number>>({});
+  useEffect(() => {
+    if (staffRole !== "isp-technician" && staffRole !== "isp-customercare") return;
+    apiRequest<{ onboardings: { status: string }[] }>("/api/client/onboardings")
+      .then((body) => {
+        const counts: Record<string, number> = {};
+        for (const row of body.onboardings) counts[row.status] = (counts[row.status] ?? 0) + 1;
+        setTicketCounts(counts);
+      })
+      .catch(() => {});
+  }, [staffRole]);
+  const page = pagePath(location.pathname, user?.dashboardCode);
+  const clientSidebar =
+    staffRole === "isp-technician"
+      ? (page === "/dashboard"
+          ? technicianLinks
+          : page === "/onboard"
+            ? onboardLinks
+            : page === "/tickets"
+              ? ticketLinks.map((item) => ({
+                    ...item,
+                    label: item.status ? `${item.label} (${ticketCounts[item.status] ?? 0})` : item.label,
+                  }))
+              : []
+        ).map((item) => ({
+          ...item,
+          to: user ? clientPage(user, item.to) : item.to,
+        }))
+      : staffRole === "isp-customercare"
+        ? (page === "/dashboard"
+            ? customercareLinks
+            : page === "/tickets"
+              ? createTicketLinks
+              : page.startsWith("/clients")
+                ? customerClientLinks
+                : []
+          ).map((item) => ({ ...item, to: user ? clientPage(user, item.to) : item.to }))
+        : isStaff
+        ? []
+        : linksForPage(page, Boolean(user?.advertsEnabled)).map((item) => ({
+            ...item,
+            to: user ? clientPage(user, item.to) : item.to,
+          }));
   const clientLabel = user?.clientCode ?? (user ? `${user.firstName} ${user.lastName}` : "ISP client");
 
   if (!ready || !employeeReady) {
@@ -192,10 +273,12 @@ export function ClientLayout() {
   }
 
   if (user.dashboardCode) {
-    const base = `/${user.dashboardCode}`;
+    const rolePrefix =
+      user.delegate?.kind === "isp-employee" && user.delegate.role ? `/${user.delegate.role}` : "";
+    const base = `${rolePrefix}/${user.dashboardCode}`;
     if (location.pathname !== base && !location.pathname.startsWith(`${base}/`)) {
       const legacy = /^\/dashboard\/[^/]+$/.test(location.pathname);
-      const stripped = CODE_SEGMENT.test(location.pathname) ? location.pathname.replace(CODE_SEGMENT, "") : location.pathname;
+      const stripped = location.pathname.replace(STAFF_ROLE_SEGMENT, "").replace(CODE_SEGMENT, "");
       const rest = legacy ? "/dashboard" : stripped || "/dashboard";
       return <Navigate to={`${base}${rest}`} replace />;
     }
@@ -219,22 +302,23 @@ export function ClientLayout() {
       ) : null}
       <AppSidebar
         label={clientLabel}
-        homeTo={clientPage(user, "/account")}
+        homeTo={isStaff ? clientPage(user, "/dashboard") : clientPage(user, "/account")}
         items={clientSidebar}
         open={sidebarOpen}
         onClose={closeSidebar}
         dashboardTo={clientPage(user, "/dashboard")}
-        settingsTo={clientPage(user, "/account/settings")}
-        notifyTo={clientPage(user, "/account/settings/isp-notifications")}
+        settingsTo={isStaff ? undefined : clientPage(user, "/account/settings")}
+        notifyTo={isStaff ? undefined : clientPage(user, "/account/settings/isp-notifications")}
         signOutTo="/login"
         onSignOut={logout}
         profile={
           user
             ? {
-                name: `${user.firstName} ${user.lastName}`,
-                phone: user.phone,
-                detail: user.email,
+                name: user.delegate?.name || `${user.firstName} ${user.lastName}`,
+                phone: user.delegate ? undefined : user.phone,
+                detail: user.delegate ? user.delegate.title : user.email,
                 accountNumber: user.clientCode ?? undefined,
+                role: user.delegate?.title,
                 photoUrl: user.photoDataUrl,
               }
             : null
@@ -257,6 +341,17 @@ export function ClientLayout() {
             </Link>
             <LiveClock />
             <div className="ml-auto flex items-center gap-2 border-l border-border pl-3 max-sm:border-l-0 max-sm:pl-0">
+              {user.delegate ? (
+                <span
+                  className="inline-flex items-center gap-1.5 rounded-full border border-accent/40 bg-accent/10 px-2.5 py-1.5 text-[0.65rem] font-semibold uppercase tracking-[0.12em] text-accent"
+                  title={`${user.delegate.title} — owner-only settings stay locked`}
+                >
+                  <UserRound className="h-3.5 w-3.5" aria-hidden="true" />
+                  <span className="hidden sm:inline">
+                    {user.delegate.name ? `${user.delegate.name} · staff` : "Staff view"}
+                  </span>
+                </span>
+              ) : null}
               {staffSession ? (
                 <button
                   type="button"
@@ -277,13 +372,14 @@ export function ClientLayout() {
               <ThemeToggle />
               {user ? (
                 <SessionMenu
-                  name={`${user.firstName} ${user.lastName}`}
-                  phone={user.phone}
-                  detail={user.email}
+                  name={user.delegate?.name || `${user.firstName} ${user.lastName}`}
+                  phone={user.delegate ? undefined : user.phone}
+                  detail={user.delegate ? user.delegate.title : user.email}
                   accountNumber={user.clientCode ?? undefined}
+                  role={user.delegate?.title}
                   photoUrl={user.photoDataUrl}
                   dashboardTo={clientPage(user, "/dashboard")}
-                  profileTo={clientPage(user, "/account")}
+                  profileTo={isStaff ? undefined : clientPage(user, "/account")}
                   signOutTo="/login"
                   onSignOut={logout}
                 />

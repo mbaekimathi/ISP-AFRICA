@@ -1,4 +1,5 @@
 import {
+  Activity,
   ArrowLeft,
   Banknote,
   BarChart3,
@@ -45,6 +46,7 @@ const ITEM_ICONS: Record<string, { icon: LucideIcon; chip: string }> = {
   Clients: { icon: Users, chip: "bg-emerald-500/15 text-emerald-400" },
   "Import Clients": { icon: Import, chip: "bg-emerald-500/15 text-emerald-400" },
   "ISP clients": { icon: Users, chip: "bg-emerald-500/15 text-emerald-400" },
+  Analytics: { icon: Activity, chip: "bg-violet-500/15 text-violet-400" },
   Billings: { icon: Receipt, chip: "bg-amber-500/15 text-amber-400" },
   "Gateway billings": { icon: CreditCard, chip: "bg-amber-500/15 text-amber-400" },
   "Gateway controls": { icon: SlidersHorizontal, chip: "bg-amber-500/15 text-amber-400" },
@@ -70,6 +72,19 @@ const ITEM_ICONS: Record<string, { icon: LucideIcon; chip: string }> = {
   "Hotspot-clients": { icon: Wifi, chip: "bg-sky-500/15 text-sky-400" },
   "Hotspot-payment": { icon: Banknote, chip: "bg-green-500/15 text-green-400" },
   "Hotspot-usage": { icon: BarChart3, chip: "bg-violet-500/15 text-violet-400" },
+  Tickets: { icon: LifeBuoy, chip: "bg-amber-500/15 text-amber-400" },
+  "New client onboarding": { icon: CirclePlus, chip: "bg-emerald-500/15 text-emerald-400" },
+  "Onboard client": { icon: CirclePlus, chip: "bg-emerald-500/15 text-emerald-400" },
+  "New tickets": { icon: LifeBuoy, chip: "bg-amber-500/15 text-amber-400" },
+  Onboarding: { icon: CirclePlus, chip: "bg-emerald-500/15 text-emerald-400" },
+  "Pending activation": { icon: Package, chip: "bg-cyan-500/15 text-cyan-400" },
+  Completed: { icon: UserRound, chip: "bg-indigo-500/15 text-indigo-400" },
+  "Faulty tickets": { icon: LifeBuoy, chip: "bg-rose-500/15 text-rose-400" },
+  "Create ticket": { icon: CirclePlus, chip: "bg-emerald-500/15 text-emerald-400" },
+  "PPPoE clients": { icon: Wifi, chip: "bg-cyan-500/15 text-cyan-400" },
+  "Hotspot clients": { icon: Wifi, chip: "bg-violet-500/15 text-violet-400" },
+  Materials: { icon: Package, chip: "bg-cyan-500/15 text-cyan-400" },
+  "My account": { icon: UserRound, chip: "bg-indigo-500/15 text-indigo-400" },
 };
 
 const FALLBACK_ICON = { icon: LayoutDashboard, chip: "bg-sidebar-active text-sidebar-accent" };
@@ -90,7 +105,7 @@ type AppSidebarProps = {
   open: boolean;
   onClose: () => void;
   dashboardTo: string;
-  settingsTo: string;
+  settingsTo?: string;
   settingsLabel?: string;
   notifyTo?: string;
   notifyLabel?: string;
@@ -252,16 +267,18 @@ export function AppSidebar({
             </div>
           </div>
         ) : null}
-        <Link
-          to={settingsTo}
-          aria-current={isCurrent(settingsTo, location.pathname, location.hash) ? "page" : undefined}
-          title={settingsLabel}
-          className={linkClass(isCurrent(settingsTo, location.pathname, location.hash))}
-          onClick={onClose}
-        >
-          <LinkIcon icon={Settings} chip="bg-violet-500/15 text-violet-400" />
-          <span className="truncate">{settingsLabel}</span>
-        </Link>
+        {settingsTo ? (
+          <Link
+            to={settingsTo}
+            aria-current={isCurrent(settingsTo, location.pathname, location.hash) ? "page" : undefined}
+            title={settingsLabel}
+            className={linkClass(isCurrent(settingsTo, location.pathname, location.hash))}
+            onClick={onClose}
+          >
+            <LinkIcon icon={Settings} chip="bg-violet-500/15 text-violet-400" />
+            <span className="truncate">{settingsLabel}</span>
+          </Link>
+        ) : null}
         {notifyTo ? (
           <Link
             to={notifyTo}

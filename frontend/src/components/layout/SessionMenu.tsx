@@ -6,7 +6,7 @@ type SessionMenuProps = {
   detail: string;
   photoUrl: string;
   dashboardTo: string;
-  profileTo: string;
+  profileTo?: string;
   signOutTo: string;
   phone?: string;
   accountNumber?: string;
@@ -86,14 +86,16 @@ export function SessionMenu({ name, detail, photoUrl, dashboardTo, profileTo, si
           >
             Dashboard
           </Link>
-          <Link
-            role="menuitem"
-            to={profileTo}
-            className="flex min-h-11 items-center rounded-lg px-3 text-sm font-medium text-muted-foreground transition duration-fast ease-out hover:bg-surface-muted hover:text-foreground"
-            onClick={() => setOpen(false)}
-          >
-            Profile
-          </Link>
+          {profileTo ? (
+            <Link
+              role="menuitem"
+              to={profileTo}
+              className="flex min-h-11 items-center rounded-lg px-3 text-sm font-medium text-muted-foreground transition duration-fast ease-out hover:bg-surface-muted hover:text-foreground"
+              onClick={() => setOpen(false)}
+            >
+              Profile
+            </Link>
+          ) : null}
           <button
             type="button"
             role="menuitem"

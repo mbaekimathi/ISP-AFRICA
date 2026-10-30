@@ -63,6 +63,12 @@ ROLES = {
     "dispatcher",
     "sales",
 }
+CLIENT_STAFF_ROLES = {"isp-technician", "isp-customercare", "isp-manager"}
+CLIENT_STAFF_ROLE_LABELS = {
+    "isp-technician": "ISP Technician",
+    "isp-customercare": "ISP Customer Care",
+    "isp-manager": "ISP Manager",
+}
 LOCKS = {}
 RATE_HITS = {}
 RATE_LOCK = threading.Lock()
@@ -1470,6 +1476,8 @@ def ensure_schema():
                 ("hotspot_block_sharing", "hotspot_block_sharing TINYINT NOT NULL DEFAULT 0"),
                 ("wg_private", "wg_private VARCHAR(512) NULL"),
                 ("port_plan", "port_plan TEXT NULL"),
+                ("latitude", "latitude DECIMAL(10,7) NULL"),
+                ("longitude", "longitude DECIMAL(10,7) NULL"),
             ):
                 cursor.execute("SHOW COLUMNS FROM isp_mikrotik_devices LIKE %s", (column,))
                 if cursor.fetchone() is None:
@@ -2046,6 +2054,86 @@ def ensure_schema():
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_client_employees (
+                  id CHAR(36) NOT NULL PRIMARY KEY,
+                  client_id CHAR(36) NOT NULL,
+                  first_name VARCHAR(60) NOT NULL,
+                  last_name VARCHAR(60) NOT NULL,
+                  title VARCHAR(60) NOT NULL DEFAULT '',
+                  email VARCHAR(120) NOT NULL DEFAULT '',
+                  phone VARCHAR(20) NOT NULL DEFAULT '',
+                  login_code CHAR(6) NOT NULL,
+                  password_salt CHAR(32) NOT NULL,
+                  password_hash VARCHAR(128) NOT NULL,
+                  photo_data_url MEDIUMTEXT NULL,
+                  status ENUM('pending', 'active', 'suspended') NOT NULL DEFAULT 'pending',
+                  role ENUM('isp-technician', 'isp-customercare', 'isp-manager') NULL,
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  UNIQUE KEY uq_isp_employee_login (login_code),
+                  UNIQUE KEY uq_isp_employee_name (client_id, first_name, last_name),
+                  KEY idx_isp_employee_client (client_id)
+                )
+                """
+            )
+            for column, definition in (
+                ("email", "email VARCHAR(120) NOT NULL DEFAULT ''"),
+                ("phone", "phone VARCHAR(20) NOT NULL DEFAULT ''"),
+                ("photo_data_url", "photo_data_url MEDIUMTEXT NULL"),
+                ("role", "role ENUM('isp-technician', 'isp-customercare', 'isp-manager') NULL"),
+            ):
+                cursor.execute("SHOW COLUMNS FROM isp_client_employees LIKE %s", (column,))
+                if cursor.fetchone() is None:
+                    cursor.execute(f"ALTER TABLE isp_client_employees ADD COLUMN {definition}")
+            cursor.execute(
+                """
+                ALTER TABLE isp_client_employees
+                MODIFY status ENUM('pending', 'active', 'suspended') NOT NULL DEFAULT 'pending'
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_onboardings (
+                  id CHAR(36) NOT NULL PRIMARY KEY,
+                  client_id CHAR(36) NOT NULL,
+                  staff_id CHAR(36) NOT NULL,
+                  first_name VARCHAR(60) NOT NULL,
+                  last_name VARCHAR(60) NOT NULL,
+                  phone VARCHAR(20) NOT NULL,
+                  email VARCHAR(120) NOT NULL DEFAULT '',
+                  building_name VARCHAR(120) NOT NULL DEFAULT '',
+                  house_number VARCHAR(40) NOT NULL DEFAULT '',
+                  package_name VARCHAR(120) NOT NULL DEFAULT '',
+                  status ENUM('pending_activation', 'activated', 'cancelled') NOT NULL DEFAULT 'pending_activation',
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  KEY idx_onboard_client (client_id, status),
+                  KEY idx_onboard_staff (staff_id)
+                )
+                """
+            )
+            for column, definition in (
+                ("router_id", "router_id CHAR(36) NULL"),
+                ("package_id", "package_id CHAR(36) NULL"),
+                ("serial", "serial VARCHAR(64) NOT NULL DEFAULT ''"),
+                ("pppoe_username", "pppoe_username VARCHAR(64) NOT NULL DEFAULT ''"),
+                ("pppoe_password", "pppoe_password VARCHAR(64) NOT NULL DEFAULT ''"),
+                ("assigned_to", "assigned_to CHAR(36) NULL"),
+                ("kind", "kind ENUM('onboarding','fault') NOT NULL DEFAULT 'onboarding'"),
+                ("fault_client", "fault_client VARCHAR(120) NOT NULL DEFAULT ''"),
+                ("fault_client_id", "fault_client_id CHAR(36) NULL"),
+                ("fault_details", "fault_details TEXT NULL"),
+                ("return_reason", "return_reason TEXT NULL"),
+            ):
+                cursor.execute("SHOW COLUMNS FROM isp_onboardings LIKE %s", (column,))
+                if cursor.fetchone() is None:
+                    cursor.execute(f"ALTER TABLE isp_onboardings ADD COLUMN {definition}")
+            cursor.execute(
+                """
+                ALTER TABLE isp_onboardings
+                MODIFY status ENUM('new','onboarding','pending_activation','completed','cancelled') NOT NULL DEFAULT 'new'
+                """
+            )
             router_jobs.ensure_tables(cursor)
             pppoe_store.ensure_schema(cursor)
             gateway_store.ensure_schema(cursor)
@@ -2154,6 +2242,26 @@ def next_tunnel_ip(cursor):
     raise ApiError(409, "No free tunnel addresses are left in 10.88.0.0/24.")
 
 
+# Sites whose location was not picked from a map result land on Nairobi.
+DEFAULT_SITE_LATITUDE = -1.2921
+DEFAULT_SITE_LONGITUDE = 36.8219
+
+
+def site_coordinates(payload):
+    raw_latitude = payload.get("latitude")
+    raw_longitude = payload.get("longitude")
+    if raw_latitude in (None, "") and raw_longitude in (None, ""):
+        return DEFAULT_SITE_LATITUDE, DEFAULT_SITE_LONGITUDE
+    try:
+        latitude = float(raw_latitude)
+        longitude = float(raw_longitude)
+    except (TypeError, ValueError):
+        raise ApiError(400, "Enter a valid site location.")
+    if not -90 <= latitude <= 90 or not -180 <= longitude <= 180:
+        raise ApiError(400, "Enter a valid site location.")
+    return latitude, longitude
+
+
 def assert_login_allowed(portal, code):
     entry = LOCKS.get((portal, code))
     if entry and entry["until"] > time.time():
@@ -2230,6 +2338,57 @@ def public_employee(row):
         "employeeCode": row["employee_code"],
         "dashboardCode": display_account_code(row["employee_code"]),
         "role": row["role"],
+    }
+
+
+def public_client_employee(row):
+    return {
+        "id": row["id"],
+        "firstName": row["first_name"],
+        "lastName": row["last_name"],
+        "title": row["title"] or "",
+        "email": row["email"],
+        "phone": row["phone"],
+        "loginCode": row["login_code"],
+        "photoDataUrl": row.get("photo_data_url") or "",
+        "status": row["status"],
+        "role": row["role"],
+        "createdAt": stamp(row["created_at"]),
+    }
+
+
+def clean_staff(payload):
+    first = str(payload.get("firstName", "")).strip()
+    last = str(payload.get("lastName", "")).strip()
+    title = str(payload.get("title", "")).strip()
+    email = str(payload.get("email", "")).strip()
+    phone = str(payload.get("phone", "")).strip()
+    login_code = str(payload.get("loginCode", "")).strip()
+    password = str(payload.get("password", "")).strip()
+    photo = str(payload.get("photoDataUrl", ""))
+    if not first or not last or len(first) > 60 or len(last) > 60:
+        raise ApiError(400, "Enter the employee's first and last name.")
+    if len(title) > 60:
+        raise ApiError(400, "Keep the job title under 60 characters.")
+    if not email or len(email) > 120 or "@" not in email:
+        raise ApiError(400, "Enter a valid email address.")
+    phone_digits = digits(phone)
+    if len(phone_digits) < 10 or len(phone_digits) > 15:
+        raise ApiError(400, "Enter a phone number with 10 to 15 digits.")
+    if len(login_code) != 6 or not login_code.isdigit() or len(password) != 6 or not password.isdigit():
+        raise ApiError(400, "The login code and password must each be 6 digits.")
+    if photo and (not photo.startswith("data:image/jpeg") or len(photo) > 200_000):
+        raise ApiError(400, "The profile photo could not be accepted.")
+    return {
+        "first": first,
+        "last": last,
+        "title": title,
+        "email": email,
+        "phone": phone,
+        "phone_digits": phone_digits,
+        "login_code": login_code,
+        "password": password,
+        "photo": photo,
     }
 
 
@@ -2326,8 +2485,77 @@ def assert_unique(cursor, kind, fields, exclude_id=None):
         raise ApiError(409, f"That phone number is already used by an {label} account.")
     if unique_taken(cursor, table, "login_code", fields["login_code"], exclude_id) or unique_taken(
         cursor, other_table(kind), "login_code", fields["login_code"], None
-    ):
+    ) or unique_taken(cursor, "isp_client_employees", "login_code", fields["login_code"], None):
         raise ApiError(409, "Those sign-in details are not available.")
+
+
+def clean_staff_update(payload, existing):
+    data = {
+        "firstName": payload.get("firstName", ""),
+        "lastName": payload.get("lastName", ""),
+        "title": existing["title"] or "",
+        "email": payload.get("email", ""),
+        "phone": payload.get("phone", ""),
+        "loginCode": str(payload.get("loginCode", "")).strip() or existing["login_code"],
+        "password": str(payload.get("password", "")).strip() or "000000",
+        "photoDataUrl": str(payload.get("photoDataUrl", "")) or existing["photo_data_url"] or "",
+    }
+    return clean_staff(data)
+
+
+def public_onboarding(row):
+    return {
+        "id": row["id"],
+        "firstName": row["first_name"],
+        "lastName": row["last_name"],
+        "phone": row["phone"],
+        "email": row["email"],
+        "buildingName": row["building_name"],
+        "houseNumber": row["house_number"],
+        "routerId": row["router_id"],
+        "packageId": row["package_id"],
+        "packageName": row["package_name"],
+        "serial": row["serial"],
+        "pppoeUsername": row["pppoe_username"],
+        "pppoePassword": row["pppoe_password"],
+        "status": row["status"],
+        "createdAt": str(row["created_at"]),
+        "onboardedBy": row["staff_id"],
+        "assignedTo": row["assigned_to"],
+        "kind": row["kind"],
+        "faultClient": row["fault_client"],
+        "faultDetails": row["fault_details"] or "",
+        "returnReason": row["return_reason"] or "",
+    }
+
+
+def assert_staff_unique(cursor, client_id, fields, exclude_id=None):
+    extra = " AND id <> %s" if exclude_id else ""
+    tail = (exclude_id,) if exclude_id else ()
+    cursor.execute(
+        f"SELECT id FROM isp_client_employees WHERE client_id = %s AND first_name = %s AND last_name = %s{extra}",
+        (client_id, fields["first"], fields["last"]) + tail,
+    )
+    if cursor.fetchone():
+        raise ApiError(409, "That name is already used by another employee on this account.")
+    cursor.execute(
+        f"SELECT id FROM isp_client_employees WHERE client_id = %s AND email = %s{extra}",
+        (client_id, fields["email"]) + tail,
+    )
+    if cursor.fetchone():
+        raise ApiError(409, "That email is already used by another employee on this account.")
+    cursor.execute(
+        f"SELECT id FROM isp_client_employees WHERE client_id = %s AND phone REGEXP %s{extra}",
+        (client_id, phone_pattern(fields["phone_digits"])) + tail,
+    )
+    if cursor.fetchone():
+        raise ApiError(409, "That phone number is already used by another employee on this account.")
+    if (
+        unique_taken(cursor, "isp_client_employees", "login_code", fields["login_code"], exclude_id)
+        or unique_taken(cursor, "isp_clients", "login_code", fields["login_code"], None)
+        or unique_taken(cursor, "isp_employees", "login_code", fields["login_code"], None)
+    ):
+        raise ApiError(409, "That login code is already in use by another sign-in.")
 
 
 def session_account_id(cursor, token, kind):
@@ -2949,6 +3177,29 @@ class Handler(BaseHTTPRequestHandler):
             return {"employee": self.register(cursor, "employee", payload)}, None
         if method == "POST" and path == "/api/client/profile":
             return self.update_profile(cursor, "client", payload, token.get("isp_client_session"))
+        if method == "GET" and path == "/api/client/staff":
+            return self.list_client_staff(cursor, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/client/staff":
+            return {"staff": self.create_client_staff(cursor, payload, token.get("isp_client_session"))}, None
+        if method == "POST" and path.startswith("/api/client/staff/"):
+            leaf = path.removeprefix("/api/client/staff/").strip("/")
+            return self.change_client_staff(cursor, leaf, payload, token.get("isp_client_session")), None
+        if method == "GET" and path == "/api/client/onboardings":
+            return self.list_onboardings(cursor, token.get("isp_client_session")), None
+        if method == "GET" and path == "/api/client/technicians":
+            session = self.onboarding_session(cursor, token.get("isp_client_session"))
+            cursor.execute(
+                "SELECT id, first_name, last_name, role FROM isp_client_employees WHERE client_id = %s AND status = 'active' ORDER BY first_name, last_name",
+                (session["account_id"],),
+            )
+            return {"technicians": [{"id": r["id"], "name": f"{r['first_name']} {r['last_name']}".strip(), "role": r["role"]} for r in cursor.fetchall()]}, None
+        if method == "POST" and path == "/api/client/onboardings":
+            return self.create_onboarding(cursor, payload, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/client/onboardings/new":
+            return self.create_onboarding_ticket(cursor, payload, token.get("isp_client_session")), None
+        if method == "POST" and path.startswith("/api/client/onboardings/"):
+            leaf = path.removeprefix("/api/client/onboardings/").strip("/")
+            return self.change_onboarding(cursor, leaf, payload, token.get("isp_client_session")), None
         if method == "POST" and path == "/api/employee/profile":
             return self.update_profile(cursor, "employee", payload, token.get("isp_employee_session"))
         if method == "GET" and path == "/api/employee/company/packages":
@@ -3198,14 +3449,38 @@ class Handler(BaseHTTPRequestHandler):
         table = "isp_clients" if kind == "client" else "isp_employees"
         cursor.execute(f"SELECT * FROM {table} WHERE login_code = %s", (code,))
         account = cursor.fetchone()
-        salt = account["password_salt"] if account else "00" * 16
-        stored = account["password_hash"] if account else f"pbkdf2${ITERATIONS}${'00' * 32}"
+        staff = None
+        if kind == "client" and not account:
+            cursor.execute("SELECT * FROM isp_client_employees WHERE login_code = %s", (code,))
+            staff = cursor.fetchone()
+        subject = account or staff
+        salt = subject["password_salt"] if subject else "00" * 16
+        stored = subject["password_hash"] if subject else f"pbkdf2${ITERATIONS}${'00' * 32}"
         valid = verify_password(password, salt, stored)
-        if not account or not valid:
+        if not subject or not valid:
             record_failure(kind, code)
             raise ApiError(401, "The login code or password is incorrect.")
+        if staff and staff["status"] == "pending":
+            raise ApiError(403, "That staff sign-in is still waiting for the account owner's approval.")
+        if staff and staff["status"] != "active":
+            raise ApiError(403, "That staff sign-in is suspended. Ask the account owner to reactivate it.")
         clear_failure(kind, code)
         session = secrets.token_hex(32)
+        if staff:
+            cursor.execute(
+                "INSERT INTO isp_sessions (token, account_kind, account_id, opened_by) VALUES (%s, 'client', %s, %s)",
+                (session, staff["client_id"], staff["id"]),
+            )
+            cursor.execute("SELECT * FROM isp_clients WHERE id = %s", (staff["client_id"],))
+            account = cursor.fetchone()
+            public = public_client(account)
+            public["delegate"] = {
+                "kind": "isp-employee",
+                "name": f"{staff['first_name']} {staff['last_name']}",
+                "title": CLIENT_STAFF_ROLE_LABELS.get(staff["role"]) or staff["title"] or "ISP employee",
+                "role": staff["role"],
+            }
+            return {"account": public}, ("isp_client_session", session, SESSION_SECONDS)
         cursor.execute(
             "INSERT INTO isp_sessions (token, account_kind, account_id) VALUES (%s, %s, %s)",
             (session, kind, account["id"]),
@@ -3272,6 +3547,8 @@ class Handler(BaseHTTPRequestHandler):
         if not account_id:
             raise ApiError(401, "Sign in before editing the profile.")
         table = "isp_clients" if kind == "client" else "isp_employees"
+        if kind == "client" and session_opened_by(cursor, token):
+            raise ApiError(403, "Only the account owner can change the profile.")
         cursor.execute(f"SELECT * FROM {table} WHERE id = %s", (account_id,))
         existing = cursor.fetchone()
         if not existing:
@@ -3364,13 +3641,47 @@ class Handler(BaseHTTPRequestHandler):
         cursor.execute("SELECT * FROM isp_employees WHERE id = %s", (account_id,))
         return public_employee(cursor.fetchone())
 
+    def session_delegate(self, cursor, token):
+        """Who opened this client session, when it wasn't the account owner —
+        a client-scoped ISP employee or a company staff member."""
+        opened_by = session_opened_by(cursor, token)
+        if not opened_by:
+            return None
+        cursor.execute(
+            "SELECT first_name, last_name, title, role FROM isp_client_employees WHERE id = %s",
+            (opened_by,),
+        )
+        staff = cursor.fetchone()
+        if staff:
+            return {
+                "kind": "isp-employee",
+                "name": f"{staff['first_name']} {staff['last_name']}",
+                "title": CLIENT_STAFF_ROLE_LABELS.get(staff["role"]) or staff["title"] or "ISP employee",
+                "role": staff["role"],
+            }
+        cursor.execute("SELECT first_name, last_name FROM isp_employees WHERE id = %s", (opened_by,))
+        employee = cursor.fetchone()
+        if employee:
+            return {
+                "kind": "staff",
+                "name": f"{employee['first_name']} {employee['last_name']}",
+                "title": "ISP CENTRIC staff",
+            }
+        return {"kind": "staff", "name": "", "title": "Delegated session"}
+
     def client_by_session(self, cursor, token):
         account_id = session_account_id(cursor, token, "client")
         if not account_id:
             return None
         cursor.execute("SELECT * FROM isp_clients WHERE id = %s", (account_id,))
         row = cursor.fetchone()
-        return public_client(row) if row else None
+        if not row:
+            return None
+        public = public_client(row)
+        delegate = self.session_delegate(cursor, token)
+        if delegate:
+            public["delegate"] = delegate
+        return public
 
     def employee_by_session(self, cursor, token):
         account_id = session_account_id(cursor, token, "employee")
@@ -3391,6 +3702,357 @@ class Handler(BaseHTTPRequestHandler):
         if not approved_account(cursor, "isp_clients", client_id):
             raise ApiError(403, "That account is still waiting for approval.")
         return client_id
+
+    def onboarding_session(self, cursor, token):
+        cursor.execute(
+            "SELECT account_id, opened_by FROM isp_sessions WHERE token = %s AND account_kind = 'client'",
+            (token,),
+        )
+        session = cursor.fetchone()
+        if not session:
+            raise ApiError(401, "Sign in before onboarding a client.")
+        return session
+
+    def list_onboardings(self, cursor, token):
+        session = self.onboarding_session(cursor, token)
+        overview = False
+        if session["opened_by"]:
+            cursor.execute("SELECT role FROM isp_client_employees WHERE id = %s", (session["opened_by"],))
+            staff = cursor.fetchone()
+            overview = bool(staff and staff["role"] in ("isp-customercare", "isp-manager"))
+        if session["opened_by"] and not overview:
+            cursor.execute(
+                """SELECT * FROM isp_onboardings
+                   WHERE client_id = %s AND ((assigned_to IS NULL AND status = 'new') OR assigned_to = %s OR staff_id = %s)
+                   ORDER BY created_at DESC""",
+                (session["account_id"], session["opened_by"], session["opened_by"]),
+            )
+        else:
+            cursor.execute(
+                "SELECT * FROM isp_onboardings WHERE client_id = %s ORDER BY created_at DESC",
+                (session["account_id"],),
+            )
+        return {"onboardings": [public_onboarding(row) for row in cursor.fetchall()]}
+
+    def create_onboarding(self, cursor, payload, token):
+        session = self.onboarding_session(cursor, token)
+        if not session["opened_by"]:
+            raise ApiError(403, "Sign in as a staff member to onboard clients.")
+        first = str(payload.get("firstName", "")).strip()
+        last = str(payload.get("lastName", "")).strip()
+        phone = str(payload.get("phone", "")).strip()
+        email = str(payload.get("email", "")).strip()
+        building = str(payload.get("buildingName", "")).strip()[:120]
+        house = str(payload.get("houseNumber", "")).strip()[:40]
+        package_name = str(payload.get("packageName", "")).strip()[:120]
+        router_id = str(payload.get("routerId", "")).strip()[:36] or None
+        package_id = str(payload.get("packageId", "")).strip()[:36] or None
+        serial = str(payload.get("serial", "")).strip()[:64]
+        pppoe_username = str(payload.get("pppoeUsername", "")).strip()[:64]
+        pppoe_password = str(payload.get("pppoePassword", "")).strip()[:64]
+        if len(first) < 2 or len(last) < 2:
+            raise ApiError(400, "Enter the client's first and last name.")
+        digits = re.sub(r"\D", "", phone)
+        if len(digits) < 10 or len(digits) > 15:
+            raise ApiError(400, "Enter a phone number with 10 to 15 digits.")
+        if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+            raise ApiError(400, "Enter a valid email address.")
+        if len(pppoe_username) < 3:
+            raise ApiError(400, "Enter the PPPoE username (at least 3 characters).")
+        if len(pppoe_password) < 4:
+            raise ApiError(400, "Enter the PPPoE password.")
+        if not router_id:
+            raise ApiError(400, "Choose the MikroTik router for this client.")
+        cursor.execute(
+            "SELECT id FROM isp_mikrotik_devices WHERE id = %s AND client_id = %s",
+            (router_id, session["account_id"]),
+        )
+        if not cursor.fetchone():
+            raise ApiError(400, "That router is not part of this account.")
+        if not package_id:
+            raise ApiError(400, "Choose the client's package.")
+        row_id = str(uuid.uuid4())
+        cursor.execute(
+            """INSERT INTO isp_onboardings
+               (id, client_id, staff_id, first_name, last_name, phone, email, building_name, house_number, package_name, router_id, package_id, serial, pppoe_username, pppoe_password, status)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending_activation')""",
+            (row_id, session["account_id"], session["opened_by"], first, last, phone, email, building, house, package_name, router_id, package_id, serial, pppoe_username, pppoe_password),
+        )
+        cursor.execute("SELECT * FROM isp_onboardings WHERE id = %s", (row_id,))
+        return {"onboarding": public_onboarding(cursor.fetchone())}
+
+    def clean_ticket_details(self, payload):
+        first = str(payload.get("firstName", "")).strip()[:60]
+        last = str(payload.get("lastName", "")).strip()[:60]
+        phone = str(payload.get("phone", "")).strip()[:20]
+        email = str(payload.get("email", "")).strip()[:120]
+        if len(first) < 2 or len(last) < 2:
+            raise ApiError(400, "Enter the client's first and last name.")
+        digits = re.sub(r"\D", "", phone)
+        if len(digits) < 10 or len(digits) > 15:
+            raise ApiError(400, "Enter a phone number with 10 to 15 digits.")
+        if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
+            raise ApiError(400, "Enter a valid email address.")
+        return {
+            "first": first,
+            "last": last,
+            "phone": phone,
+            "email": email,
+            "building": str(payload.get("buildingName", "")).strip()[:120],
+            "house": str(payload.get("houseNumber", "")).strip()[:40],
+            "package_name": str(payload.get("packageName", "")).strip()[:120],
+        }
+
+    def create_onboarding_ticket(self, cursor, payload, token):
+        session = self.onboarding_session(cursor, token)
+        kind = str(payload.get("kind", "onboarding")).strip()
+        row_id = str(uuid.uuid4())
+        creator = session["opened_by"] or session["account_id"]
+        if kind == "fault":
+            fault_client = str(payload.get("faultClient", "")).strip()[:120]
+            fault_client_id = str(payload.get("faultClientId", "")).strip()[:36] or None
+            fault_details = str(payload.get("faultDetails", "")).strip()
+            if not fault_client:
+                raise ApiError(400, "Choose the client facing the fault.")
+            if len(fault_details) < 3:
+                raise ApiError(400, "Describe the fault briefly.")
+            cursor.execute(
+                """INSERT INTO isp_onboardings
+                   (id, client_id, staff_id, first_name, last_name, phone, email, fault_client, fault_client_id, fault_details, kind, status)
+                   VALUES (%s, %s, %s, %s, '', '', '', %s, %s, %s, 'fault', 'new')""",
+                (row_id, session["account_id"], creator, fault_client[:60], fault_client_id, fault_details),
+            )
+        else:
+            fields = self.clean_ticket_details(payload)
+            pppoe_username = str(payload.get("pppoeUsername", "")).strip()[:64]
+            pppoe_password = str(payload.get("pppoePassword", "")).strip()[:64]
+            if len(pppoe_username) < 3:
+                raise ApiError(400, "Enter the PPPoE username (at least 3 characters).")
+            if len(pppoe_password) < 4:
+                raise ApiError(400, "Enter the PPPoE password.")
+            cursor.execute(
+                """INSERT INTO isp_onboardings
+                   (id, client_id, staff_id, first_name, last_name, phone, email, building_name, house_number, package_name, pppoe_username, pppoe_password, kind, status)
+                   VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'onboarding', 'new')""",
+                (row_id, session["account_id"], creator,
+                 fields["first"], fields["last"], fields["phone"], fields["email"],
+                 fields["building"], fields["house"], fields["package_name"], pppoe_username, pppoe_password),
+            )
+        cursor.execute("SELECT * FROM isp_onboardings WHERE id = %s", (row_id,))
+        return {"onboarding": public_onboarding(cursor.fetchone())}
+
+    def change_onboarding(self, cursor, leaf, payload, token):
+        row_id, _, action = leaf.partition("/")
+        if action not in {"claim", "onboard", "activate", "reassign", "return"}:
+            raise ApiError(404, "That ticket request was not found.")
+        session = self.onboarding_session(cursor, token)
+        cursor.execute("SELECT * FROM isp_onboardings WHERE id = %s AND client_id = %s", (row_id, session["account_id"]))
+        row = cursor.fetchone()
+        if not row:
+            raise ApiError(404, "That ticket was not found.")
+        if action == "reassign":
+            if session["opened_by"]:
+                cursor.execute("SELECT role FROM isp_client_employees WHERE id = %s", (session["opened_by"],))
+                me = cursor.fetchone()
+                if not me or me["role"] not in ("isp-customercare", "isp-manager"):
+                    raise ApiError(403, "Only dispatch or manager staff can reallocate tickets.")
+            if row["status"] not in ("new", "onboarding"):
+                raise ApiError(409, "Only new or onboarding tickets can be allocated.")
+            target_id = str(payload.get("assignedTo", "")).strip()
+            cursor.execute(
+                "SELECT id FROM isp_client_employees WHERE id = %s AND client_id = %s AND status = 'active'",
+                (target_id, session["account_id"]),
+            )
+            if not cursor.fetchone():
+                raise ApiError(400, "Choose a valid technician.")
+            cursor.execute(
+                "UPDATE isp_onboardings SET assigned_to = %s, status = 'onboarding' WHERE id = %s",
+                (target_id, row["id"]),
+            )
+        elif action == "activate":
+            if session["opened_by"]:
+                cursor.execute("SELECT role FROM isp_client_employees WHERE id = %s", (session["opened_by"],))
+                me = cursor.fetchone()
+                if not me or me["role"] not in ("isp-customercare", "isp-manager"):
+                    raise ApiError(403, "Only dispatch, manager, or the account owner can activate a ticket.")
+            if row["status"] != "pending_activation":
+                raise ApiError(409, "That ticket is not waiting for activation.")
+            if row["kind"] == "onboarding":
+                cursor.execute(
+                    "SELECT id FROM pppoe_subscribers WHERE pppoe_username = %s OR phone = %s LIMIT 1",
+                    (row["pppoe_username"], row["phone"]),
+                )
+                if cursor.fetchone():
+                    raise ApiError(409, "That PPPoE username or phone number is already registered.")
+                cursor.execute(
+                    """INSERT INTO pppoe_subscribers
+                       (id, client_id, first_name, last_name, phone, email, building_name, house_number,
+                        pppoe_username, password_sealed, router_id, package_id, router_serial,
+                        status, service, start_date, created_by)
+                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', 'pppoe', CURDATE(), %s)""",
+                    (
+                        str(uuid.uuid4()), row["client_id"], row["first_name"], row["last_name"],
+                        row["phone"], row["email"], row["building_name"], row["house_number"],
+                        row["pppoe_username"], row["pppoe_password"], row["router_id"], row["package_id"],
+                        row["serial"] or None, row["staff_id"],
+                    ),
+                )
+            cursor.execute("UPDATE isp_onboardings SET status = 'completed' WHERE id = %s", (row["id"],))
+        elif action == "return":
+            if session["opened_by"]:
+                cursor.execute("SELECT role FROM isp_client_employees WHERE id = %s", (session["opened_by"],))
+                me = cursor.fetchone()
+                if not me or me["role"] not in ("isp-customercare", "isp-manager"):
+                    raise ApiError(403, "Only dispatch, manager, or the account owner can return tickets.")
+            if row["status"] != "pending_activation":
+                raise ApiError(409, "Only pending tickets can be returned.")
+            reason = str(payload.get("reason", "")).strip()
+            if len(reason) < 3:
+                raise ApiError(400, "Give a reason for returning the ticket.")
+            cursor.execute(
+                "UPDATE isp_onboardings SET status = 'onboarding', return_reason = %s WHERE id = %s",
+                (reason, row["id"]),
+            )
+        elif not session["opened_by"]:
+            raise ApiError(403, "Sign in as a staff member to work on tickets.")
+        elif action == "claim":
+            if row["status"] != "new" or row["assigned_to"]:
+                raise ApiError(409, "That ticket has already been picked up.")
+            cursor.execute(
+                "UPDATE isp_onboardings SET status = 'onboarding', assigned_to = %s WHERE id = %s",
+                (session["opened_by"], row["id"]),
+            )
+        else:
+            if row["status"] != "onboarding" or row["assigned_to"] != session["opened_by"]:
+                raise ApiError(409, "Pick up the ticket before onboarding it.")
+            if row["kind"] == "fault":
+                cursor.execute("UPDATE isp_onboardings SET status = 'completed' WHERE id = %s", (row["id"],))
+                cursor.execute("SELECT * FROM isp_onboardings WHERE id = %s", (row["id"],))
+                return {"onboarding": public_onboarding(cursor.fetchone())}
+            router_id = str(payload.get("routerId", "")).strip()[:36] or None
+            package_id = str(payload.get("packageId", "")).strip()[:36] or None
+            serial = str(payload.get("serial", "")).strip()[:64]
+            pppoe_username = str(payload.get("pppoeUsername", "")).strip()[:64]
+            pppoe_password = str(payload.get("pppoePassword", "")).strip()[:64]
+            if not router_id:
+                raise ApiError(400, "Choose the MikroTik router for this client.")
+            cursor.execute(
+                "SELECT id FROM isp_mikrotik_devices WHERE id = %s AND client_id = %s",
+                (router_id, session["account_id"]),
+            )
+            if not cursor.fetchone():
+                raise ApiError(400, "That router is not part of this account.")
+            if not package_id:
+                raise ApiError(400, "Choose the client's package.")
+            if len(pppoe_username) < 3:
+                raise ApiError(400, "Enter the PPPoE username (at least 3 characters).")
+            if len(pppoe_password) < 4:
+                raise ApiError(400, "Enter the PPPoE password.")
+            cursor.execute(
+                """UPDATE isp_onboardings
+                   SET router_id = %s, package_id = %s, package_name = %s, serial = %s,
+                       pppoe_username = %s, pppoe_password = %s,
+                       status = 'pending_activation', staff_id = %s
+                   WHERE id = %s""",
+                (router_id, package_id, str(payload.get("packageName", "")).strip()[:120],
+                 serial, pppoe_username, pppoe_password, session["opened_by"], row["id"]),
+            )
+        cursor.execute("SELECT * FROM isp_onboardings WHERE id = %s", (row["id"],))
+        return {"onboarding": public_onboarding(cursor.fetchone())}
+
+    def list_client_staff(self, cursor, token):
+        client_id = require_owner_client(cursor, token, "staff accounts")
+        cursor.execute(
+            "SELECT * FROM isp_client_employees WHERE client_id = %s ORDER BY first_name, last_name",
+            (client_id,),
+        )
+        return {"staff": [public_client_employee(row) for row in cursor.fetchall()]}
+
+    def create_client_staff(self, cursor, payload, token):
+        client_id = require_owner_client(cursor, token, "staff accounts")
+        fields = clean_staff(payload)
+        assert_staff_unique(cursor, client_id, fields)
+        salt, password_hash = hash_password(fields["password"])
+        staff_id = str(uuid.uuid4())
+        cursor.execute(
+            """
+            INSERT INTO isp_client_employees (
+              id, client_id, first_name, last_name, title, email, phone,
+              login_code, password_salt, password_hash, photo_data_url, status
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+            """,
+            (
+                staff_id,
+                client_id,
+                fields["first"],
+                fields["last"],
+                fields["title"],
+                fields["email"],
+                fields["phone"],
+                fields["login_code"],
+                salt,
+                password_hash,
+                fields["photo"],
+            ),
+        )
+        cursor.execute("SELECT * FROM isp_client_employees WHERE id = %s", (staff_id,))
+        return public_client_employee(cursor.fetchone())
+
+    def change_client_staff(self, cursor, leaf, payload, token):
+        client_id = require_owner_client(cursor, token, "staff accounts")
+        staff_id, _, action = leaf.partition("/")
+        if action not in {"approve", "update", "suspend", "unsuspend", "remove"}:
+            raise ApiError(404, "That staff request was not found.")
+        cursor.execute(
+            "SELECT * FROM isp_client_employees WHERE id = %s AND client_id = %s",
+            (staff_id, client_id),
+        )
+        staff = cursor.fetchone()
+        if not staff:
+            raise ApiError(404, "That staff account was not found.")
+        if action in {"suspend", "remove"}:
+            cursor.execute(
+                "DELETE FROM isp_sessions WHERE account_kind = 'client' AND opened_by = %s",
+                (staff["id"],),
+            )
+        if action == "remove":
+            cursor.execute("DELETE FROM isp_client_employees WHERE id = %s", (staff["id"],))
+            return {"ok": True}
+        if action == "approve":
+            role = str(payload.get("role", "")).strip()
+            if role not in CLIENT_STAFF_ROLES:
+                raise ApiError(400, "Choose a valid role for this employee.")
+            cursor.execute(
+                "UPDATE isp_client_employees SET status = 'active', role = %s WHERE id = %s",
+                (role, staff["id"]),
+            )
+        elif action == "update":
+            if staff["status"] == "pending":
+                raise ApiError(409, "Approve or remove the pending employee before editing their details.")
+            fields = clean_staff_update(payload, staff)
+            assert_staff_unique(cursor, client_id, fields, exclude_id=staff["id"])
+            columns = "first_name = %s, last_name = %s, email = %s, phone = %s, login_code = %s"
+            values = [fields["first"], fields["last"], fields["email"], fields["phone"], fields["login_code"]]
+            if fields["photo"]:
+                columns += ", photo_data_url = %s"
+                values.append(fields["photo"])
+            password_changed = bool(str(payload.get("password", "")).strip())
+            if password_changed:
+                salt, password_hash = hash_password(fields["password"])
+                columns += ", password_salt = %s, password_hash = %s"
+                values += [salt, password_hash]
+            values.append(staff["id"])
+            cursor.execute(f"UPDATE isp_client_employees SET {columns} WHERE id = %s", tuple(values))
+            if password_changed:
+                cursor.execute(
+                    "DELETE FROM isp_sessions WHERE account_kind = 'client' AND opened_by = %s",
+                    (staff["id"],),
+                )
+        else:
+            status = "suspended" if action == "suspend" else "active"
+            cursor.execute("UPDATE isp_client_employees SET status = %s WHERE id = %s", (status, staff["id"]))
+        cursor.execute("SELECT * FROM isp_client_employees WHERE id = %s", (staff["id"],))
+        return {"staff": public_client_employee(cursor.fetchone())}
 
     def health(self, cursor):
         cursor.execute("SELECT 1 AS ok")
@@ -3721,7 +4383,7 @@ class Handler(BaseHTTPRequestHandler):
         cursor.execute(
             """
             SELECT id, name, site, role, routeros_version, status, tunnel_status, last_seen_at, last_api_at,
-                   api_secret IS NOT NULL AS api_ready
+                   latitude, longitude, api_secret IS NOT NULL AS api_ready
             FROM isp_mikrotik_devices
             WHERE client_id = %s
             ORDER BY name
@@ -3737,6 +4399,8 @@ class Handler(BaseHTTPRequestHandler):
                     "name": row["name"],
                     "site": row["site"],
                     "role": row["role"],
+                    "latitude": float(row["latitude"]) if row["latitude"] is not None else None,
+                    "longitude": float(row["longitude"]) if row["longitude"] is not None else None,
                     "routerosVersion": row["routeros_version"] or "",
                     "status": row["status"],
                     "tunnelStatus": row["tunnel_status"] or "unknown",
@@ -4069,13 +4733,14 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "Enter a device name and site.")
         if version not in {"", "7", "6"}:
             raise ApiError(400, "Choose a known RouterOS version or leave it blank.")
+        latitude, longitude = site_coordinates(payload)
         cursor.execute(
             "SELECT * FROM isp_mikrotik_devices WHERE client_id = %s AND name = %s",
             (client_id, name),
         )
         existing = cursor.fetchone()
         if existing:
-            return self.reissue_mikrotik(cursor, existing, site, role)
+            return self.reissue_mikrotik(cursor, existing, site, role, latitude, longitude)
         private_key, public_key = wireguard_keypair()
         tunnel_ip = next_tunnel_ip(cursor)
         cursor.execute("SELECT id FROM isp_mikrotik_devices WHERE public_key = %s", (public_key,))
@@ -4085,10 +4750,10 @@ class Handler(BaseHTTPRequestHandler):
         cursor.execute(
             """
             INSERT INTO isp_mikrotik_devices (
-              id, client_id, name, site, role, routeros_version, tunnel_ip, public_key, status
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'identity')
+              id, client_id, name, site, role, routeros_version, tunnel_ip, public_key, status, latitude, longitude
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'identity', %s, %s)
             """,
-            (device_id, client_id, name, site, role, version or None, tunnel_ip, public_key),
+            (device_id, client_id, name, site, role, version or None, tunnel_ip, public_key, latitude, longitude),
         )
         cursor.execute(
             "UPDATE isp_mikrotik_devices SET wg_private = %s WHERE id = %s",
@@ -4100,22 +4765,22 @@ class Handler(BaseHTTPRequestHandler):
         device["privateKey"] = private_key
         return device
 
-    def reissue_mikrotik(self, cursor, existing, site, role):
+    def reissue_mikrotik(self, cursor, existing, site, role, latitude, longitude):
         private_key = stored_router_key(existing.get("wg_private"))
         if not private_key:
             private_key, public_key = wireguard_keypair()
             cursor.execute(
                 """
                 UPDATE isp_mikrotik_devices
-                SET site = %s, role = %s, public_key = %s, wg_private = %s
+                SET site = %s, role = %s, latitude = %s, longitude = %s, public_key = %s, wg_private = %s
                 WHERE id = %s
                 """,
-                (site, role, public_key, routeros_api.seal_password(private_key), existing["id"]),
+                (site, role, latitude, longitude, public_key, routeros_api.seal_password(private_key), existing["id"]),
             )
         else:
             cursor.execute(
-                "UPDATE isp_mikrotik_devices SET site = %s, role = %s WHERE id = %s",
-                (site, role, existing["id"]),
+                "UPDATE isp_mikrotik_devices SET site = %s, role = %s, latitude = %s, longitude = %s WHERE id = %s",
+                (site, role, latitude, longitude, existing["id"]),
             )
         publish_tunnel_peers(cursor)
         device = self.mikrotik_row(cursor, existing["id"], existing["client_id"])
@@ -4756,6 +5421,8 @@ class Handler(BaseHTTPRequestHandler):
             "name": row["name"],
             "site": row["site"],
             "role": row["role"],
+            "latitude": float(row["latitude"]) if row.get("latitude") is not None else None,
+            "longitude": float(row["longitude"]) if row.get("longitude") is not None else None,
             "routerosVersion": row["routeros_version"] or "",
             "tunnelIp": row["tunnel_ip"],
             "publicKey": row["public_key"],
@@ -6023,6 +6690,7 @@ class Handler(BaseHTTPRequestHandler):
                 "notifications": lambda: gateway_api.notifications(cursor, query),
                 "settings": lambda: gateway_api.settings_view(cursor),
                 "charges": lambda: gateway_api.charges_view(cursor),
+                "client-settings": lambda: gateway_api.client_restrictions(cursor),
             }
             if leaf == "export":
                 kind = (query.get("kind") or [""])[0]
@@ -6051,7 +6719,7 @@ class Handler(BaseHTTPRequestHandler):
             finally:
                 connection.autocommit(True)
             return result
-        if method == "POST" and leaf in ("settings", "payouts/check", "payouts/mark-failed", "charges", "transfer"):
+        if method == "POST" and leaf in ("settings", "payouts/check", "payouts/mark-failed", "charges", "transfer", "client-settings"):
             # Gateway ops writes — one transaction wraps the update + audit.
             connection = cursor.connection
             connection.autocommit(False)
@@ -6061,6 +6729,9 @@ class Handler(BaseHTTPRequestHandler):
                         cursor, payload, employee_id)
                 elif leaf == "charges":
                     result, error = gateway_api.save_charges(
+                        cursor, payload, employee_id)
+                elif leaf == "client-settings":
+                    result, error = gateway_api.save_client_restrictions(
                         cursor, payload, employee_id)
                 elif leaf == "transfer":
                     result, error = gateway_api.manual_transfer(

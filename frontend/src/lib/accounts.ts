@@ -13,6 +13,13 @@ export type AccountInput = {
 
 export type AccountStatus = "pending" | "approved";
 
+export type AccountDelegate = {
+  kind: "isp-employee" | "staff";
+  name: string;
+  title: string;
+  role?: "isp-technician" | "isp-customercare" | "isp-manager" | null;
+};
+
 export type PublicAccount = {
   id: string;
   firstName: string;
@@ -26,11 +33,17 @@ export type PublicAccount = {
   clientCode: string | null;
   dashboardCode: string | null;
   advertsEnabled: boolean;
+  delegate?: AccountDelegate | null;
 };
 
-export function clientPage(account: Pick<PublicAccount, "dashboardCode">, path: string) {
+export function clientPage(
+  account: Pick<PublicAccount, "dashboardCode"> & { delegate?: AccountDelegate | null },
+  path: string,
+) {
   const suffix = path.startsWith("/") ? path : `/${path}`;
-  return account.dashboardCode ? `/${account.dashboardCode}${suffix}` : suffix;
+  const role = account.delegate?.kind === "isp-employee" ? account.delegate.role : null;
+  const base = `${role ? `/${role}` : ""}${account.dashboardCode ? `/${account.dashboardCode}` : ""}`;
+  return `${base}${suffix}`;
 }
 
 export function clientHomePath(account: Pick<PublicAccount, "dashboardCode">) {

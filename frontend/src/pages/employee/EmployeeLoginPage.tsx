@@ -114,6 +114,12 @@ export function EmployeeLoginPage() {
             Create an employee account
           </Link>
         </p>
+        <p className="mt-3 text-sm text-muted-foreground">
+          Client?{" "}
+          <Link to="/login" className="font-semibold text-primary">
+            Client login
+          </Link>
+        </p>
       </div>
     </div>
   );

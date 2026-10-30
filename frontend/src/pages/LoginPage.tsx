@@ -62,7 +62,8 @@ export function LoginPage() {
         <Logo />
         <h1 className="mt-6 text-2xl font-semibold tracking-tight sm:text-3xl">Login</h1>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          Sign in with the 6-digit login code and the 6-digit password from your account.
+          Sign in with the 6-digit login code and the 6-digit password from your account. ISP employees also sign in here
+          with the code their ISP gave them.
         </p>
         {registered ? (
           <p className="notice mt-4 border-success-border bg-success-soft/60" role="status">

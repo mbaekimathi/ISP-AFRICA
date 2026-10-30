@@ -22,6 +22,10 @@ import { AccountPage } from "@/pages/AccountPage";
 import { BillingsPage } from "@/pages/BillingsPage";
 import { GatewayLedgerPage } from "@/pages/GatewayLedgerPage";
 import { ClientsPage } from "@/pages/ClientsPage";
+import { ClientOnboardPage } from "@/pages/ClientOnboardPage";
+import { ClientStaffDashboardPage } from "@/pages/ClientStaffDashboardPage";
+import { ClientStaffPage } from "@/pages/ClientStaffPage";
+import { ClientTicketsPage } from "@/pages/ClientTicketsPage";
 import { ClientUsagePage } from "@/pages/ClientUsagePage";
 import { WifiPaymentPage } from "@/pages/WifiPaymentPage";
 import { HotspotClientPage } from "@/pages/HotspotClientPage";
@@ -56,6 +60,51 @@ import { DemoPage, PrivacyPage, TermsPage } from "@/pages/SitePages";
 import { AuthProvider } from "@/providers/AuthProvider";
 import { EmployeeAuthProvider } from "@/providers/EmployeeAuthProvider";
 
+const portalRoles = ["isp-technician", "isp-customercare", "isp-manager"] as const;
+
+const clientPages = (
+  <>
+    <Route path="dashboard" element={<DashboardPage />} />
+    <Route path="mikrotiks" element={<MikrotiksPage />} />
+    <Route path="mikrotiks/onboard" element={<OnboardMikrotikPage />} />
+    <Route path="mikrotiks/import-clients" element={<ImportClientsPage />} />
+    <Route path="mikrotiks/:deviceId/ports" element={<MikrotikPortPage />} />
+    <Route path="mikrotiks/:deviceId/pppoe" element={<MikrotikPppoePage />} />
+    <Route path="mikrotiks/:deviceId/hotspot" element={<MikrotikHotspotPage />} />
+    <Route path="mikrotiks/:deviceId/setup" element={<MikrotikRouterSetupPage />} />
+    <Route path="mikrotiks/:deviceId/recovery" element={<MikrotikRecoveryPage />} />
+    <Route path="mikrotiks/:deviceId" element={<MikrotikLivePage />} />
+    <Route path="pppoe/register" element={<PppoeRegisterPage />} />
+    <Route path="pppoe/:subscriberId" element={<PppoeCustomerPage />} />
+    <Route path="pppoe/:subscriberId/transactions" element={<PppoeCustomerTransactionsPage />} />
+    <Route path="pppoe/:subscriberId/remote-access" element={<PppoeRemoteAccessPage />} />
+    <Route path="clients" element={<ClientsPage key="pppoe" kind="pppoe" />} />
+    <Route path="clients/payments" element={<WifiPaymentPage kind="pppoe" />} />
+    <Route path="clients/usage" element={<ClientUsagePage kind="pppoe" />} />
+    <Route path="clients/hotspot" element={<ClientsPage key="hotspot" kind="hotspot" />} />
+    <Route path="clients/hotspot/payments" element={<WifiPaymentPage kind="hotspot" />} />
+    <Route path="clients/hotspot/usage" element={<ClientUsagePage kind="hotspot" />} />
+    <Route path="hotspot/:purchaseId" element={<HotspotClientPage />} />
+    <Route path="hr" element={<ClientStaffPage view="all" />} />
+    <Route path="hr/pending" element={<ClientStaffPage view="pending" />} />
+    <Route path="billings" element={<BillingsPage />} />
+    <Route path="billings/gateway" element={<GatewayLedgerPage />} />
+    <Route path="account" element={<AccountPage />} />
+    <Route path="account/settings" element={<SectionPage title="Account settings" />} />
+    <Route path="account/settings/isp-company" element={<IspCompanyPage />} />
+    <Route path="account/settings/isp-company/company" element={<IspCompanyPage />} />
+    <Route path="account/settings/isp-company/profile" element={<Navigate to="/account/settings/isp-company" replace />} />
+    <Route path="account/settings/isp-company/theme" element={<IspThemePage />} />
+    <Route path="account/settings/isp-package" element={<IspPackagePage />} />
+    <Route path="account/settings/isp-payments" element={<IspPaymentsPage />} />
+    <Route path="account/settings/isp-communications" element={<IspCommunicationsPage />} />
+    <Route path="account/settings/isp-notifications" element={<IspNotificationsPage />} />
+    <Route path="account/settings/isp-notifications/settings" element={<IspNotificationSettingsPage />} />
+    <Route path="account/settings/isp-adverts" element={<IspAdvertsPage />} />
+    <Route path="reviews" element={<ReviewsPage />} />
+  </>
+);
+
 export function App() {
   return (
     <BrowserRouter>
@@ -76,80 +125,40 @@ export function App() {
             <Route path="/terms" element={<TermsPage />} />
           </Route>
           <Route element={<ClientLayout />}>
-            <Route path="/dashboard" element={<DashboardPage />} />
             <Route path="/dashboard/:code" element={<LegacyDashboardRedirect />} />
-            <Route path="/:code/dashboard" element={<DashboardPage />} />
-            <Route path="/mikrotiks" element={<MikrotiksPage />} />
-            <Route path="/:code/mikrotiks" element={<MikrotiksPage />} />
-            <Route path="/mikrotiks/onboard" element={<OnboardMikrotikPage />} />
-            <Route path="/:code/mikrotiks/onboard" element={<OnboardMikrotikPage />} />
-            <Route path="/mikrotiks/import-clients" element={<ImportClientsPage />} />
-            <Route path="/:code/mikrotiks/import-clients" element={<ImportClientsPage />} />
-            <Route path="/mikrotiks/:deviceId/ports" element={<MikrotikPortPage />} />
-            <Route path="/:code/mikrotiks/:deviceId/ports" element={<MikrotikPortPage />} />
-            <Route path="/mikrotiks/:deviceId/pppoe" element={<MikrotikPppoePage />} />
-            <Route path="/:code/mikrotiks/:deviceId/pppoe" element={<MikrotikPppoePage />} />
-            <Route path="/mikrotiks/:deviceId/hotspot" element={<MikrotikHotspotPage />} />
-            <Route path="/:code/mikrotiks/:deviceId/hotspot" element={<MikrotikHotspotPage />} />
-            <Route path="/mikrotiks/:deviceId/setup" element={<MikrotikRouterSetupPage />} />
-            <Route path="/:code/mikrotiks/:deviceId/setup" element={<MikrotikRouterSetupPage />} />
-            <Route path="/mikrotiks/:deviceId/recovery" element={<MikrotikRecoveryPage />} />
-            <Route path="/:code/mikrotiks/:deviceId/recovery" element={<MikrotikRecoveryPage />} />
-            <Route path="/mikrotiks/:deviceId" element={<MikrotikLivePage />} />
-            <Route path="/:code/mikrotiks/:deviceId" element={<MikrotikLivePage />} />
-            <Route path="/pppoe/register" element={<PppoeRegisterPage />} />
-            <Route path="/:code/pppoe/register" element={<PppoeRegisterPage />} />
-            <Route path="/pppoe/:subscriberId" element={<PppoeCustomerPage />} />
-            <Route path="/pppoe/:subscriberId/transactions" element={<PppoeCustomerTransactionsPage />} />
-            <Route path="/pppoe/:subscriberId/remote-access" element={<PppoeRemoteAccessPage />} />
-            <Route path="/:code/pppoe/:subscriberId" element={<PppoeCustomerPage />} />
-            <Route path="/:code/pppoe/:subscriberId/transactions" element={<PppoeCustomerTransactionsPage />} />
-            <Route path="/:code/pppoe/:subscriberId/remote-access" element={<PppoeRemoteAccessPage />} />
-            <Route path="/clients" element={<ClientsPage key="pppoe" kind="pppoe" />} />
-            <Route path="/clients/payments" element={<WifiPaymentPage kind="pppoe" />} />
-            <Route path="/clients/usage" element={<ClientUsagePage kind="pppoe" />} />
-            <Route path="/clients/hotspot" element={<ClientsPage key="hotspot" kind="hotspot" />} />
-            <Route path="/clients/hotspot/payments" element={<WifiPaymentPage kind="hotspot" />} />
-            <Route path="/clients/hotspot/usage" element={<ClientUsagePage kind="hotspot" />} />
-            <Route path="/hotspot/:purchaseId" element={<HotspotClientPage />} />
-            <Route path="/:code/clients" element={<ClientsPage key="pppoe" kind="pppoe" />} />
-            <Route path="/:code/clients/payments" element={<WifiPaymentPage kind="pppoe" />} />
-            <Route path="/:code/clients/usage" element={<ClientUsagePage kind="pppoe" />} />
-            <Route path="/:code/clients/hotspot" element={<ClientsPage key="hotspot" kind="hotspot" />} />
-            <Route path="/:code/clients/hotspot/payments" element={<WifiPaymentPage kind="hotspot" />} />
-            <Route path="/:code/clients/hotspot/usage" element={<ClientUsagePage kind="hotspot" />} />
-            <Route path="/:code/hotspot/:purchaseId" element={<HotspotClientPage />} />
-            <Route path="/billings" element={<BillingsPage />} />
-            <Route path="/:code/billings" element={<BillingsPage />} />
-            <Route path="/billings/gateway" element={<GatewayLedgerPage />} />
-            <Route path="/:code/billings/gateway" element={<GatewayLedgerPage />} />
-            <Route path="/account" element={<AccountPage />} />
-            <Route path="/:code/account" element={<AccountPage />} />
-            <Route path="/account/settings" element={<SectionPage title="Account settings" />} />
-            <Route path="/:code/account/settings" element={<SectionPage title="Account settings" />} />
-            <Route path="/account/settings/isp-company" element={<IspCompanyPage />} />
-            <Route path="/:code/account/settings/isp-company" element={<IspCompanyPage />} />
-            <Route path="/account/settings/isp-company/company" element={<IspCompanyPage />} />
-            <Route path="/:code/account/settings/isp-company/company" element={<IspCompanyPage />} />
-            <Route path="/account/settings/isp-company/profile" element={<Navigate to="/account/settings/isp-company" replace />} />
-            <Route path="/:code/account/settings/isp-company/profile" element={<Navigate to="/account/settings/isp-company" replace />} />
-            <Route path="/account/settings/isp-company/theme" element={<IspThemePage />} />
-            <Route path="/:code/account/settings/isp-company/theme" element={<IspThemePage />} />
-            <Route path="/account/settings/isp-package" element={<IspPackagePage />} />
-            <Route path="/:code/account/settings/isp-package" element={<IspPackagePage />} />
-            <Route path="/account/settings/isp-payments" element={<IspPaymentsPage />} />
-            <Route path="/:code/account/settings/isp-payments" element={<IspPaymentsPage />} />
-            <Route path="/account/settings/isp-communications" element={<IspCommunicationsPage />} />
-            <Route path="/:code/account/settings/isp-communications" element={<IspCommunicationsPage />} />
-            <Route path="/account/settings/isp-notifications" element={<IspNotificationsPage />} />
-            <Route path="/:code/account/settings/isp-notifications" element={<IspNotificationsPage />} />
-            <Route path="/account/settings/isp-notifications/settings" element={<IspNotificationSettingsPage />} />
-            <Route path="/:code/account/settings/isp-notifications/settings" element={<IspNotificationSettingsPage />} />
-            <Route path="/account/settings/isp-adverts" element={<IspAdvertsPage />} />
-            <Route path="/:code/account/settings/isp-adverts" element={<IspAdvertsPage />} />
-            <Route path="/reviews" element={<ReviewsPage />} />
-            <Route path="/:code/reviews" element={<ReviewsPage />} />
+            {clientPages}
           </Route>
+          <Route path="/:code" element={<ClientLayout />}>
+            <Route index element={<Navigate to="dashboard" replace />} />
+            {clientPages}
+          </Route>
+          <Route path="/isp-technician/:code" element={<ClientLayout />}>
+            <Route index element={<Navigate to="dashboard" replace />} />
+            <Route path="dashboard" element={<ClientStaffDashboardPage />} />
+            <Route path="tickets" element={<ClientTicketsPage />} />
+            <Route path="onboard" element={<ClientOnboardPage />} />
+            <Route path="materials" element={<SectionPage title="Materials" />} />
+            <Route path="faulty" element={<SectionPage title="Faulty tickets" />} />
+            <Route path="account" element={<SectionPage title="My account" />} />
+            <Route path="*" element={<Navigate to="dashboard" replace />} />
+          </Route>
+          <Route path="/isp-customercare/:code" element={<ClientLayout />}>
+            <Route index element={<Navigate to="dashboard" replace />} />
+            <Route path="dashboard" element={<ClientStaffDashboardPage />} />
+            <Route path="tickets" element={<ClientTicketsPage />} />
+            <Route path="clients" element={<ClientsPage key="pppoe" kind="pppoe" />} />
+            <Route path="clients/hotspot" element={<ClientsPage key="hotspot" kind="hotspot" />} />
+            <Route path="*" element={<Navigate to="dashboard" replace />} />
+          </Route>
+          {portalRoles
+            .filter((role) => role !== "isp-technician" && role !== "isp-customercare")
+            .map((role) => (
+              <Route key={role} path={`/${role}/:code`} element={<ClientLayout />}>
+                <Route index element={<Navigate to="dashboard" replace />} />
+                <Route path="dashboard" element={<ClientStaffDashboardPage />} />
+                <Route path="*" element={<Navigate to="dashboard" replace />} />
+              </Route>
+            ))}
           <Route element={<EmployeeLayout />}>
             <Route path="/:role/:code/dashboard" element={<EmployeeDashboardPage />} />
             <Route path="/:role/:code/performance" element={<SystemPerformancePage />} />
