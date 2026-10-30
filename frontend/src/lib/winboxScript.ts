@@ -11,6 +11,13 @@ export type ScriptDevice = {
 
 const KEY = /^[A-Za-z0-9+/]{43}=$/;
 const ENDPOINT = /^[A-Za-z0-9.:-]{1,253}$/;
+const IPV4 = /^(\d{1,3}\.){3}\d{1,3}$/;
+
+function ipOctets(ip: string) {
+  if (!IPV4.test(ip)) return null;
+  const octets = ip.split(".").map(Number);
+  return octets.every((o) => o <= 255) ? octets : null;
+}
 
 export function backupName(name: string) {
   const safe = name.replace(/[^A-Za-z0-9_-]/g, "").slice(0, 12) || "router";
@@ -23,9 +30,19 @@ export function buildWinboxScript(device: ScriptDevice, apiPassword: string) {
   const serverKey = KEY.test(device.serverPublicKey) ? device.serverPublicKey : "";
   const endpoint = ENDPOINT.test(device.endpoint) ? device.endpoint : "";
   const password = /^[A-Za-z0-9]{12,64}$/.test(apiPassword) ? apiPassword : "";
-  const tunnelIp = /^(?:10\.88\.0\.(?:[2-9]|[1-9]\d|1\d\d|2[0-4]\d|25[0-3]))$/.test(device.tunnelIp) ? device.tunnelIp : "";
+  const serverOctets = ipOctets(device.serverTunnelIp);
+  const tunnelPrefix = serverOctets ? serverOctets.slice(0, 3).join(".") : "";
+  const tunnelNetwork = tunnelPrefix ? `${tunnelPrefix}.0/24` : "";
+  const tunnelOctets = ipOctets(device.tunnelIp);
+  const tunnelIp =
+    tunnelOctets &&
+    tunnelOctets.slice(0, 3).join(".") === tunnelPrefix &&
+    tunnelOctets[3] >= 2 &&
+    tunnelOctets[3] <= 254
+      ? device.tunnelIp
+      : "";
   const port = Number.isInteger(device.endpointPort) && device.endpointPort > 0 && device.endpointPort < 65536 ? device.endpointPort : 0;
-  const serverTunnel = device.serverTunnelIp === "10.88.0.1" ? device.serverTunnelIp : "";
+  const serverTunnel = serverOctets && serverOctets[3] === 1 ? device.serverTunnelIp : "";
   const vpsRequested = Boolean(device.serverPublicKey.trim() || device.endpoint.trim());
   const problems = [
     privateKey ? "" : "This router key is missing.",
@@ -114,7 +131,7 @@ export function buildWinboxScript(device: ScriptDevice, apiPassword: string) {
         : []),
       ':put "[ISP CENTRIC] Step 4/8 tunnel firewall";',
       ':do { /ip firewall filter add chain=input action=accept protocol=tcp dst-port=8728 in-interface=isp-centric comment=isp-centric-api place-before=$inAnchor } on-error={ /ip firewall filter add chain=input action=accept protocol=tcp dst-port=8728 in-interface=isp-centric comment=isp-centric-api };',
-      ':do { /ip firewall filter add chain=input action=accept protocol=tcp dst-port=8728 src-address=10.88.0.0/24 comment=isp-centric-api-net place-before=$inAnchor } on-error={ /ip firewall filter add chain=input action=accept protocol=tcp dst-port=8728 src-address=10.88.0.0/24 comment=isp-centric-api-net };',
+      `:do { /ip firewall filter add chain=input action=accept protocol=tcp dst-port=8728 src-address=${tunnelNetwork} comment=isp-centric-api-net place-before=$inAnchor } on-error={ /ip firewall filter add chain=input action=accept protocol=tcp dst-port=8728 src-address=${tunnelNetwork} comment=isp-centric-api-net };`,
       ':do { /ip firewall filter add chain=input action=accept protocol=icmp in-interface=isp-centric comment=isp-centric-icmp place-before=$inAnchor } on-error={ /ip firewall filter add chain=input action=accept protocol=icmp in-interface=isp-centric comment=isp-centric-icmp };',
       ':do { /ip firewall filter add chain=input action=accept protocol=udp dst-port=3799 in-interface=isp-centric comment=isp-centric-coa place-before=$inAnchor } on-error={ /ip firewall filter add chain=input action=accept protocol=udp dst-port=3799 in-interface=isp-centric comment=isp-centric-coa };',
       ':if ([:len [/ip firewall filter find where comment="isp-centric-api"]] > 0) do={:put "[ISP CENTRIC OK] API and ICMP allowed from the tunnel"} else={:put "[ISP CENTRIC FAIL] Tunnel API rule is missing"};',
@@ -125,9 +142,9 @@ export function buildWinboxScript(device: ScriptDevice, apiPassword: string) {
             ':if ([:len [/ip firewall filter find where comment="isp-centric-wg-udp"]] > 0) do={:put "[ISP CENTRIC OK] Output allows WireGuard to the server"} else={:put "[ISP CENTRIC FAIL] WireGuard output rule is missing"};',
           ]),
       ':put "[ISP CENTRIC] Step 5/8 hotspot";',
-      ':do { /ip hotspot ip-binding add type=bypassed address=10.88.0.0/24 comment=isp-centric-hotspot-bypass ; :put "[ISP CENTRIC OK] Hotspot bypasses the management subnet" } on-error={:put "[ISP CENTRIC WARN] Hotspot bypass skipped"};',
+      `:do { /ip hotspot ip-binding add type=bypassed address=${tunnelNetwork} comment=isp-centric-hotspot-bypass ; :put "[ISP CENTRIC OK] Hotspot bypasses the management subnet" } on-error={:put "[ISP CENTRIC WARN] Hotspot bypass skipped"};`,
       ':put "[ISP CENTRIC] Step 6/8 nat";',
-      ':do { /ip firewall nat add chain=srcnat action=accept dst-address=10.88.0.0/24 comment=isp-centric-no-nat place-before=$natAnchor } on-error={ /ip firewall nat add chain=srcnat action=accept dst-address=10.88.0.0/24 comment=isp-centric-no-nat };',
+      `:do { /ip firewall nat add chain=srcnat action=accept dst-address=${tunnelNetwork} comment=isp-centric-no-nat place-before=$natAnchor } on-error={ /ip firewall nat add chain=srcnat action=accept dst-address=${tunnelNetwork} comment=isp-centric-no-nat };`,
       ':if ([:len [/ip firewall nat find where comment="isp-centric-no-nat"]] > 0) do={:put "[ISP CENTRIC OK] Tunnel traffic is not masqueraded"} else={:put "[ISP CENTRIC FAIL] No-nat rule is missing"};',
       ':put "[ISP CENTRIC] Step 7/8 handshake";',
       ...(local

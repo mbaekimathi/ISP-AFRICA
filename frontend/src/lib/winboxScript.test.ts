@@ -48,4 +48,22 @@ assert.ok(local.script.includes("/user add"));
 assert.equal(local.script.includes("/interface wireguard peers add"), false);
 assert.ok(local.script.includes("The VPS peer is omitted"));
 
+const second = buildWinboxScript(
+  { ...device, tunnelIp: "10.90.0.5", serverTunnelIp: "10.90.0.1" },
+  "Abcdefghij1234567890",
+);
+assert.equal(second.applicable, true);
+assert.ok(second.script.includes("allowed-address=10.90.0.1/32"));
+assert.ok(second.script.includes("address=10.90.0.5/24 interface=isp-centric"));
+assert.ok(second.script.includes("src-address=10.90.0.0/24"));
+assert.ok(second.script.includes("dst-address=10.90.0.0/24"));
+assert.equal(second.script.includes("10.88.0"), false);
+
+const wrongNet = buildWinboxScript(
+  { ...device, tunnelIp: "10.88.0.8", serverTunnelIp: "10.90.0.1" },
+  "Abcdefghij1234567890",
+);
+assert.equal(wrongNet.applicable, false);
+assert.ok(wrongNet.script.includes("The tunnel address is not valid"));
+
 console.log("winbox script checks passed");
