@@ -58,7 +58,15 @@ echo "==> Python dependencies"
 "$venv/bin/pip" install -q -r database/requirements.txt
 
 frontend_changed=$(git diff --name-only "$before" "$after" -- frontend/ | grep -v '^frontend/dist' || true)
-if [ -z "$frontend_changed" ] && [ -f frontend/dist/index.html ]; then
+# A dist older than src (manual pull before this script ran, or a previous
+# failed build) must rebuild even when this pull touched no frontend files.
+dist_stale=""
+if [ -f frontend/dist/index.html ]; then
+    dist_stale=$(find frontend/src frontend/index.html frontend/package.json frontend/package-lock.json -newer frontend/dist/index.html 2>/dev/null | head -1)
+else
+    dist_stale="missing-dist"
+fi
+if [ -z "$frontend_changed" ] && [ -z "$dist_stale" ]; then
     echo "==> Frontend unchanged — skipping rebuild"
 else
     node_major=$(node -v 2>/dev/null | sed 's/v//' | cut -d. -f1 || echo 0)
