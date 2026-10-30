@@ -150,11 +150,8 @@ export function buildWinboxScript(device: ScriptDevice, apiPassword: string) {
       ...(local
         ? [':put "[ISP CENTRIC] Handshake waits until the VPS peer is added";']
         : [
-            ':if ([/ping 8.8.8.8 count=2] > 0) do={:put "[ISP CENTRIC OK] Internet is reachable"} else={:put "[ISP CENTRIC FAIL] No reply from 8.8.8.8"};',
-            ":local try 0;",
-            ":local reached false;",
-            `:while ($try < 6) do={ :delay 5s ; :set try ($try + 1) ; :if ([/ping ${serverTunnel} count=2] > 0) do={ :set reached true ; :put "[ISP CENTRIC OK] Tunnel reaches ${serverTunnel}" ; :set try 6 } };`,
-            `:if ($reached = false) do={:put "[ISP CENTRIC FAIL] No reply from ${serverTunnel}. The server peer may still be finishing the handshake"};`,
+            ':put "[ISP CENTRIC] The server peer handshakes in the background — no wait needed";',
+            `:do { :local hs [/interface wireguard peers get [find where interface="isp-centric"] last-handshake] ; :put ("[ISP CENTRIC OK] Server last-handshake: " . $hs) } on-error={ :put "[ISP CENTRIC] Server last-handshake: none yet — the watchdog re-checks every 3 minutes" };`,
           ]),
       ':put "[ISP CENTRIC] Step 8/8 summary";',
       ...(local
