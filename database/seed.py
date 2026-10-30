@@ -82,14 +82,15 @@ def connect(database=None):
 
 
 def main():
+    db_name = os.environ.get("ISP_DB_NAME", "ISP-DB")
     server = connect()
     with server.cursor() as cursor:
         cursor.execute(
-            "CREATE DATABASE IF NOT EXISTS `ISP-DB` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
+            f"CREATE DATABASE IF NOT EXISTS `{db_name}` CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci"
         )
     server.close()
 
-    db = connect("ISP-DB")
+    db = connect(db_name)
     with db.cursor() as cursor:
         for statement in SCHEMA.split(";"):
             sql = statement.strip()
