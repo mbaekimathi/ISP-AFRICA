@@ -78,3 +78,56 @@ export async function changeClientStaff(id: string, action: "suspend" | "unsuspe
 export async function removeClientStaff(id: string): Promise<void> {
   await apiRequest(`/api/client/staff/${id}/remove`, { method: "POST", body: "{}" });
 }
+
+export type StaffPerformanceDay = {
+  date: string;
+  logins: string[];
+  firstLogin: string | null;
+  sessions: number;
+  minutesInSession: number;
+  minutesLate: number;
+  live: boolean;
+};
+
+export type PerformanceWorkday = { start: string; end: string };
+
+export type TicketStageTargets = { new: number; onboarding: number; pendingActivation: number; fault: number };
+
+export type PerformanceSettings = { workday: PerformanceWorkday; stages: TicketStageTargets };
+
+export async function performanceSettings(): Promise<PerformanceSettings> {
+  return apiRequest<PerformanceSettings>("/api/client/performance-settings");
+}
+
+export async function savePerformanceSettings(input: PerformanceSettings): Promise<PerformanceSettings> {
+  return apiRequest<PerformanceSettings>("/api/client/performance-settings", {
+    method: "POST",
+    body: JSON.stringify({
+      dayStart: input.workday.start,
+      dayEnd: input.workday.end,
+      stages: input.stages,
+    }),
+  });
+}
+
+export type StaffPerformanceTicket = {
+  id: string;
+  kind: string;
+  status: string;
+  clientName: string;
+  createdAt: string;
+  stageMinutes: { new: number | null; onboarding: number | null; pendingActivation: number | null; fault: number | null };
+  breached: boolean;
+};
+
+export type StaffPerformance = {
+  range: { from: string; to: string };
+  workday: PerformanceWorkday;
+  stages: TicketStageTargets;
+  days: StaffPerformanceDay[];
+  tickets: { attended: number; byStatus: Record<string, number>; items: StaffPerformanceTicket[] };
+};
+
+export async function staffPerformance(id: string, from: string, to: string): Promise<StaffPerformance> {
+  return apiRequest(`/api/client/staff/${id}/performance?from=${from}&to=${to}`);
+}

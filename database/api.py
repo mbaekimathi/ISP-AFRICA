@@ -1440,6 +1440,44 @@ def ensure_schema():
                 cursor.execute("ALTER TABLE isp_sessions ADD COLUMN opened_by CHAR(36) NULL")
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS isp_staff_signins (
+                  id CHAR(36) NOT NULL PRIMARY KEY,
+                  client_id CHAR(36) NOT NULL,
+                  staff_id CHAR(36) NOT NULL,
+                  token CHAR(64) NOT NULL,
+                  signed_in_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  last_seen_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  signed_out_at TIMESTAMP NULL,
+                  UNIQUE KEY uq_staff_signin_token (token),
+                  KEY idx_staff_signins (client_id, staff_id, signed_in_at)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_performance_settings (
+                  client_id CHAR(36) NOT NULL PRIMARY KEY,
+                  day_start TIME NOT NULL DEFAULT '08:00:00',
+                  day_end TIME NOT NULL DEFAULT '17:00:00',
+                  stage_new_minutes INT NOT NULL DEFAULT 60,
+                  stage_onboarding_minutes INT NOT NULL DEFAULT 240,
+                  stage_activation_minutes INT NOT NULL DEFAULT 1440,
+                  stage_fault_minutes INT NOT NULL DEFAULT 240,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """
+            )
+            for column, minutes in (
+                ("stage_new_minutes", 60),
+                ("stage_onboarding_minutes", 240),
+                ("stage_activation_minutes", 1440),
+                ("stage_fault_minutes", 240),
+            ):
+                cursor.execute("SHOW COLUMNS FROM isp_performance_settings LIKE %s", (column,))
+                if cursor.fetchone() is None:
+                    cursor.execute(f"ALTER TABLE isp_performance_settings ADD COLUMN {column} INT NOT NULL DEFAULT {minutes}")
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS isp_mikrotik_devices (
                   id CHAR(36) NOT NULL PRIMARY KEY,
                   client_id CHAR(36) NOT NULL,
@@ -2126,6 +2164,9 @@ def ensure_schema():
                 ("fault_client_id", "fault_client_id CHAR(36) NULL"),
                 ("fault_details", "fault_details TEXT NULL"),
                 ("return_reason", "return_reason TEXT NULL"),
+                ("claimed_at", "claimed_at TIMESTAMP NULL"),
+                ("submitted_at", "submitted_at TIMESTAMP NULL"),
+                ("completed_at", "completed_at TIMESTAMP NULL"),
             ):
                 cursor.execute("SHOW COLUMNS FROM isp_onboardings LIKE %s", (column,))
                 if cursor.fetchone() is None:
@@ -2134,6 +2175,47 @@ def ensure_schema():
                 """
                 ALTER TABLE isp_onboardings
                 MODIFY status ENUM('new','onboarding','pending_activation','completed','cancelled') NOT NULL DEFAULT 'new'
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_payroll_accounts (
+                  id CHAR(36) NOT NULL PRIMARY KEY,
+                  client_id CHAR(36) NOT NULL,
+                  staff_id CHAR(36) NOT NULL,
+                  employee_no VARCHAR(40) NOT NULL DEFAULT '',
+                  base_salary DECIMAL(12,2) NOT NULL DEFAULT 0,
+                  pay_cycle ENUM('weekly','biweekly','monthly') NOT NULL DEFAULT 'monthly',
+                  pay_method ENUM('mpesa','bank','cash') NOT NULL DEFAULT 'mpesa',
+                  mpesa_phone VARCHAR(20) NOT NULL DEFAULT '',
+                  bank_name VARCHAR(80) NOT NULL DEFAULT '',
+                  bank_branch VARCHAR(80) NOT NULL DEFAULT '',
+                  bank_account VARCHAR(60) NOT NULL DEFAULT '',
+                  national_id VARCHAR(20) NOT NULL DEFAULT '',
+                  kra_pin VARCHAR(20) NOT NULL DEFAULT '',
+                  notes TEXT NULL,
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                  UNIQUE KEY uq_payroll_staff (client_id, staff_id),
+                  KEY idx_payroll_client (client_id)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_payroll_transactions (
+                  id CHAR(36) NOT NULL PRIMARY KEY,
+                  client_id CHAR(36) NOT NULL,
+                  staff_id CHAR(36) NOT NULL,
+                  kind ENUM('salary','bonus','loan','advance','repayment','deduction') NOT NULL,
+                  amount DECIMAL(12,2) NOT NULL,
+                  period VARCHAR(7) NOT NULL DEFAULT '',
+                  method ENUM('mpesa','bank','cash') NOT NULL DEFAULT 'cash',
+                  reference VARCHAR(80) NOT NULL DEFAULT '',
+                  notes VARCHAR(255) NOT NULL DEFAULT '',
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  KEY idx_payroll_tx (client_id, staff_id, created_at)
+                )
                 """
             )
             router_jobs.ensure_tables(cursor)
@@ -2561,6 +2643,119 @@ def assert_staff_unique(cursor, client_id, fields, exclude_id=None):
         raise ApiError(409, "That login code is already in use by another sign-in.")
 
 
+PAYROLL_CYCLES = ("weekly", "biweekly", "monthly")
+PAYROLL_METHODS = ("mpesa", "bank", "cash")
+PAYROLL_KINDS = ("salary", "bonus", "loan", "advance", "repayment", "deduction")
+
+
+def public_payroll_account(row):
+    return {
+        "id": row["id"],
+        "staffId": row["staff_id"],
+        "employeeNo": row["employee_no"] or "",
+        "baseSalary": float(row["base_salary"]),
+        "payCycle": row["pay_cycle"],
+        "payMethod": row["pay_method"],
+        "mpesaPhone": row["mpesa_phone"] or "",
+        "bankName": row["bank_name"] or "",
+        "bankBranch": row["bank_branch"] or "",
+        "bankAccount": row["bank_account"] or "",
+        "nationalId": row["national_id"] or "",
+        "kraPin": row["kra_pin"] or "",
+        "notes": row["notes"] or "",
+        "createdAt": stamp(row["created_at"]),
+        "updatedAt": stamp(row["updated_at"]),
+    }
+
+
+def public_payroll_transaction(row):
+    return {
+        "id": row["id"],
+        "staffId": row["staff_id"],
+        "kind": row["kind"],
+        "amount": float(row["amount"]),
+        "period": row["period"] or "",
+        "method": row["method"],
+        "reference": row["reference"] or "",
+        "notes": row["notes"] or "",
+        "createdAt": stamp(row["created_at"]),
+    }
+
+
+def clean_amount(value, message="Enter a valid amount."):
+    try:
+        amount = round(float(str(value).replace(",", "").strip()), 2)
+    except (TypeError, ValueError):
+        raise ApiError(400, message)
+    if not 0 < amount <= 99_999_999:
+        raise ApiError(400, message)
+    return amount
+
+
+def clean_payroll(payload):
+    employee_no = str(payload.get("employeeNo", "")).strip()[:40]
+    base_salary = clean_amount(payload.get("baseSalary", 0), "Enter the employee's base salary.")
+    pay_cycle = str(payload.get("payCycle", "")).strip()
+    if pay_cycle not in PAYROLL_CYCLES:
+        raise ApiError(400, "Choose how often this employee is paid.")
+    pay_method = str(payload.get("payMethod", "")).strip()
+    if pay_method not in PAYROLL_METHODS:
+        raise ApiError(400, "Choose a payment method.")
+    mpesa_phone = str(payload.get("mpesaPhone", "")).strip()[:20]
+    bank_name = str(payload.get("bankName", "")).strip()[:80]
+    bank_branch = str(payload.get("bankBranch", "")).strip()[:80]
+    bank_account = str(payload.get("bankAccount", "")).strip()[:60]
+    if pay_method == "mpesa" and not 10 <= len(digits(mpesa_phone)) <= 15:
+        raise ApiError(400, "Enter the M-Pesa phone number used for salary payments.")
+    if pay_method == "bank" and (not bank_name or not bank_account):
+        raise ApiError(400, "Enter the bank name and account number used for salary payments.")
+    return {
+        "employee_no": employee_no,
+        "base_salary": base_salary,
+        "pay_cycle": pay_cycle,
+        "pay_method": pay_method,
+        "mpesa_phone": mpesa_phone if pay_method == "mpesa" else "",
+        "bank_name": bank_name if pay_method == "bank" else "",
+        "bank_branch": bank_branch if pay_method == "bank" else "",
+        "bank_account": bank_account if pay_method == "bank" else "",
+        "national_id": str(payload.get("nationalId", "")).strip()[:20],
+        "kra_pin": str(payload.get("kraPin", "")).strip()[:20],
+        "notes": str(payload.get("notes", "")).strip()[:2000],
+    }
+
+
+def clean_payroll_transaction(payload):
+    kind = str(payload.get("kind", "")).strip()
+    if kind not in PAYROLL_KINDS:
+        raise ApiError(400, "Choose the type of payment to record.")
+    amount = clean_amount(payload.get("amount", 0))
+    method = str(payload.get("method", "")).strip()
+    if method not in PAYROLL_METHODS:
+        raise ApiError(400, "Choose how the payment was made.")
+    period = str(payload.get("period", "")).strip()
+    if period and not re.match(r"^\d{4}-\d{2}$", period):
+        raise ApiError(400, "Enter the pay period as YYYY-MM.")
+    return {
+        "kind": kind,
+        "amount": amount,
+        "period": period,
+        "method": method,
+        "reference": str(payload.get("reference", "")).strip()[:80],
+        "notes": str(payload.get("notes", "")).strip()[:255],
+    }
+
+
+def payroll_totals(row):
+    lent = float(row["lent"] or 0)
+    repaid = float(row["repaid"] or 0)
+    return {
+        "paidOut": float(row["paid_out"] or 0),
+        "paidMonth": float(row["paid_month"] or 0),
+        "deducted": float(row["deducted"] or 0),
+        "outstanding": round(lent - repaid, 2),
+    }
+
+
 def session_account_id(cursor, token, kind):
     if not token:
         return None
@@ -2569,7 +2764,17 @@ def session_account_id(cursor, token, kind):
         (token, kind, SESSION_SECONDS),
     )
     row = cursor.fetchone()
-    return row["account_id"] if row else None
+    if not row:
+        return None
+    # Staff sign-ins are tracked separately so the performance report keeps
+    # working after logout — bump last activity at most once a minute.
+    cursor.execute(
+        """UPDATE isp_staff_signins SET last_seen_at = NOW()
+           WHERE token = %s AND signed_out_at IS NULL
+             AND last_seen_at < DATE_SUB(NOW(), INTERVAL 60 SECOND)""",
+        (token,),
+    )
+    return row["account_id"]
 
 
 def approved_account(cursor, table, account_id):
@@ -3182,11 +3387,26 @@ class Handler(BaseHTTPRequestHandler):
             return self.update_profile(cursor, "client", payload, token.get("isp_client_session"))
         if method == "GET" and path == "/api/client/staff":
             return self.list_client_staff(cursor, token.get("isp_client_session")), None
+        if method == "GET" and path == "/api/client/performance-settings":
+            return self.read_performance_settings(cursor, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/client/performance-settings":
+            return self.save_performance_settings(cursor, payload, token.get("isp_client_session")), None
+        if method == "GET" and path.startswith("/api/client/staff/") and path.endswith("/performance"):
+            leaf = path.removeprefix("/api/client/staff/").removesuffix("/performance").strip("/")
+            return self.staff_performance(cursor, leaf, token.get("isp_client_session"), query), None
         if method == "POST" and path == "/api/client/staff":
             return {"staff": self.create_client_staff(cursor, payload, token.get("isp_client_session"))}, None
         if method == "POST" and path.startswith("/api/client/staff/"):
             leaf = path.removeprefix("/api/client/staff/").strip("/")
             return self.change_client_staff(cursor, leaf, payload, token.get("isp_client_session")), None
+        if method == "GET" and path == "/api/client/payroll":
+            return self.list_payroll(cursor, token.get("isp_client_session")), None
+        if path.startswith("/api/client/payroll/"):
+            leaf = path.removeprefix("/api/client/payroll/").strip("/")
+            if method == "GET" and "/" not in leaf:
+                return self.payroll_account(cursor, leaf, token.get("isp_client_session")), None
+            if method == "POST":
+                return self.change_payroll(cursor, leaf, payload, token.get("isp_client_session")), None
         if method == "GET" and path == "/api/client/onboardings":
             return self.list_onboardings(cursor, token.get("isp_client_session")), None
         if method == "GET" and path == "/api/client/technicians":
@@ -3474,6 +3694,10 @@ class Handler(BaseHTTPRequestHandler):
                 "INSERT INTO isp_sessions (token, account_kind, account_id, opened_by) VALUES (%s, 'client', %s, %s)",
                 (session, staff["client_id"], staff["id"]),
             )
+            cursor.execute(
+                "INSERT INTO isp_staff_signins (id, client_id, staff_id, token) VALUES (%s, %s, %s, %s)",
+                (str(uuid.uuid4()), staff["client_id"], staff["id"], session),
+            )
             cursor.execute("SELECT * FROM isp_clients WHERE id = %s", (staff["client_id"],))
             account = cursor.fetchone()
             public = public_client(account)
@@ -3576,6 +3800,11 @@ class Handler(BaseHTTPRequestHandler):
         values.append(account_id)
         cursor.execute(f"UPDATE {table} SET {columns} WHERE id = %s", tuple(values))
         if password_changed:
+            if kind == "client":
+                cursor.execute(
+                    "UPDATE isp_staff_signins SET signed_out_at = NOW() WHERE client_id = %s AND signed_out_at IS NULL AND token <> %s",
+                    (account_id, token or ""),
+                )
             cursor.execute(
                 "DELETE FROM isp_sessions WHERE account_id = %s AND account_kind = %s AND token <> %s",
                 (account_id, kind, token or ""),
@@ -3696,6 +3925,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def clear_session(self, cursor, token, kind):
         if token:
+            cursor.execute(
+                "UPDATE isp_staff_signins SET signed_out_at = NOW() WHERE token = %s AND signed_out_at IS NULL",
+                (token,),
+            )
             cursor.execute("DELETE FROM isp_sessions WHERE token = %s AND account_kind = %s", (token, kind))
 
     def require_client(self, cursor, token):
@@ -3777,8 +4010,8 @@ class Handler(BaseHTTPRequestHandler):
         row_id = str(uuid.uuid4())
         cursor.execute(
             """INSERT INTO isp_onboardings
-               (id, client_id, staff_id, first_name, last_name, phone, email, building_name, house_number, package_name, router_id, package_id, serial, pppoe_username, pppoe_password, status)
-               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending_activation')""",
+               (id, client_id, staff_id, first_name, last_name, phone, email, building_name, house_number, package_name, router_id, package_id, serial, pppoe_username, pppoe_password, status, submitted_at)
+               VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'pending_activation', NOW())""",
             (row_id, session["account_id"], session["opened_by"], first, last, phone, email, building, house, package_name, router_id, package_id, serial, pppoe_username, pppoe_password),
         )
         cursor.execute("SELECT * FROM isp_onboardings WHERE id = %s", (row_id,))
@@ -3869,7 +4102,7 @@ class Handler(BaseHTTPRequestHandler):
             if not cursor.fetchone():
                 raise ApiError(400, "Choose a valid technician.")
             cursor.execute(
-                "UPDATE isp_onboardings SET assigned_to = %s, status = 'onboarding' WHERE id = %s",
+                "UPDATE isp_onboardings SET assigned_to = %s, status = 'onboarding', claimed_at = COALESCE(claimed_at, NOW()) WHERE id = %s",
                 (target_id, row["id"]),
             )
         elif action == "activate":
@@ -3900,7 +4133,7 @@ class Handler(BaseHTTPRequestHandler):
                         row["serial"] or None, row["staff_id"],
                     ),
                 )
-            cursor.execute("UPDATE isp_onboardings SET status = 'completed' WHERE id = %s", (row["id"],))
+            cursor.execute("UPDATE isp_onboardings SET status = 'completed', completed_at = NOW() WHERE id = %s", (row["id"],))
         elif action == "return":
             if session["opened_by"]:
                 cursor.execute("SELECT role FROM isp_client_employees WHERE id = %s", (session["opened_by"],))
@@ -3913,7 +4146,7 @@ class Handler(BaseHTTPRequestHandler):
             if len(reason) < 3:
                 raise ApiError(400, "Give a reason for returning the ticket.")
             cursor.execute(
-                "UPDATE isp_onboardings SET status = 'onboarding', return_reason = %s WHERE id = %s",
+                "UPDATE isp_onboardings SET status = 'onboarding', return_reason = %s, submitted_at = NULL WHERE id = %s",
                 (reason, row["id"]),
             )
         elif not session["opened_by"]:
@@ -3922,14 +4155,14 @@ class Handler(BaseHTTPRequestHandler):
             if row["status"] != "new" or row["assigned_to"]:
                 raise ApiError(409, "That ticket has already been picked up.")
             cursor.execute(
-                "UPDATE isp_onboardings SET status = 'onboarding', assigned_to = %s WHERE id = %s",
+                "UPDATE isp_onboardings SET status = 'onboarding', assigned_to = %s, claimed_at = NOW() WHERE id = %s",
                 (session["opened_by"], row["id"]),
             )
         else:
             if row["status"] != "onboarding" or row["assigned_to"] != session["opened_by"]:
                 raise ApiError(409, "Pick up the ticket before onboarding it.")
             if row["kind"] == "fault":
-                cursor.execute("UPDATE isp_onboardings SET status = 'completed' WHERE id = %s", (row["id"],))
+                cursor.execute("UPDATE isp_onboardings SET status = 'completed', completed_at = NOW() WHERE id = %s", (row["id"],))
                 cursor.execute("SELECT * FROM isp_onboardings WHERE id = %s", (row["id"],))
                 return {"onboarding": public_onboarding(cursor.fetchone())}
             router_id = str(payload.get("routerId", "")).strip()[:36] or None
@@ -3955,7 +4188,7 @@ class Handler(BaseHTTPRequestHandler):
                 """UPDATE isp_onboardings
                    SET router_id = %s, package_id = %s, package_name = %s, serial = %s,
                        pppoe_username = %s, pppoe_password = %s,
-                       status = 'pending_activation', staff_id = %s
+                       status = 'pending_activation', submitted_at = NOW(), staff_id = %s
                    WHERE id = %s""",
                 (router_id, package_id, str(payload.get("packageName", "")).strip()[:120],
                  serial, pppoe_username, pppoe_password, session["opened_by"], row["id"]),
@@ -3970,6 +4203,240 @@ class Handler(BaseHTTPRequestHandler):
             (client_id,),
         )
         return {"staff": [public_client_employee(row) for row in cursor.fetchall()]}
+
+    STAGE_TARGET_DEFAULTS = {"new": 60, "onboarding": 240, "pendingActivation": 1440, "fault": 240}
+    STAGE_TARGET_COLUMNS = {
+        "new": "stage_new_minutes",
+        "onboarding": "stage_onboarding_minutes",
+        "pendingActivation": "stage_activation_minutes",
+        "fault": "stage_fault_minutes",
+    }
+
+    def performance_targets(self, cursor, client_id):
+        cursor.execute(
+            """SELECT stage_new_minutes, stage_onboarding_minutes, stage_activation_minutes, stage_fault_minutes
+               FROM isp_performance_settings WHERE client_id = %s""",
+            (client_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return dict(self.STAGE_TARGET_DEFAULTS)
+        return {
+            "new": int(row["stage_new_minutes"]),
+            "onboarding": int(row["stage_onboarding_minutes"]),
+            "pendingActivation": int(row["stage_activation_minutes"]),
+            "fault": int(row["stage_fault_minutes"]),
+        }
+
+    def performance_workday(self, cursor, client_id):
+        cursor.execute(
+            """SELECT TIME_FORMAT(day_start, '%%H:%%i') AS day_start,
+                      TIME_FORMAT(day_end, '%%H:%%i') AS day_end
+               FROM isp_performance_settings WHERE client_id = %s""",
+            (client_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            return {"start": "08:00", "end": "17:00"}
+        return {"start": row["day_start"], "end": row["day_end"]}
+
+    def read_performance_settings(self, cursor, token):
+        client_id = require_owner_client(cursor, token, "performance settings")
+        return {
+            "workday": self.performance_workday(cursor, client_id),
+            "stages": self.performance_targets(cursor, client_id),
+        }
+
+    def save_performance_settings(self, cursor, payload, token):
+        client_id = require_owner_client(cursor, token, "performance settings")
+
+        def pick_time(name):
+            raw = str(payload.get(name, "")).strip()
+            if not re.match(r"^\d{2}:\d{2}$", raw):
+                raise ApiError(400, "Enter the day start and end times.")
+            hour, minute = (int(part) for part in raw.split(":"))
+            if hour > 23 or minute > 59:
+                raise ApiError(400, "Enter the day start and end times.")
+            return raw
+
+        day_start = pick_time("dayStart")
+        day_end = pick_time("dayEnd")
+        if day_end <= day_start:
+            raise ApiError(400, "The day end must be later than the day start.")
+        submitted = payload.get("stages") or {}
+        current = self.performance_targets(cursor, client_id)
+
+        def pick_minutes(name):
+            raw = submitted.get(name, current[name])
+            try:
+                minutes = int(raw)
+            except (TypeError, ValueError):
+                raise ApiError(400, "Enter how long each ticket stage should take.")
+            if not 1 <= minutes <= 43200:
+                raise ApiError(400, "Each stage target must be between a minute and 30 days.")
+            return minutes
+
+        stages = {name: pick_minutes(name) for name in self.STAGE_TARGET_COLUMNS}
+        cursor.execute(
+            """INSERT INTO isp_performance_settings (
+                 client_id, day_start, day_end,
+                 stage_new_minutes, stage_onboarding_minutes, stage_activation_minutes, stage_fault_minutes
+               ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+               ON DUPLICATE KEY UPDATE
+                 day_start = VALUES(day_start), day_end = VALUES(day_end),
+                 stage_new_minutes = VALUES(stage_new_minutes),
+                 stage_onboarding_minutes = VALUES(stage_onboarding_minutes),
+                 stage_activation_minutes = VALUES(stage_activation_minutes),
+                 stage_fault_minutes = VALUES(stage_fault_minutes)""",
+            (
+                client_id, day_start, day_end,
+                stages["new"], stages["onboarding"], stages["pendingActivation"], stages["fault"],
+            ),
+        )
+        return self.read_performance_settings(cursor, token)
+
+    def staff_performance(self, cursor, staff_id, token, query):
+        client_id = require_owner_client(cursor, token, "employee performance")
+        cursor.execute(
+            "SELECT id FROM isp_client_employees WHERE id = %s AND client_id = %s",
+            (staff_id, client_id),
+        )
+        if not cursor.fetchone():
+            raise ApiError(404, "That employee was not found.")
+
+        def pick_date(name, fallback):
+            raw = str((query.get(name) or [""])[0]).strip()
+            try:
+                return datetime.strptime(raw, "%Y-%m-%d").date()
+            except ValueError:
+                return fallback
+
+        today = datetime.now().date()
+        start = pick_date("from", today - timedelta(days=29))
+        end = pick_date("to", today)
+        if end < start:
+            start, end = end, start
+        if (end - start).days > 366:
+            start = end - timedelta(days=366)
+        until = end + timedelta(days=1)
+        workday = self.performance_workday(cursor, client_id)
+        day_open = tuple(int(part) for part in workday["start"].split(":"))
+        day_close = tuple(int(part) for part in workday["end"].split(":"))
+        cursor.execute(
+            """SELECT s.signed_in_at, s.last_seen_at, s.signed_out_at,
+                      sess.created_at AS live_since
+               FROM isp_staff_signins s
+               LEFT JOIN isp_sessions sess
+                 ON sess.token = s.token AND sess.created_at >= DATE_SUB(NOW(), INTERVAL %s SECOND)
+               WHERE s.client_id = %s AND s.staff_id = %s
+                 AND s.signed_in_at >= %s AND s.signed_in_at < %s
+               ORDER BY s.signed_in_at""",
+            (SESSION_SECONDS, client_id, staff_id, start, until),
+        )
+        signins = list(cursor.fetchall())
+        # Sessions opened before sign-in tracking began still count toward the
+        # day; without a tracked sign-out they only contribute their sign-in.
+        cursor.execute(
+            """SELECT created_at, created_at >= DATE_SUB(NOW(), INTERVAL %s SECOND) AS fresh
+               FROM isp_sessions
+               WHERE account_kind = 'client' AND account_id = %s AND opened_by = %s
+                 AND created_at >= %s AND created_at < %s
+                 AND token NOT IN (SELECT token FROM isp_staff_signins)""",
+            (SESSION_SECONDS, client_id, staff_id, start, until),
+        )
+        signins += [
+            {"signed_in_at": row["created_at"], "last_seen_at": row["created_at"],
+             "signed_out_at": None, "live_since": row["created_at"] if row["fresh"] else None}
+            for row in cursor.fetchall()
+        ]
+        now = datetime.now()
+        days = {}
+        for row in signins:
+            sign_in = row["signed_in_at"]
+            live = row["signed_out_at"] is None and row["live_since"] is not None
+            seen = [value for value in (row["signed_out_at"], row["last_seen_at"]) if value is not None]
+            sign_out = max(now, *seen) if live else (max(seen) if seen else sign_in)
+            window_open = sign_in.replace(hour=day_open[0], minute=day_open[1], second=0, microsecond=0)
+            window_close = sign_in.replace(hour=day_close[0], minute=day_close[1], second=0, microsecond=0)
+            counted = max(0, (min(sign_out, window_close) - max(sign_in, window_open)).total_seconds())
+            day = str(sign_in.date())
+            entry = days.setdefault(day, {"stamps": [], "seconds": 0, "live": False})
+            entry["stamps"].append(sign_in)
+            entry["seconds"] += counted
+            entry["live"] = entry["live"] or live
+        stage_targets = self.performance_targets(cursor, client_id)
+        cursor.execute(
+            """SELECT id, kind, status, first_name, last_name, fault_client,
+                      created_at, claimed_at, submitted_at, completed_at
+               FROM isp_onboardings
+               WHERE client_id = %s AND (staff_id = %s OR assigned_to = %s)
+                 AND created_at >= %s AND created_at < %s
+               ORDER BY created_at DESC""",
+            (client_id, staff_id, staff_id, start, until),
+        )
+        items = []
+        by_status = {}
+        for row in cursor.fetchall():
+            by_status[row["status"]] = by_status.get(row["status"], 0) + 1
+            name = row["fault_client"] or f"{row['first_name']} {row['last_name']}".strip()
+
+            def stage_minutes(opened, closed):
+                if opened is None or closed is None:
+                    return None
+                return max(0, round((closed - opened).total_seconds() / 60))
+
+            status = row["status"]
+            stage_minutes_map = {
+                "new": stage_minutes(
+                    row["created_at"],
+                    row["claimed_at"] or (now if status == "new" else None),
+                ),
+                "onboarding": stage_minutes(
+                    row["claimed_at"],
+                    row["submitted_at"] or row["completed_at"] or (now if status == "onboarding" else None),
+                ),
+                "pendingActivation": stage_minutes(
+                    row["submitted_at"],
+                    row["completed_at"] or (now if status == "pending_activation" else None),
+                ),
+                # Faults skip activation — measured as total time to clear.
+                "fault": stage_minutes(
+                    row["created_at"] if row["kind"] == "fault" else None,
+                    row["completed_at"] or (now if status != "completed" else None),
+                ),
+            }
+            breached = any(
+                minutes is not None and minutes > stage_targets[stage]
+                for stage, minutes in stage_minutes_map.items()
+            )
+            items.append({
+                "id": row["id"],
+                "kind": row["kind"],
+                "status": status,
+                "clientName": name,
+                "createdAt": str(row["created_at"]),
+                "stageMinutes": stage_minutes_map,
+                "breached": breached,
+            })
+        day_open_minutes = day_open[0] * 60 + day_open[1]
+        return {
+            "range": {"from": str(start), "to": str(end)},
+            "workday": workday,
+            "stages": stage_targets,
+            "days": [
+                {
+                    "date": day,
+                    "logins": sorted(stamp.strftime("%H:%M") for stamp in entry["stamps"]),
+                    "firstLogin": min(entry["stamps"]).strftime("%H:%M"),
+                    "sessions": len(entry["stamps"]),
+                    "minutesInSession": round(entry["seconds"] / 60),
+                    "minutesLate": min(entry["stamps"]).hour * 60 + min(entry["stamps"]).minute - day_open_minutes,
+                    "live": entry["live"],
+                }
+                for day, entry in sorted(days.items(), reverse=True)
+            ],
+            "tickets": {"attended": len(items), "byStatus": by_status, "items": items},
+        }
 
     def create_client_staff(self, cursor, payload, token):
         client_id = require_owner_client(cursor, token, "staff accounts")
@@ -4015,6 +4482,10 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(404, "That staff account was not found.")
         if action in {"suspend", "remove"}:
             cursor.execute(
+                "UPDATE isp_staff_signins SET signed_out_at = NOW() WHERE staff_id = %s AND signed_out_at IS NULL",
+                (staff["id"],),
+            )
+            cursor.execute(
                 "DELETE FROM isp_sessions WHERE account_kind = 'client' AND opened_by = %s",
                 (staff["id"],),
             )
@@ -4048,6 +4519,10 @@ class Handler(BaseHTTPRequestHandler):
             cursor.execute(f"UPDATE isp_client_employees SET {columns} WHERE id = %s", tuple(values))
             if password_changed:
                 cursor.execute(
+                    "UPDATE isp_staff_signins SET signed_out_at = NOW() WHERE staff_id = %s AND signed_out_at IS NULL",
+                    (staff["id"],),
+                )
+                cursor.execute(
                     "DELETE FROM isp_sessions WHERE account_kind = 'client' AND opened_by = %s",
                     (staff["id"],),
                 )
@@ -4056,6 +4531,136 @@ class Handler(BaseHTTPRequestHandler):
             cursor.execute("UPDATE isp_client_employees SET status = %s WHERE id = %s", (status, staff["id"]))
         cursor.execute("SELECT * FROM isp_client_employees WHERE id = %s", (staff["id"],))
         return {"staff": public_client_employee(cursor.fetchone())}
+
+    def payroll_staff(self, cursor, client_id, staff_id):
+        cursor.execute(
+            "SELECT * FROM isp_client_employees WHERE id = %s AND client_id = %s",
+            (staff_id, client_id),
+        )
+        staff = cursor.fetchone()
+        if not staff:
+            raise ApiError(404, "That employee was not found.")
+        return staff
+
+    def payroll_account_row(self, cursor, client_id, staff_id):
+        cursor.execute(
+            "SELECT * FROM isp_payroll_accounts WHERE client_id = %s AND staff_id = %s",
+            (client_id, staff_id),
+        )
+        return cursor.fetchone()
+
+    def payroll_summary(self, cursor, client_id, staff_id=None):
+        extra = " AND staff_id = %s" if staff_id else ""
+        params = (client_id, staff_id) if staff_id else (client_id,)
+        cursor.execute(
+            f"""SELECT staff_id,
+                      SUM(CASE WHEN kind IN ('salary','bonus','loan','advance') THEN amount ELSE 0 END) AS paid_out,
+                      SUM(CASE WHEN kind IN ('salary','bonus')
+                               AND created_at >= DATE_FORMAT(NOW(), '%%Y-%%m-01') THEN amount ELSE 0 END) AS paid_month,
+                      SUM(CASE WHEN kind IN ('loan','advance') THEN amount ELSE 0 END) AS lent,
+                      SUM(CASE WHEN kind = 'repayment' THEN amount ELSE 0 END) AS repaid,
+                      SUM(CASE WHEN kind = 'deduction' THEN amount ELSE 0 END) AS deducted
+               FROM isp_payroll_transactions
+               WHERE client_id = %s{extra}
+               GROUP BY staff_id""",
+            params,
+        )
+        return {row["staff_id"]: payroll_totals(row) for row in cursor.fetchall()}
+
+    def payroll_entry(self, cursor, client_id, staff, summaries=None):
+        account = self.payroll_account_row(cursor, client_id, staff["id"])
+        summary = (summaries or self.payroll_summary(cursor, client_id, staff["id"])).get(
+            staff["id"],
+            {"paidOut": 0, "paidMonth": 0, "deducted": 0, "outstanding": 0},
+        )
+        return {
+            "staff": public_client_employee(staff),
+            "account": public_payroll_account(account) if account else None,
+            "summary": summary,
+        }
+
+    def list_payroll(self, cursor, token):
+        client_id = require_owner_client(cursor, token, "payroll")
+        cursor.execute(
+            "SELECT * FROM isp_client_employees WHERE client_id = %s ORDER BY first_name, last_name",
+            (client_id,),
+        )
+        staff = cursor.fetchall()
+        summaries = self.payroll_summary(cursor, client_id)
+        return {"employees": [self.payroll_entry(cursor, client_id, row, summaries) for row in staff]}
+
+    def payroll_account(self, cursor, staff_id, token):
+        client_id = require_owner_client(cursor, token, "payroll")
+        staff = self.payroll_staff(cursor, client_id, staff_id)
+        cursor.execute(
+            """SELECT * FROM isp_payroll_transactions
+               WHERE client_id = %s AND staff_id = %s
+               ORDER BY created_at DESC, id DESC LIMIT 200""",
+            (client_id, staff_id),
+        )
+        return {
+            **self.payroll_entry(cursor, client_id, staff),
+            "transactions": [public_payroll_transaction(row) for row in cursor.fetchall()],
+        }
+
+    def change_payroll(self, cursor, leaf, payload, token):
+        client_id = require_owner_client(cursor, token, "payroll")
+        staff_id, _, action = leaf.partition("/")
+        staff = self.payroll_staff(cursor, client_id, staff_id)
+        if not action:
+            fields = clean_payroll(payload)
+            existing = self.payroll_account_row(cursor, client_id, staff_id)
+            if existing:
+                cursor.execute(
+                    """UPDATE isp_payroll_accounts SET
+                         employee_no = %s, base_salary = %s, pay_cycle = %s, pay_method = %s,
+                         mpesa_phone = %s, bank_name = %s, bank_branch = %s, bank_account = %s,
+                         national_id = %s, kra_pin = %s, notes = %s
+                       WHERE id = %s""",
+                    (
+                        fields["employee_no"], fields["base_salary"], fields["pay_cycle"],
+                        fields["pay_method"], fields["mpesa_phone"], fields["bank_name"],
+                        fields["bank_branch"], fields["bank_account"], fields["national_id"],
+                        fields["kra_pin"], fields["notes"], existing["id"],
+                    ),
+                )
+            else:
+                cursor.execute(
+                    """INSERT INTO isp_payroll_accounts (
+                         id, client_id, staff_id, employee_no, base_salary, pay_cycle, pay_method,
+                         mpesa_phone, bank_name, bank_branch, bank_account, national_id, kra_pin, notes
+                       ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                    (
+                        str(uuid.uuid4()), client_id, staff_id, fields["employee_no"],
+                        fields["base_salary"], fields["pay_cycle"], fields["pay_method"],
+                        fields["mpesa_phone"], fields["bank_name"], fields["bank_branch"],
+                        fields["bank_account"], fields["national_id"], fields["kra_pin"],
+                        fields["notes"],
+                    ),
+                )
+            return self.payroll_entry(cursor, client_id, self.payroll_staff(cursor, client_id, staff_id))
+        if action == "transactions":
+            fields = clean_payroll_transaction(payload)
+            cursor.execute(
+                """INSERT INTO isp_payroll_transactions (
+                     id, client_id, staff_id, kind, amount, period, method, reference, notes
+                   ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+                (
+                    str(uuid.uuid4()), client_id, staff_id, fields["kind"], fields["amount"],
+                    fields["period"], fields["method"], fields["reference"], fields["notes"],
+                ),
+            )
+            return self.payroll_account(cursor, staff_id, token)
+        if action.startswith("transactions/") and action.endswith("/remove"):
+            tx_id = action.removeprefix("transactions/").removesuffix("/remove").strip("/")
+            cursor.execute(
+                "DELETE FROM isp_payroll_transactions WHERE id = %s AND client_id = %s AND staff_id = %s",
+                (tx_id, client_id, staff_id),
+            )
+            if cursor.rowcount == 0:
+                raise ApiError(404, "That payment record was not found.")
+            return self.payroll_account(cursor, staff_id, token)
+        raise ApiError(404, "That payroll request was not found.")
 
     def health(self, cursor):
         cursor.execute("SELECT 1 AS ok")

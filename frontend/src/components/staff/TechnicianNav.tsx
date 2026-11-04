@@ -1,9 +1,10 @@
-import { CirclePlus, LifeBuoy, Package, UserRound, Users } from "lucide-react";
+import { CirclePlus, LifeBuoy, MessageSquare, Package, UserRound, Users } from "lucide-react";
 import { Link } from "react-router-dom";
 import { clientPage } from "@/lib/accounts";
 import { useAuth } from "@/providers/AuthProvider";
 
 export const technicianLinks = [
+  { label: "Chats", to: "/chat", icon: MessageSquare, chip: "bg-emerald-500/15 text-emerald-400" },
   { label: "Tickets", to: "/tickets", icon: LifeBuoy, chip: "bg-amber-500/15 text-amber-400" },
   { label: "New client onboarding", to: "/onboard", icon: CirclePlus, chip: "bg-emerald-500/15 text-emerald-400" },
   { label: "Materials", to: "/materials", icon: Package, chip: "bg-cyan-500/15 text-cyan-400" },
@@ -11,6 +12,7 @@ export const technicianLinks = [
 ];
 
 export const customercareLinks = [
+  { label: "Chats", to: "/chat", icon: MessageSquare, chip: "bg-emerald-500/15 text-emerald-400" },
   { label: "Tickets", to: "/tickets", icon: LifeBuoy, chip: "bg-amber-500/15 text-amber-400" },
   { label: "Clients", to: "/clients", icon: Users, chip: "bg-violet-500/15 text-violet-400" },
 ];

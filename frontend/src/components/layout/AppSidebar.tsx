@@ -7,6 +7,7 @@ import {
   Building2,
   CirclePlus,
   CreditCard,
+  Download,
   Gauge,
   Import,
   KeyRound,
@@ -23,17 +24,20 @@ import {
   Receipt,
   Router,
   Settings,
+  Share,
   SlidersHorizontal,
   UserRound,
   Users,
+  Wallet,
   Wifi,
   Wrench,
   type LucideIcon,
 } from "lucide-react";
-import { useEffect } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { LogoMark } from "@/components/brand/Logo";
 import { cn } from "@/lib/cn";
+import { getPwa, installPwa, subscribePwa } from "@/lib/pwa";
 
 export type SidebarItem = {
   label: string;
@@ -78,6 +82,11 @@ const ITEM_ICONS: Record<string, { icon: LucideIcon; chip: string }> = {
   "New tickets": { icon: LifeBuoy, chip: "bg-amber-500/15 text-amber-400" },
   Onboarding: { icon: CirclePlus, chip: "bg-emerald-500/15 text-emerald-400" },
   "Pending activation": { icon: Package, chip: "bg-cyan-500/15 text-cyan-400" },
+  "Pending approvals": { icon: UserRound, chip: "bg-amber-500/15 text-amber-400" },
+  Payroll: { icon: Wallet, chip: "bg-emerald-500/15 text-emerald-400" },
+  "Add employee": { icon: CirclePlus, chip: "bg-emerald-500/15 text-emerald-400" },
+  Performance: { icon: Gauge, chip: "bg-violet-500/15 text-violet-400" },
+  Employees: { icon: Users, chip: "bg-emerald-500/15 text-emerald-400" },
   Completed: { icon: UserRound, chip: "bg-indigo-500/15 text-indigo-400" },
   "Faulty tickets": { icon: LifeBuoy, chip: "bg-rose-500/15 text-rose-400" },
   "Create ticket": { icon: CirclePlus, chip: "bg-emerald-500/15 text-emerald-400" },
@@ -85,9 +94,42 @@ const ITEM_ICONS: Record<string, { icon: LucideIcon; chip: string }> = {
   "Hotspot clients": { icon: Wifi, chip: "bg-violet-500/15 text-violet-400" },
   Materials: { icon: Package, chip: "bg-cyan-500/15 text-cyan-400" },
   "My account": { icon: UserRound, chip: "bg-indigo-500/15 text-indigo-400" },
+  Chats: { icon: MessageSquare, chip: "bg-emerald-500/15 text-emerald-400" },
+  "Install app": { icon: Download, chip: "bg-emerald-500/15 text-emerald-400" },
 };
 
 const FALLBACK_ICON = { icon: LayoutDashboard, chip: "bg-sidebar-active text-sidebar-accent" };
+
+function InstallAppItem({ className }: { className: string }) {
+  const pwa = useSyncExternalStore(subscribePwa, getPwa);
+  const [showHint, setShowHint] = useState(false);
+  if (pwa.installed) return null;
+  if (pwa.canInstall) {
+    return (
+      <button type="button" className={className} onClick={() => void installPwa()}>
+        <LinkIcon icon={Download} chip="bg-emerald-500/15 text-emerald-400" />
+        Install app
+      </button>
+    );
+  }
+  if (pwa.ios) {
+    return (
+      <div>
+        <button type="button" className={className} onClick={() => setShowHint((v) => !v)}>
+          <LinkIcon icon={Download} chip="bg-emerald-500/15 text-emerald-400" />
+          Install app
+        </button>
+        {showHint ? (
+          <p className="flex items-start gap-1.5 px-3 py-1.5 text-xs leading-5 text-sidebar-muted">
+            <Share className="mt-0.5 h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            Tap Share, then “Add to Home Screen” to install this app.
+          </p>
+        ) : null}
+      </div>
+    );
+  }
+  return null;
+}
 
 function LinkIcon({ icon: Icon, chip }: { icon: LucideIcon; chip: string }) {
   return (
@@ -291,6 +333,7 @@ export function AppSidebar({
             <span className="truncate">{notifyLabel}</span>
           </Link>
         ) : null}
+        <InstallAppItem className="relative flex min-h-11 items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm font-medium text-sidebar-foreground transition-colors duration-fast ease-out hover:bg-sidebar-hover hover:text-white" />
         <button
           type="button"
           className="relative flex min-h-11 items-center gap-2.5 rounded-lg px-3 py-2 text-left text-sm font-medium text-sidebar-foreground transition-colors duration-fast ease-out hover:bg-sidebar-hover hover:text-white"

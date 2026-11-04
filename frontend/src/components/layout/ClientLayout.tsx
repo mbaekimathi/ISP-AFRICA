@@ -18,8 +18,10 @@ const CODE_SEGMENT = /^\/[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{8}(?=\/|$)/;
 const STAFF_ROLE_SEGMENT = /^\/isp-(?:technician|customercare|manager)(?=\/|$)/;
 
 const sectionLinks = [
+  { label: "Chats", to: "/chat" },
   { label: "Mikrotiks", to: "/mikrotiks" },
   { label: "Clients", to: "/clients" },
+  { label: "Tickets", to: "/tickets" },
   { label: "Billings", to: "/billings" },
   { label: "HR", to: "/hr" },
 ];
@@ -59,10 +61,22 @@ const communicationsLinks = [
 const hrLinks = [
   { label: "Employees", to: "/hr" },
   { label: "Pending approvals", to: "/hr/pending" },
+  { label: "Payroll", to: "/hr/payroll" },
+  { label: "Performance", to: "/hr/performance" },
   { label: "Add employee", to: "/hr?add=1" },
 ];
 
+const performanceLinks = [
+  { label: "Performance settings", to: "/hr/performance/settings" },
+];
+
+const staffPerformanceLinks = [
+  { label: "All employees", to: "/hr/performance" },
+  { label: "Performance settings", to: "/hr/performance/settings" },
+];
+
 const technicianLinks = [
+  { label: "Chats", to: "/chat" },
   { label: "Tickets", to: "/tickets" },
   { label: "New client onboarding", to: "/onboard" },
   { label: "Materials", to: "/materials" },
@@ -80,8 +94,14 @@ const ticketLinks = [
 ];
 
 const customercareLinks = [
+  { label: "Chats", to: "/chat" },
   { label: "Tickets", to: "/tickets" },
   { label: "Clients", to: "/clients" },
+];
+
+const chatLinks = [
+  { label: "Tickets", to: "/tickets" },
+  { label: "Create ticket", to: "/tickets?add=1" },
 ];
 
 
@@ -158,8 +178,20 @@ function linksForPage(pathname: string, advertsEnabled: boolean) {
       { label: "PPPoE-clients", to: "/clients" },
     ];
   }
-  if (pathname === "/hr" || pathname === "/hr/pending" || pathname.endsWith("/hr") || pathname.endsWith("/hr/pending")) {
+  if (pathname === "/tickets" || pathname.endsWith("/tickets")) {
+    return createTicketLinks;
+  }
+  if (pathname === "/chat" || pathname.endsWith("/chat")) {
+    return chatLinks;
+  }
+  if (pathname === "/hr" || pathname.endsWith("/hr") || pathname.startsWith("/hr/payroll")) {
     return hrLinks;
+  }
+  if (pathname === "/hr/performance" || pathname.endsWith("/hr/performance")) {
+    return performanceLinks;
+  }
+  if (/(?:^|\/)hr\/performance\/[^/]+$/.test(pathname) && !pathname.endsWith("/settings")) {
+    return staffPerformanceLinks;
   }
   if (pathname === "/billings" || pathname.endsWith("/billings") || pathname.endsWith("/billings/gateway")) {
     return [
@@ -233,12 +265,14 @@ export function ClientLayout() {
           ? technicianLinks
           : page === "/onboard"
             ? onboardLinks
-            : page === "/tickets"
-              ? ticketLinks.map((item) => ({
-                    ...item,
-                    label: item.status ? `${item.label} (${ticketCounts[item.status] ?? 0})` : item.label,
-                  }))
-              : []
+            : page === "/chat"
+              ? technicianLinks
+              : page === "/tickets"
+                ? ticketLinks.map((item) => ({
+                      ...item,
+                      label: item.status ? `${item.label} (${ticketCounts[item.status] ?? 0})` : item.label,
+                    }))
+                : []
         ).map((item) => ({
           ...item,
           to: user ? clientPage(user, item.to) : item.to,
@@ -246,11 +280,13 @@ export function ClientLayout() {
       : staffRole === "isp-customercare"
         ? (page === "/dashboard"
             ? customercareLinks
-            : page === "/tickets"
-              ? createTicketLinks
-              : page.startsWith("/clients")
-                ? customerClientLinks
-                : []
+            : page === "/chat"
+              ? customercareLinks
+              : page === "/tickets"
+                ? createTicketLinks
+                : page.startsWith("/clients")
+                  ? customerClientLinks
+                  : []
           ).map((item) => ({ ...item, to: user ? clientPage(user, item.to) : item.to }))
         : isStaff
         ? []

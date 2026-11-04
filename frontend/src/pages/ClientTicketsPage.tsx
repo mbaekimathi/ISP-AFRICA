@@ -6,7 +6,7 @@ import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { PageHeader } from "@/components/ui/DetailGrid";
 import { FormField } from "@/components/ui/FormField";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { TechnicianMobileNav } from "@/components/staff/TechnicianNav";
+import { CustomerCareMobileNav, TechnicianMobileNav } from "@/components/staff/TechnicianNav";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
 import { useAuth } from "@/providers/AuthProvider";
@@ -154,7 +154,10 @@ export function ClientTicketsPage() {
 
   const selectedPackage = packages.find((item) => item.id === service.packageId);
   const { user } = useAuth();
-  const overview = user?.delegate?.kind === "isp-employee" && user.delegate.role === "isp-customercare";
+  const overview =
+    !user?.delegate ||
+    (user.delegate.kind === "isp-employee" &&
+      (user.delegate.role === "isp-customercare" || user.delegate.role === "isp-manager"));
   const [technicians, setTechnicians] = useState<{ id: string; name: string }[]>([]);
   useEffect(() => {
     if (!overview) return;
@@ -544,7 +547,12 @@ export function ClientTicketsPage() {
           </Dialog.Portal>
         </Dialog.Root>
       </div>
-      <TechnicianMobileNav />
+      {user?.delegate?.kind === "isp-employee" && user.delegate.role === "isp-technician" ? (
+        <TechnicianMobileNav />
+      ) : null}
+      {user?.delegate?.kind === "isp-employee" && user.delegate.role === "isp-customercare" ? (
+        <CustomerCareMobileNav />
+      ) : null}
       <div className={`mt-6 flex flex-wrap gap-2 lg:hidden${overview ? " hidden" : ""}`}>
         {tabs.map((item) => (
           <button

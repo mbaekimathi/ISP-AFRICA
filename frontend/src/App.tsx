@@ -25,8 +25,11 @@ import { ClientsPage } from "@/pages/ClientsPage";
 import { ClientOnboardPage } from "@/pages/ClientOnboardPage";
 import { ClientStaffDashboardPage } from "@/pages/ClientStaffDashboardPage";
 import { ClientStaffPage } from "@/pages/ClientStaffPage";
+import { ClientPerformanceSettingsPage, ClientStaffPerformanceDetailPage, ClientStaffPerformancePage } from "@/pages/ClientStaffPerformancePage";
+import { ChatPage } from "@/pages/ChatPage";
 import { ClientTicketsPage } from "@/pages/ClientTicketsPage";
 import { ClientUsagePage } from "@/pages/ClientUsagePage";
+import { PayrollAccountPage, PayrollPage } from "@/pages/PayrollPage";
 import { WifiPaymentPage } from "@/pages/WifiPaymentPage";
 import { HotspotClientPage } from "@/pages/HotspotClientPage";
 import { ImportClientsPage } from "@/pages/ImportClientsPage";
@@ -65,6 +68,8 @@ const portalRoles = ["isp-technician", "isp-customercare", "isp-manager"] as con
 const clientPages = (
   <>
     <Route path="dashboard" element={<DashboardPage />} />
+    <Route path="tickets" element={<ClientTicketsPage />} />
+    <Route path="chat" element={<ChatPage />} />
     <Route path="mikrotiks" element={<MikrotiksPage />} />
     <Route path="mikrotiks/onboard" element={<OnboardMikrotikPage />} />
     <Route path="mikrotiks/import-clients" element={<ImportClientsPage />} />
@@ -87,6 +92,11 @@ const clientPages = (
     <Route path="hotspot/:purchaseId" element={<HotspotClientPage />} />
     <Route path="hr" element={<ClientStaffPage view="all" />} />
     <Route path="hr/pending" element={<ClientStaffPage view="pending" />} />
+    <Route path="hr/payroll" element={<PayrollPage />} />
+    <Route path="hr/payroll/:staffId" element={<PayrollAccountPage />} />
+    <Route path="hr/performance" element={<ClientStaffPerformancePage />} />
+    <Route path="hr/performance/settings" element={<ClientPerformanceSettingsPage />} />
+    <Route path="hr/performance/:staffId" element={<ClientStaffPerformanceDetailPage />} />
     <Route path="billings" element={<BillingsPage />} />
     <Route path="billings/gateway" element={<GatewayLedgerPage />} />
     <Route path="account" element={<AccountPage />} />
@@ -136,6 +146,7 @@ export function App() {
             <Route index element={<Navigate to="dashboard" replace />} />
             <Route path="dashboard" element={<ClientStaffDashboardPage />} />
             <Route path="tickets" element={<ClientTicketsPage />} />
+            <Route path="chat" element={<ChatPage />} />
             <Route path="onboard" element={<ClientOnboardPage />} />
             <Route path="materials" element={<SectionPage title="Materials" />} />
             <Route path="faulty" element={<SectionPage title="Faulty tickets" />} />
@@ -146,6 +157,7 @@ export function App() {
             <Route index element={<Navigate to="dashboard" replace />} />
             <Route path="dashboard" element={<ClientStaffDashboardPage />} />
             <Route path="tickets" element={<ClientTicketsPage />} />
+            <Route path="chat" element={<ChatPage />} />
             <Route path="clients" element={<ClientsPage key="pppoe" kind="pppoe" />} />
             <Route path="clients/hotspot" element={<ClientsPage key="hotspot" kind="hotspot" />} />
             <Route path="*" element={<Navigate to="dashboard" replace />} />
@@ -156,6 +168,7 @@ export function App() {
               <Route key={role} path={`/${role}/:code`} element={<ClientLayout />}>
                 <Route index element={<Navigate to="dashboard" replace />} />
                 <Route path="dashboard" element={<ClientStaffDashboardPage />} />
+                <Route path="chat" element={<ChatPage />} />
                 <Route path="*" element={<Navigate to="dashboard" replace />} />
               </Route>
             ))}
