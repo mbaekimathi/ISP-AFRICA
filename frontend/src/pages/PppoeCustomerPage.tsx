@@ -3,19 +3,20 @@ import { createPortal } from "react-dom";
 import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import * as Dialog from "@radix-ui/react-dialog";
 import {
-  Activity,
   ArrowLeft,
   ArrowRightLeft,
   ArrowUpDown,
   BadgeCheck,
-  CalendarClock,
   ChevronDown,
   Copy,
   Eye,
   EyeOff,
   Gauge,
+  History,
   KeyRound,
   Loader2,
+  LogIn,
+  LogOut,
   MapPin,
   Pause,
   Pencil,
@@ -24,11 +25,10 @@ import {
   Power,
   ReceiptText,
   Router,
-  Smartphone,
   Trash2,
   Unplug,
-  UserRound,
   Wallet,
+  type LucideIcon,
 } from "lucide-react";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { FormField } from "@/components/ui/FormField";
@@ -36,6 +36,7 @@ import { LiveLoad } from "@/components/ui/LiveLoad";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { clientPage } from "@/lib/accounts";
 import { useAuth } from "@/providers/AuthProvider";
 
@@ -223,37 +224,6 @@ function ActionDialog({
   );
 }
 
-function Section({
-  title,
-  open,
-  onToggle,
-  action,
-  children,
-}: {
-  title: string;
-  open: boolean;
-  onToggle: (open: boolean) => void;
-  action?: ReactNode;
-  children: ReactNode;
-}) {
-  return (
-    <details
-      className="group border-t border-border first:border-t-0"
-      open={open}
-      onToggle={(event) => onToggle(event.currentTarget.open)}
-    >
-      <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-4 text-sm font-semibold hover:bg-surface-muted [&::-webkit-details-marker]:hidden">
-        <span>{title}</span>
-        <span className="flex items-center gap-3">
-          {action}
-          <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-open:rotate-180" />
-        </span>
-      </summary>
-      <div className="px-5 pb-5 pt-1">{children}</div>
-    </details>
-  );
-}
-
 function TrendChart({
   data,
   formatY = (value) => String(value),
@@ -304,62 +274,6 @@ const cardActionClass =
 const iconButtonClass =
   "flex h-6 w-6 shrink-0 items-center justify-center rounded-md text-muted-foreground transition hover:bg-surface-muted hover:text-foreground";
 
-function StatCard({
-  icon,
-  iconClass,
-  label,
-  value,
-  hint,
-  valueClass,
-  hintClass,
-}: {
-  icon: ReactNode;
-  iconClass?: string;
-  label: string;
-  value: ReactNode;
-  hint?: ReactNode;
-  valueClass?: string;
-  hintClass?: string;
-}) {
-  return (
-    <div className="rounded-2xl border border-border bg-surface p-4 shadow-card">
-      <div className="flex items-center justify-between gap-2">
-        <p className="truncate text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
-        <span
-          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${iconClass ?? "bg-primary/10 text-primary"}`}
-          aria-hidden="true"
-        >
-          {icon}
-        </span>
-      </div>
-      <div className={`mt-2 flex min-w-0 items-center gap-1.5 text-lg font-semibold tracking-tight ${valueClass ?? ""}`}>{value}</div>
-      {hint != null && hint !== "" ? (
-        <p className={`mt-0.5 truncate text-xs ${hintClass ?? "text-muted-foreground"}`}>{hint}</p>
-      ) : null}
-    </div>
-  );
-}
-
-function CardHeader({
-  icon,
-  title,
-  children,
-}: {
-  icon: ReactNode;
-  title: ReactNode;
-  children?: ReactNode;
-}) {
-  return (
-    <div className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
-      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
-        {icon}
-      </span>
-      <h2 className="text-sm font-semibold">{title}</h2>
-      {children ? <div className="ml-auto flex flex-wrap items-center gap-2">{children}</div> : null}
-    </div>
-  );
-}
-
 function InfoRow({ label, children }: { label: string; children: ReactNode }) {
   return (
     <div className="flex items-baseline justify-between gap-3 border-b border-border/60 py-2.5 last:border-b-0">
@@ -381,7 +295,7 @@ export function PppoeCustomerPage() {
   const [routers, setRouters] = useState<RouterOption[]>([]);
   const [packageId, setPackageId] = useState("");
   const [routerId, setRouterId] = useState("");
-  const [openSection, setOpenSection] = useState<string | null>(null);
+  const [tab, setTab] = useState<"history" | "devices" | "usage">("history");
   const [dialog, setDialog] = useState<DialogKind | null>(search.get("edit") === "1" ? "edit" : null);
   const [busyAction, setBusyAction] = useState(false);
   const [reason, setReason] = useState("");
@@ -595,8 +509,6 @@ export function PppoeCustomerPage() {
   const totalOnline = (usageTrend ?? []).reduce((sum, point) => sum + point.minutes, 0);
   const totalDown = (healthTrend ?? []).reduce((sum, point) => sum + point.minutes, 0);
   const devices = [...(subscriber.devices ?? [])].sort((a, b) => Number(b.online) - Number(a.online));
-  const gadgets = devices.filter((device) => device.kind !== "router");
-  const devicesOnline = devices.filter((device) => device.online).length;
   const home = (path: string) => (user ? clientPage(user, path) : path);
   const status = labelFor(subscriber.status);
   const billing = billingLabelFor(subscriber.billingStatus);
@@ -657,12 +569,46 @@ export function PppoeCustomerPage() {
     statusTone = "text-warning";
   }
 
-  // The browser fires a "toggle" event on <details> both for user clicks and
-  // when React sets/removes the open attribute. Guard the close branch so a
-  // programmatic close of one section can't wipe out the section that was
-  // just opened.
-  const toggleSection = (id: string) => (next: boolean) =>
-    setOpenSection((current) => (next ? id : current === id ? null : current));
+  const history: { at: string | null; title: string; detail: string; icon: LucideIcon; tone: string }[] = [
+    ...subscriber.events.map((event) => ({
+      at: event.at,
+      title: event.action,
+      detail: event.reason,
+      icon: History,
+      tone: "bg-primary/10 text-primary",
+    })),
+    ...subscriber.sessions.flatMap((session) => [
+      {
+        at: session.login,
+        title: "Connected",
+        detail: [session.ip, session.logout ? "" : "Still connected"].filter(Boolean).join(" · "),
+        icon: LogIn,
+        tone: "bg-success-soft/70 text-success",
+      },
+      ...(session.logout
+        ? [
+            {
+              at: session.logout,
+              title: "Disconnected",
+              detail: [
+                duration(session.duration),
+                `${bytes(session.bytesIn)}↓ ${bytes(session.bytesOut)}↑`,
+                session.cause,
+              ]
+                .filter(Boolean)
+                .join(" · "),
+              icon: LogOut,
+              tone: "bg-warning/10 text-warning",
+            },
+          ]
+        : []),
+    ]),
+  ].sort((a, b) => (stampMs(b.at) ?? 0) - (stampMs(a.at) ?? 0));
+  const pageTabs: { id: typeof tab; label: string; count?: number }[] = [
+    { id: "history", label: "History", count: history.length },
+    { id: "devices", label: "Devices", count: devices.length },
+    { id: "usage", label: "Usage" },
+  ];
 
   const menuItems: { label: string; icon?: ReactNode; danger?: boolean; onClick: () => void }[] = [
     { label: "Transactions", icon: <ReceiptText className="h-4 w-4" />, onClick: () => navigate(home(`/pppoe/${subscriberId}/transactions`)) },
@@ -698,22 +644,22 @@ export function PppoeCustomerPage() {
           <ArrowLeft className="h-4 w-4" />
           PPPoE clients
         </Link>
-        <div className="page-header-actions">
-          <PrimaryButton to={`${home(`/pppoe/${subscriberId}/transactions`)}?pay=1`} className="min-h-10">
-            <Wallet className="h-4 w-4" aria-hidden="true" />
+        <div className="page-header-actions flex-nowrap">
+          <PrimaryButton to={`${home(`/pppoe/${subscriberId}/transactions`)}?pay=1`} className="min-h-10 flex-1 whitespace-nowrap px-3 sm:flex-none sm:px-4">
+            <Wallet className="hidden h-4 w-4 sm:block" aria-hidden="true" />
             Record payment
           </PrimaryButton>
           {pendingApproval ? (
-            <SecondaryButton className="min-h-10" onClick={() => void post("activate", {})}>
-              <BadgeCheck className="h-4 w-4" aria-hidden="true" />
+            <SecondaryButton className="min-h-10 flex-1 whitespace-nowrap px-3 sm:flex-none sm:px-4" onClick={() => void post("activate", {})}>
+              <BadgeCheck className="hidden h-4 w-4 sm:block" aria-hidden="true" />
               Approve
             </SecondaryButton>
           ) : ended || subscriber.status === "expired" ? null : (
-            <SecondaryButton className="min-h-10" onClick={() => setDialog("suspend")}>
+            <SecondaryButton className="min-h-10 flex-1 whitespace-nowrap px-3 sm:flex-none sm:px-4" onClick={() => setDialog("suspend")}>
               {suspended ? (
-                <Play className="h-4 w-4" aria-hidden="true" />
+                <Play className="hidden h-4 w-4 sm:block" aria-hidden="true" />
               ) : (
-                <Pause className="h-4 w-4" aria-hidden="true" />
+                <Pause className="hidden h-4 w-4 sm:block" aria-hidden="true" />
               )}
               {suspended ? "Continue" : "Suspend"}
             </SecondaryButton>
@@ -723,7 +669,7 @@ export function PppoeCustomerPage() {
               ref={menuButtonRef}
               aria-haspopup="menu"
               aria-expanded={menuOpen}
-              className="min-h-10"
+              className="min-h-10 flex-1 whitespace-nowrap px-3 sm:flex-none sm:px-4"
               onClick={() => setMenuOpen((open) => !open)}
             >
               More
@@ -769,7 +715,7 @@ export function PppoeCustomerPage() {
       <section className="card mt-5 overflow-hidden">
         <div className="h-1 bg-gradient-brand" aria-hidden="true" />
         <div className="flex flex-wrap items-center gap-x-6 gap-y-4 px-5 py-5 sm:px-6">
-          <div className="flex min-w-0 items-center gap-4">
+          <div className="flex min-w-0 items-start gap-4 sm:items-center">
             <div
               className="relative flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-brand text-lg font-semibold text-primary-foreground shadow-sm"
               aria-hidden="true"
@@ -808,7 +754,7 @@ export function PppoeCustomerPage() {
             </div>
           </div>
           <div className="ml-auto flex items-center gap-2">
-            <div className="flex items-center gap-2 rounded-xl border border-border bg-surface-muted/50 px-3 py-2">
+            <div className="flex items-center gap-2 px-1 py-1">
               <KeyRound className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
               <code className="min-w-0 truncate text-sm font-medium">{subscriber.username}</code>
               <button
@@ -823,227 +769,190 @@ export function PppoeCustomerPage() {
             </div>
           </div>
         </div>
+              <dl className="mx-5 grid grid-cols-2 gap-4 border-t border-border py-4 sm:mx-6 md:grid-cols-4">
+          {[
+            { label: "Connection", value: statusLabel, hint: statusHint, tone: statusTone },
+            {
+              label: "Live speed",
+              value: liveSpeed,
+              hint: `Plan ${subscriber.downloadMbps ?? "—"}↓ ${subscriber.uploadMbps ?? "—"}↑ Mbps`,
+            },
+            {
+              label: "Outstanding",
+              value: outstandingDue ? `KSh ${subscriber.billing.outstanding}` : "KSh 0",
+              hint: `Due ${subscriber.billing.nextDueDate ?? "—"}`,
+              tone: outstandingDue ? "text-destructive" : "text-success",
+            },
+            { label: "Access expires", value: subscriber.billing.expiry ?? "—", hint: billing.label },
+          ].map((stat) => (
+            <div key={stat.label} className="min-w-0">
+              <dt className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{stat.label}</dt>
+              <dd className={cn("mt-1 truncate text-lg font-semibold tracking-tight", stat.tone)}>{stat.value}</dd>
+              {stat.hint ? <dd className="truncate text-xs text-muted-foreground">{stat.hint}</dd> : null}
+            </div>
+          ))}
+        </dl>
       </section>
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-2 xl:grid-cols-4">
-        <StatCard
-          icon={<Activity className="h-4 w-4" />}
-          label="Connection"
-          value={statusLabel}
-          valueClass={statusTone}
-          hint={statusHint}
-          hintClass={statusTone}
-        />
-        <StatCard
-          icon={<Gauge className="h-4 w-4" />}
-          label="Live speed"
-          value={liveSpeed}
-          hint={`Plan ${subscriber.downloadMbps ?? "—"}↓ ${subscriber.uploadMbps ?? "—"}↑ Mbps`}
-        />
-        <StatCard
-          icon={<Wallet className="h-4 w-4" />}
-          iconClass={outstandingDue ? "bg-destructive-soft/70 text-destructive" : "bg-success-soft/70 text-success"}
-          label="Outstanding"
-          value={outstandingDue ? `KSh ${subscriber.billing.outstanding}` : "KSh 0"}
-          valueClass={outstandingDue ? "text-destructive" : "text-success"}
-          hint={`Due ${subscriber.billing.nextDueDate ?? "—"}`}
-        />
-        <StatCard
-          icon={<CalendarClock className="h-4 w-4" />}
-          label="Access expires"
-          value={subscriber.billing.expiry ?? "—"}
-          hint={billing.label}
-        />
-      </div>
-
       <div className="mt-4 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
-        <div className="grid min-w-0 gap-4">
-          <section className="card overflow-hidden">
-            <CardHeader icon={<Activity className="h-4 w-4" />} title="Activity">
-              <p className="text-xs tabular-nums text-muted-foreground">
-                30 days {bytes(subscriber.usage.monthBytesIn + subscriber.usage.monthBytesOut)} ({bytes(subscriber.usage.monthBytesIn)}↓ {bytes(subscriber.usage.monthBytesOut)}↑)
-              </p>
-            </CardHeader>
-            <div className="grid sm:grid-cols-2 sm:divide-x sm:divide-border">
-              <div className="p-5">
-                <div className="flex items-baseline justify-between gap-3">
-                  <p className="text-xs font-medium text-muted-foreground">Online activity</p>
-                  <p className="text-xs tabular-nums text-muted-foreground">Last 3 hours · {totalOnline} min online</p>
-                </div>
-                {usageTrend === null ? (
-                  <p className="mt-3 text-sm text-muted-foreground">Reading activity…</p>
-                ) : (
-                  <TrendChart
-                    ariaLabel="Online activity"
-                    emptyText="No activity in the last 3 hours."
-                    formatY={(value) => `${value} min`}
-                    data={usageTrend.map((point) => ({ x: point.label, y: point.minutes }))}
-                  />
+        <section className="card min-w-0 overflow-hidden">
+          <div className="flex items-center gap-2 overflow-x-auto border-b border-border px-2 sm:px-4" role="tablist">
+            {pageTabs.map((item) => (
+              <button
+                key={item.id}
+                type="button"
+                role="tab"
+                aria-selected={tab === item.id}
+                onClick={() => setTab(item.id)}
+                className={cn(
+                  "-mb-px inline-flex shrink-0 items-center gap-2 border-b-2 px-3 py-3 text-sm transition",
+                  tab === item.id
+                    ? "border-primary font-medium text-foreground"
+                    : "border-transparent text-muted-foreground hover:text-foreground",
                 )}
-              </div>
-              <div className="border-t border-border p-5 sm:border-t-0">
-                <div className="flex items-baseline justify-between gap-3">
-                  <p className="text-xs font-medium text-muted-foreground">Router health · {subscriber.routerName}</p>
-                  <p className="text-xs tabular-nums text-muted-foreground">Last 3 hours · {totalDown} min down</p>
-                </div>
-                {healthTrend === null ? (
-                  <p className="mt-3 text-sm text-muted-foreground">Reading router health…</p>
-                ) : (
-                  <TrendChart
-                    ariaLabel="Router downtime"
-                    emptyText="No downtime recorded."
-                    formatY={(value) => `${value} min`}
-                    data={healthTrend.map((point) => ({ x: point.label, y: point.minutes }))}
-                  />
-                )}
-              </div>
-            </div>
-          </section>
-
-          <section className="card overflow-hidden">
-            <CardHeader icon={<Smartphone className="h-4 w-4" />} title="Devices">
-              <p className="text-xs tabular-nums text-muted-foreground">
-                {devicesOnline > 0 ? `${devicesOnline} online` : "None online"} · {gadgets.length} gadget{gadgets.length === 1 ? "" : "s"} · {devices.length} seen
-              </p>
-            </CardHeader>
-            <div className="px-5 pb-5 pt-4">
-              {devices.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No devices have connected yet.</p>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="data-table min-w-[44rem]">
-                    <thead className="text-xs text-muted-foreground">
-                      <tr>
-                        <th className="py-2">Device</th>
-                        <th className="py-2">Status</th>
-                        <th className="py-2">Connected for</th>
-                        <th className="py-2">Downloaded</th>
-                        <th className="py-2">Uploaded</th>
-                        <th className="py-2">Last seen</th>
-                        <th className="py-2">Sessions</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {devices.map((device) => (
-                        <tr key={device.mac} className="border-t border-border">
-                          <td className="py-2">
-                            <span className="flex items-center gap-2 font-medium">
-                              {device.name || (device.kind === "router" ? "Customer router" : "Unknown device")}
-                              {device.kind === "router" ? (
-                                <span className="rounded-full bg-primary/10 px-1.5 py-px text-[10px] font-semibold text-primary">Router</span>
-                              ) : null}
-                            </span>
-                            <code className="text-xs text-muted-foreground">
-                              {device.mac}
-                              {viaLabel(device.via) ? ` · ${viaLabel(device.via)}` : ""}
-                            </code>
-                          </td>
-                          <td className="py-2">
-                            {device.online ? (
-                              <span className="font-medium text-success">Online{device.ip ? ` · ${device.ip}` : ""}</span>
-                            ) : (
-                              <span className="text-muted-foreground">Offline</span>
-                            )}
-                          </td>
-                          <td className="py-2 tabular-nums">{device.online ? device.onlineFor || "—" : duration(device.seconds)}</td>
-                          <td className="py-2 tabular-nums">{bytes(device.bytesIn)}</td>
-                          <td className="py-2 tabular-nums">{bytes(device.bytesOut)}</td>
-                          <td className="py-2">{device.lastSeen ?? "Never"}</td>
-                          <td className="py-2">{device.sessions}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-              {!subscriber.accessInterface ? (
-                <p className="mt-3 text-xs text-muted-foreground">
-                  Only devices that sign in on this account are listed. Save a VLAN / access interface when registering the
-                  customer to also see the gadgets behind their router.
-                </p>
-              ) : null}
-            </div>
-          </section>
-
-          <section className="card overflow-hidden">
-            <Section
-              title="Sessions &amp; activity"
-              open={openSection === "history"}
-              onToggle={toggleSection("history")}
-              action={
-                <SecondaryButton
-                  type="button"
-                  className="min-h-8 px-3"
-                  onClick={(event) => {
-                    event.preventDefault();
-                    event.stopPropagation();
-                    void exportSessions();
-                  }}
-                >
+              >
+                {item.label}
+                {item.count !== undefined ? (
+                  <span className="rounded-full bg-surface-muted px-1.5 text-[11px] tabular-nums text-muted-foreground">{item.count}</span>
+                ) : null}
+              </button>
+            ))}
+          </div>
+          <div className="p-4 sm:p-5" role="tabpanel">
+            {tab === "history" ? (
+              <div className="mb-3 flex justify-end">
+                <button type="button" className={cardActionClass} onClick={() => void exportSessions()}>
                   Export CSV
-                </SecondaryButton>
-              }
-            >
-              <div className="grid gap-6 lg:grid-cols-2">
+                </button>
+              </div>
+            ) : null}
+            {tab === "history" ? (
+              history.length === 0 ? (
+                <p className="text-sm text-muted-foreground">No activity yet.</p>
+              ) : (
+                <ol>
+                  {history.map((entry, index) => {
+                    const Icon = entry.icon;
+                    return (
+                      <li key={`${entry.at}-${entry.title}-${index}`} className="relative flex gap-3 pb-4 last:pb-0">
+                        {index < history.length - 1 ? (
+                          <span className="absolute bottom-0 left-[11px] top-6 w-px bg-border" aria-hidden="true" />
+                        ) : null}
+                        <span
+                          className={cn("relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full", entry.tone)}
+                          aria-hidden="true"
+                        >
+                          <Icon className="h-3.5 w-3.5" />
+                        </span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                            <p className="text-sm font-medium">{entry.title}</p>
+                            <time className="text-xs tabular-nums text-muted-foreground">{entry.at ?? "—"}</time>
+                          </div>
+                          {entry.detail ? <p className="text-xs leading-5 text-muted-foreground">{entry.detail}</p> : null}
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ol>
+              )
+            ) : null}
+
+            {tab === "devices" ? (
+              <>
+                {devices.length === 0 ? (
+                  <p className="text-sm text-muted-foreground">No devices have connected yet.</p>
+                ) : (
+                  <ul className="divide-y divide-border">
+                    {devices.map((device) => (
+                      <li key={device.mac} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-3 first:pt-0 last:pb-0">
+                        <div className="min-w-0">
+                          <p className="flex items-center gap-2 text-sm font-medium">
+                            <span className={cn("h-2 w-2 shrink-0 rounded-full", device.online ? "bg-success" : "bg-border")} aria-hidden="true" />
+                            {device.name || (device.kind === "router" ? "Customer router" : "Unknown device")}
+                            {device.kind === "router" ? (
+                              <span className="rounded-full bg-primary/10 px-1.5 py-px text-[10px] font-semibold text-primary">Router</span>
+                            ) : null}
+                          </p>
+                          <p className="truncate text-xs text-muted-foreground">
+                            <code>{device.mac}</code>
+                            {viaLabel(device.via) ? ` · ${viaLabel(device.via)}` : ""}
+                            {device.online && device.ip ? ` · ${device.ip}` : ""}
+                          </p>
+                        </div>
+                        <div className="text-left text-xs tabular-nums text-muted-foreground sm:text-right">
+                          <p className={device.online ? "font-medium text-success" : ""}>
+                            {device.online ? `Online ${device.onlineFor || ""}`.trim() : `Last seen ${device.lastSeen ?? "never"}`}
+                          </p>
+                          <p>
+                            {bytes(device.bytesIn)}↓ {bytes(device.bytesOut)}↑ · {device.sessions} session{device.sessions === 1 ? "" : "s"}
+                          </p>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+                {!subscriber.accessInterface ? (
+                  <p className="mt-4 text-xs text-muted-foreground">
+                    Only devices that sign in on this account are listed. Save a VLAN / access interface when registering the
+                    customer to also see the gadgets behind their router.
+                  </p>
+                ) : null}
+              </>
+            ) : null}
+
+            {tab === "usage" ? (
+              <div className="grid gap-6">
+                <p className="text-xs tabular-nums text-muted-foreground">
+                  Last 30 days: {bytes(subscriber.usage.monthBytesIn + subscriber.usage.monthBytesOut)} ({bytes(subscriber.usage.monthBytesIn)}↓{" "}
+                  {bytes(subscriber.usage.monthBytesOut)}↑)
+                </p>
                 <div>
-                  <h3 className="text-sm font-semibold">Sessions</h3>
-                  <div className="mt-3 overflow-x-auto">
-                    <table className="data-table min-w-[32rem]">
-                      <thead className="text-xs text-muted-foreground">
-                        <tr>
-                          <th className="py-2">Started</th>
-                          <th className="py-2">Ended</th>
-                          <th className="py-2">Duration</th>
-                          <th className="py-2">Downloaded</th>
-                          <th className="py-2">Uploaded</th>
-                          <th className="py-2">Ended because</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {subscriber.sessions.length === 0 ? <tr><td colSpan={6} className="py-3 text-muted-foreground">No sessions yet.</td></tr> : null}
-                        {subscriber.sessions.map((session) => (
-                          <tr key={`${session.login}-${session.ip}`} className="border-t border-border">
-                            <td className="py-2">{session.login ?? "—"}</td>
-                            <td className="py-2">{session.logout ?? <span className="text-success">Still connected</span>}</td>
-                            <td className="py-2">{duration(session.duration)}</td>
-                            <td className="py-2">{bytes(session.bytesIn)}</td>
-                            <td className="py-2">{bytes(session.bytesOut)}</td>
-                            <td className="py-2">{session.cause || "—"}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                    <p className="text-sm font-medium">Online activity</p>
+                    <p className="text-xs tabular-nums text-muted-foreground">Last 3 hours · {totalOnline} min online</p>
                   </div>
+                  {usageTrend === null ? (
+                    <p className="mt-3 text-sm text-muted-foreground">Reading activity…</p>
+                  ) : (
+                    <TrendChart
+                      ariaLabel="Online activity"
+                      emptyText="No activity in the last 3 hours."
+                      formatY={(value) => `${value} min`}
+                      data={usageTrend.map((point) => ({ x: point.label, y: point.minutes }))}
+                    />
+                  )}
                 </div>
                 <div>
-                  <h3 className="text-sm font-semibold">Activity log</h3>
-                  {subscriber.events.length === 0 ? (
-                    <p className="mt-3 text-sm text-muted-foreground">No activity yet.</p>
+                  <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                    <p className="text-sm font-medium">Router health · {subscriber.routerName}</p>
+                    <p className="text-xs tabular-nums text-muted-foreground">Last 3 hours · {totalDown} min down</p>
+                  </div>
+                  {healthTrend === null ? (
+                    <p className="mt-3 text-sm text-muted-foreground">Reading router health…</p>
                   ) : (
-                    <ul className="mt-3 grid gap-2 text-sm">
-                      {subscriber.events.map((event) => (
-                        <li key={`${event.at}-${event.action}`} className="flex flex-wrap items-baseline gap-2 border-b border-border py-2">
-                          <span className="text-muted-foreground tabular-nums">{event.at}</span>
-                          <span className="font-medium">{event.action}</span>
-                          {event.reason ? <span className="text-muted-foreground">{event.reason}</span> : null}
-                        </li>
-                      ))}
-                    </ul>
+                    <TrendChart
+                      ariaLabel="Router downtime"
+                      emptyText="No downtime recorded."
+                      formatY={(value) => `${value} min`}
+                      data={healthTrend.map((point) => ({ x: point.label, y: point.minutes }))}
+                    />
                   )}
                 </div>
               </div>
-            </Section>
-          </section>
-        </div>
+            ) : null}
+          </div>
+        </section>
 
-        <div className="grid min-w-0 content-start gap-4">
-          <section className="card overflow-hidden">
-            <CardHeader icon={<KeyRound className="h-4 w-4" />} title="Access &amp; connection">
+        <section className="card min-w-0 divide-y divide-border">
+          <div className="px-5 py-4">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold">Login</h2>
               <button type="button" className={cardActionClass} onClick={() => setDialog("password")}>
                 Manage password
               </button>
-            </CardHeader>
-            <dl className="px-5 py-3">
+            </div>
+            <dl className="mt-2">
               <InfoRow label="Username">
                 <span className="inline-flex items-center gap-1.5">
                   <code className="truncate">{subscriber.username}</code>
@@ -1100,49 +1009,43 @@ export function PppoeCustomerPage() {
               <InfoRow label="Uptime">{subscriber.live.uptime || "—"}</InfoRow>
               <InfoRow label="Last seen">{subscriber.live.lastSeen ?? "Never"}</InfoRow>
             </dl>
-          </section>
+          </div>
 
-          <section className="card overflow-hidden">
-            <CardHeader icon={<ReceiptText className="h-4 w-4" />} title="Subscription">
+          <div className="px-5 py-4">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold">Subscription</h2>
               {ended ? null : (
                 <button type="button" className={cardActionClass} onClick={() => setDialog("package")}>
                   Change package
                 </button>
               )}
-            </CardHeader>
-            <dl className="px-5 py-3">
+            </div>
+            <dl className="mt-2">
               <InfoRow label="Package">{subscriber.packageName || "—"}</InfoRow>
               <InfoRow label="Price">
                 {subscriber.billing.price ? `KSh ${subscriber.billing.price} / ${subscriber.billing.billingCycle || "cycle"}` : "—"}
               </InfoRow>
-              <InfoRow label="Billing">
-                <StatusBadge tone={billing.tone}>{billing.label}</StatusBadge>
-              </InfoRow>
               <InfoRow label="Next due">{subscriber.billing.nextDueDate ?? "—"}</InfoRow>
-              <InfoRow label="Access expires">{subscriber.billing.expiry ?? "—"}</InfoRow>
               <InfoRow label="Grace period">
                 {subscriber.billing.graceDays ? `${subscriber.billing.graceDays} day${subscriber.billing.graceDays === 1 ? "" : "s"}` : "—"}
               </InfoRow>
             </dl>
-          </section>
+          </div>
 
-          <section className="card overflow-hidden">
-            <CardHeader icon={<UserRound className="h-4 w-4" />} title="Client details">
+          <div className="px-5 py-4">
+            <div className="flex items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold">Client</h2>
               <button type="button" className={cardActionClass} onClick={() => setDialog("edit")}>
                 Edit
               </button>
-            </CardHeader>
-            <dl className="px-5 py-3">
-              <InfoRow label="Phone">{subscriber.phone || "—"}</InfoRow>
+            </div>
+            <dl className="mt-2">
               <InfoRow label="Email">{subscriber.email || "—"}</InfoRow>
-              <InfoRow label="Building">{subscriber.buildingName || "—"}</InfoRow>
-              <InfoRow label="House">{subscriber.houseNumber || "—"}</InfoRow>
               <InfoRow label="Device serial">{subscriber.serial || "—"}</InfoRow>
               <InfoRow label="IP assignment">{subscriber.staticIp || "From pool"}</InfoRow>
-              <InfoRow label="Router">{subscriber.routerName || "—"}</InfoRow>
             </dl>
-          </section>
-        </div>
+          </div>
+        </section>
       </div>
 
       {message ? <p className="mt-4 notice" role="alert">{message}</p> : null}
