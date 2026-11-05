@@ -1939,6 +1939,9 @@ def ensure_schema():
                 )
                 """
             )
+            cursor.execute("SHOW COLUMNS FROM hotspot_vouchers LIKE 'expired_at'")
+            if cursor.fetchone() is None:
+                cursor.execute("ALTER TABLE hotspot_vouchers ADD COLUMN expired_at TIMESTAMP NULL")
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS hotspot_limit_state (
@@ -8338,6 +8341,10 @@ def hotspot_limit_loop():
     interval = max(15, int(os.environ.get("ISP_HOTSPOT_LIMIT_SECONDS", "60")))
     while True:
         time.sleep(interval)
+        try:
+            portal_server.expire_hotspot_grants(connect)
+        except Exception as error:
+            print(f"event=hotspot-expire error={error}", flush=True)
         try:
             portal_server.enforce_hotspot_limits(connect)
         except Exception as error:

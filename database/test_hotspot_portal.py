@@ -1059,6 +1059,84 @@ class HotspotLimitSweepTests(unittest.TestCase):
         self.assertIn(("router-1", "hs-u1", "fair"), cursor.state)
 
 
+class ExpiryCursor:
+    """The clock-expiry sweep's two grant queries plus the writes it makes."""
+
+    def __init__(self, vouchers=(), purchases=()):
+        self.vouchers = list(vouchers)
+        self.purchases = list(purchases)
+        self.writes = []
+        self._result = []
+
+    def execute(self, sql, args=None):
+        flat = " ".join(sql.split())
+        self._result = []
+        if flat.startswith("SELECT NULL AS voucher_id"):
+            self._result = [dict(row) for row in self.purchases]
+        elif flat.startswith("SELECT v.id AS voucher_id"):
+            self._result = [dict(row) for row in self.vouchers]
+        else:
+            self.writes.append((flat, tuple(args or ())))
+
+    def fetchall(self):
+        return list(self._result)
+
+    def fetchone(self):
+        return self._result[0] if self._result else None
+
+
+class HotspotClockExpiryTests(unittest.TestCase):
+    def sweep(self, cursor, fail=False):
+        db = LimitDb(cursor)
+        revoke = mock.Mock(side_effect=routeros_api.RouterError("down") if fail else None)
+        with mock.patch.object(routeros_api, "revoke_hotspot_client", revoke), \
+                mock.patch.object(routeros_api, "open_password", return_value="pw"):
+            portal_server.expire_hotspot_grants(lambda: db)
+        return revoke, db
+
+    def test_used_voucher_past_its_time_is_logged_out(self):
+        cursor = ExpiryCursor(vouchers=[
+            limit_voucher_row(started=datetime.now() - timedelta(hours=25), seconds=86400),
+            limit_voucher_row(voucher_id="v2", username="hs-u2", started=datetime.now() - timedelta(hours=2)),
+        ])
+        revoke, db = self.sweep(cursor)
+        revoke.assert_called_once()
+        self.assertEqual(revoke.call_args[0][2], ["hs-u1"])
+        expired = [w for w in cursor.writes if w[0].startswith("UPDATE hotspot_vouchers")]
+        self.assertEqual(expired[0][1][1:], ("pu-1", "hs-u1"))
+        closed = [w for w in cursor.writes if w[0].startswith("UPDATE hotspot_purchases")]
+        self.assertEqual(closed[0][1], ("pu-1",))
+        self.assertTrue(db.committed)
+
+    def test_offline_time_still_counts(self):
+        # A one-day package bought 25 hours ago ends even if the phone was
+        # only online for an hour of it.
+        cursor = ExpiryCursor(purchases=[{
+            "voucher_id": None, "username": "hs-pay", "started": datetime.now() - timedelta(hours=25),
+            "periods": 1, "purchase_id": "pu-9", "device_id": "router-1",
+            "tunnel_ip": "10.88.0.5", "api_secret": "sealed",
+            "validity_amount": 1, "validity_unit": "days",
+        }])
+        revoke, _db = self.sweep(cursor)
+        self.assertEqual(revoke.call_args[0][2], ["hs-pay"])
+
+    def test_unreachable_router_retries_next_pass(self):
+        cursor = ExpiryCursor(vouchers=[limit_voucher_row(started=datetime.now() - timedelta(days=2))])
+        self.sweep(cursor, fail=True)
+        self.assertFalse([w for w in cursor.writes if w[0].startswith("UPDATE")])
+
+    def test_ended_purchase_is_not_reconnected_by_the_sweep(self):
+        captured = {}
+
+        def rows(_cursor, where, params):
+            captured["where"] = where
+            return []
+
+        with mock.patch.object(portal_server, "_hotspot_pending_rows", rows):
+            portal_server.hotspot_unauthorized(object(), 60)
+        self.assertIn("pu.ended_at IS NULL", captured["where"])
+
+
 class ByteLimitResolutionTests(unittest.TestCase):
     def test_byte_limits_resolve_package_rules(self):
         row = {
