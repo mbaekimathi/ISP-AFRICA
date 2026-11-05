@@ -1308,6 +1308,45 @@
     animation: dialog-out var(--duration-fast) ease-in;
   }
 
+  .dialog-content.dialog-sheet {
+    max-width: 32rem;
+    gap: 0;
+    padding: 0;
+    overflow: hidden;
+    grid-template-rows: auto minmax(0, 1fr);
+  }
+
+  @media (max-width: 639px) {
+    .dialog-content.dialog-sheet {
+      top: auto;
+      bottom: 0;
+      left: 0;
+      width: 100%;
+      max-width: none;
+      max-height: 88dvh;
+      transform: none;
+      border-bottom: 0;
+      border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+      animation: sheet-in var(--duration) var(--ease);
+    }
+
+    .dialog-content.dialog-sheet[data-state="closed"] {
+      animation: sheet-out var(--duration-fast) ease-in;
+    }
+  }
+
+  @keyframes sheet-in {
+    from {
+      transform: translateY(100%);
+    }
+  }
+
+  @keyframes sheet-out {
+    to {
+      transform: translateY(100%);
+    }
+  }
+
   /* Visual primitives: surfaces */
   .card {
     border: 1px solid var(--border);

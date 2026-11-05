@@ -28,6 +28,7 @@ import {
   Trash2,
   Unplug,
   Wallet,
+  X,
   type LucideIcon,
 } from "lucide-react";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
@@ -296,6 +297,7 @@ export function PppoeCustomerPage() {
   const [packageId, setPackageId] = useState("");
   const [routerId, setRouterId] = useState("");
   const [tab, setTab] = useState<"history" | "devices" | "usage">("history");
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const [dialog, setDialog] = useState<DialogKind | null>(search.get("edit") === "1" ? "edit" : null);
   const [busyAction, setBusyAction] = useState(false);
   const [reason, setReason] = useState("");
@@ -610,6 +612,11 @@ export function PppoeCustomerPage() {
     { id: "usage", label: "Usage" },
   ];
 
+  const openFromDetails = (kind: DialogKind) => {
+    setDetailsOpen(false);
+    setDialog(kind);
+  };
+
   const menuItems: { label: string; icon?: ReactNode; danger?: boolean; onClick: () => void }[] = [
     { label: "Transactions", icon: <ReceiptText className="h-4 w-4" />, onClick: () => navigate(home(`/pppoe/${subscriberId}/transactions`)) },
     ...(ended
@@ -767,6 +774,10 @@ export function PppoeCustomerPage() {
                 <Copy className="h-3.5 w-3.5" />
               </button>
             </div>
+            <SecondaryButton className="min-h-9 px-3" onClick={() => setDetailsOpen(true)}>
+              <Eye className="h-4 w-4" aria-hidden="true" />
+              View details
+            </SecondaryButton>
           </div>
         </div>
               <dl className="mx-5 grid grid-cols-2 gap-4 border-t border-border py-4 sm:mx-6 md:grid-cols-4">
@@ -794,7 +805,7 @@ export function PppoeCustomerPage() {
         </dl>
       </section>
 
-      <div className="mt-4 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_20rem]">
+      <div className="mt-4">
         <section className="card min-w-0 overflow-hidden">
           <div className="flex items-center gap-2 overflow-x-auto border-b border-border px-2 sm:px-4" role="tablist">
             {pageTabs.map((item) => (
@@ -943,112 +954,131 @@ export function PppoeCustomerPage() {
             ) : null}
           </div>
         </section>
-
-        <section className="card min-w-0 divide-y divide-border">
-          <div className="px-5 py-4">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold">Login</h2>
-              <button type="button" className={cardActionClass} onClick={() => setDialog("password")}>
-                Manage password
-              </button>
-            </div>
-            <dl className="mt-2">
-              <InfoRow label="Username">
-                <span className="inline-flex items-center gap-1.5">
-                  <code className="truncate">{subscriber.username}</code>
-                  <button
-                    type="button"
-                    aria-label="Copy username"
-                    title="Copy username"
-                    className={iconButtonClass}
-                    onClick={() => void navigator.clipboard.writeText(subscriber.username)}
-                  >
-                    <Copy className="h-3.5 w-3.5" />
-                  </button>
-                </span>
-              </InfoRow>
-              <InfoRow label="Password">
-                <span className="inline-flex items-center gap-1.5">
-                  <code className="truncate">{password || "••••••••••"}</code>
-                  {password ? (
-                    <>
-                      <button
-                        type="button"
-                        aria-label="Copy password"
-                        title="Copy password"
-                        className={iconButtonClass}
-                        onClick={() => void navigator.clipboard.writeText(password)}
-                      >
-                        <Copy className="h-3.5 w-3.5" />
-                      </button>
-                      <button
-                        type="button"
-                        aria-label="Hide password"
-                        title="Hide password"
-                        className={iconButtonClass}
-                        onClick={() => setPassword("")}
-                      >
-                        <EyeOff className="h-3.5 w-3.5" />
-                      </button>
-                    </>
-                  ) : (
-                    <button
-                      type="button"
-                      aria-label="Show password"
-                      title="Show password"
-                      className={iconButtonClass}
-                      onClick={() => void post("reveal", {})}
-                    >
-                      <Eye className="h-3.5 w-3.5" />
-                    </button>
-                  )}
-                </span>
-              </InfoRow>
-              <InfoRow label="IP">{subscriber.live.ip || "Not connected"}</InfoRow>
-              <InfoRow label="MAC">{subscriber.live.mac || "—"}</InfoRow>
-              <InfoRow label="Uptime">{subscriber.live.uptime || "—"}</InfoRow>
-              <InfoRow label="Last seen">{subscriber.live.lastSeen ?? "Never"}</InfoRow>
-            </dl>
-          </div>
-
-          <div className="px-5 py-4">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold">Subscription</h2>
-              {ended ? null : (
-                <button type="button" className={cardActionClass} onClick={() => setDialog("package")}>
-                  Change package
-                </button>
-              )}
-            </div>
-            <dl className="mt-2">
-              <InfoRow label="Package">{subscriber.packageName || "—"}</InfoRow>
-              <InfoRow label="Price">
-                {subscriber.billing.price ? `KSh ${subscriber.billing.price} / ${subscriber.billing.billingCycle || "cycle"}` : "—"}
-              </InfoRow>
-              <InfoRow label="Next due">{subscriber.billing.nextDueDate ?? "—"}</InfoRow>
-              <InfoRow label="Grace period">
-                {subscriber.billing.graceDays ? `${subscriber.billing.graceDays} day${subscriber.billing.graceDays === 1 ? "" : "s"}` : "—"}
-              </InfoRow>
-            </dl>
-          </div>
-
-          <div className="px-5 py-4">
-            <div className="flex items-center justify-between gap-2">
-              <h2 className="text-sm font-semibold">Client</h2>
-              <button type="button" className={cardActionClass} onClick={() => setDialog("edit")}>
-                Edit
-              </button>
-            </div>
-            <dl className="mt-2">
-              <InfoRow label="Email">{subscriber.email || "—"}</InfoRow>
-              <InfoRow label="Device serial">{subscriber.serial || "—"}</InfoRow>
-              <InfoRow label="IP assignment">{subscriber.staticIp || "From pool"}</InfoRow>
-            </dl>
-          </div>
-        </section>
       </div>
 
       {message ? <p className="mt-4 notice" role="alert">{message}</p> : null}
+
+      <Dialog.Root open={detailsOpen} onOpenChange={setDetailsOpen}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content dialog-sheet">
+            <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-4">
+              <div className="min-w-0">
+                <Dialog.Title className="truncate text-base font-semibold text-foreground">
+                  {subscriber.firstName} {subscriber.lastName}
+                </Dialog.Title>
+                <Dialog.Description className="text-xs text-muted-foreground">Login, subscription and client details</Dialog.Description>
+              </div>
+              <Dialog.Close className={cn(iconButtonClass, "h-8 w-8")} aria-label="Close">
+                <X className="h-4 w-4" />
+              </Dialog.Close>
+            </div>
+            <div className="divide-y divide-border overflow-y-auto">
+            <div className="px-5 py-4">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold">Login</h2>
+                <button type="button" className={cardActionClass} onClick={() => openFromDetails("password")}>
+                  Manage password
+                </button>
+              </div>
+              <dl className="mt-2">
+                <InfoRow label="Username">
+                  <span className="inline-flex items-center gap-1.5">
+                    <code className="truncate">{subscriber.username}</code>
+                    <button
+                      type="button"
+                      aria-label="Copy username"
+                      title="Copy username"
+                      className={iconButtonClass}
+                      onClick={() => void navigator.clipboard.writeText(subscriber.username)}
+                    >
+                      <Copy className="h-3.5 w-3.5" />
+                    </button>
+                  </span>
+                </InfoRow>
+                <InfoRow label="Password">
+                  <span className="inline-flex items-center gap-1.5">
+                    <code className="truncate">{password || "••••••••••"}</code>
+                    {password ? (
+                      <>
+                        <button
+                          type="button"
+                          aria-label="Copy password"
+                          title="Copy password"
+                          className={iconButtonClass}
+                          onClick={() => void navigator.clipboard.writeText(password)}
+                        >
+                          <Copy className="h-3.5 w-3.5" />
+                        </button>
+                        <button
+                          type="button"
+                          aria-label="Hide password"
+                          title="Hide password"
+                          className={iconButtonClass}
+                          onClick={() => setPassword("")}
+                        >
+                          <EyeOff className="h-3.5 w-3.5" />
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        aria-label="Show password"
+                        title="Show password"
+                        className={iconButtonClass}
+                        onClick={() => void post("reveal", {})}
+                      >
+                        <Eye className="h-3.5 w-3.5" />
+                      </button>
+                    )}
+                  </span>
+                </InfoRow>
+                <InfoRow label="IP">{subscriber.live.ip || "Not connected"}</InfoRow>
+                <InfoRow label="MAC">{subscriber.live.mac || "—"}</InfoRow>
+                <InfoRow label="Uptime">{subscriber.live.uptime || "—"}</InfoRow>
+                <InfoRow label="Last seen">{subscriber.live.lastSeen ?? "Never"}</InfoRow>
+              </dl>
+            </div>
+
+            <div className="px-5 py-4">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold">Subscription</h2>
+                {ended ? null : (
+                  <button type="button" className={cardActionClass} onClick={() => openFromDetails("package")}>
+                    Change package
+                  </button>
+                )}
+              </div>
+              <dl className="mt-2">
+                <InfoRow label="Package">{subscriber.packageName || "—"}</InfoRow>
+                <InfoRow label="Price">
+                  {subscriber.billing.price ? `KSh ${subscriber.billing.price} / ${subscriber.billing.billingCycle || "cycle"}` : "—"}
+                </InfoRow>
+                <InfoRow label="Next due">{subscriber.billing.nextDueDate ?? "—"}</InfoRow>
+                <InfoRow label="Grace period">
+                  {subscriber.billing.graceDays ? `${subscriber.billing.graceDays} day${subscriber.billing.graceDays === 1 ? "" : "s"}` : "—"}
+                </InfoRow>
+              </dl>
+            </div>
+
+            <div className="px-5 py-4">
+              <div className="flex items-center justify-between gap-2">
+                <h2 className="text-sm font-semibold">Client</h2>
+                <button type="button" className={cardActionClass} onClick={() => openFromDetails("edit")}>
+                  Edit
+                </button>
+              </div>
+              <dl className="mt-2">
+                <InfoRow label="Email">{subscriber.email || "—"}</InfoRow>
+                <InfoRow label="Device serial">{subscriber.serial || "—"}</InfoRow>
+                <InfoRow label="IP assignment">{subscriber.staticIp || "From pool"}</InfoRow>
+              </dl>
+            </div>
+            </div>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
+
 
       <ActionDialog
         open={dialog === "suspend"}
