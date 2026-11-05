@@ -2898,9 +2898,9 @@ def list_hotspot_clients(cursor, client_id, query):
                d.name AS router_name, d.tunnel_ip, d.tunnel_status, d.api_secret, pkg.name AS package_name,
                (SELECT GROUP_CONCAT(v.code ORDER BY v.issued_at SEPARATOR ', ') FROM hotspot_vouchers v WHERE v.purchase_id = h.id) AS codes,
                (SELECT GROUP_CONCAT(DISTINCT v.redeemed_mac) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.redeemed_mac IS NOT NULL AND v.redeemed_mac <> '') AS device_macs,
-               (SELECT MAX(LEAST(100, ROUND(TIMESTAMPDIFF(SECOND, v.used_at, NOW()) * 100 / v.seconds))) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used' AND v.used_at IS NOT NULL AND v.seconds > 0) AS used_pct,
+               (SELECT MAX(LEAST(100, ROUND((TIMESTAMPDIFF(SECOND, v.used_at, NOW()) - v.paused_seconds + IF(v.paused_at IS NULL, 0, TIMESTAMPDIFF(SECOND, v.paused_at, NOW()))) * 100 / v.seconds))) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used' AND v.used_at IS NOT NULL AND v.seconds > 0) AS used_pct,
                (SELECT COUNT(*) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used') AS used_vouchers,
-               (SELECT MAX(TIMESTAMPADD(SECOND, v.seconds, v.used_at)) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used' AND v.used_at IS NOT NULL) AS surf_until
+               (SELECT MAX(TIMESTAMPADD(SECOND, v.seconds + v.paused_seconds + IF(v.paused_at IS NULL, 0, TIMESTAMPDIFF(SECOND, v.paused_at, NOW())), v.used_at)) FROM hotspot_vouchers v WHERE v.purchase_id = h.id AND v.status = 'used' AND v.used_at IS NOT NULL) AS surf_until
         FROM hotspot_purchases h
         LEFT JOIN isp_mikrotik_devices d ON d.id = h.device_id
         LEFT JOIN isp_packages pkg ON pkg.id = h.package_id

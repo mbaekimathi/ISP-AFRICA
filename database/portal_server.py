@@ -966,6 +966,20 @@ def portal_base():
     return f"http://{host}:{PORTAL_PORT}"
 
 
+def hotspot_resume_page(login_url):
+    """A device that still has paid time skips the shop and logs back in."""
+    url = esc(login_url)
+    return page(
+        "Reconnecting",
+        f"""<span class="ic blue">{ICON_WIFI}</span>
+<h1>Your package is still active</h1>
+<p class=sub>Reconnecting you now…</p>
+<p style="text-align:center;margin-top:8px"><span class=spin></span></p>
+<p class=note><a href="{url}">Tap here if nothing happens.</a></p>""",
+        f'<meta http-equiv="refresh" content="0; url={url}">',
+    )
+
+
 def router_page(name):
     """Pages fetched onto the router; $(...) tokens are filled by RouterOS."""
     if name == "login.html":
@@ -1736,16 +1750,24 @@ def enforce_hotspot_limits(connect):
         db.close()
 
 
-def hotspot_expiry_targets(cursor):
-    """Grants whose paid time has run out by the clock, online or not.
+def _paused_for(row, now):
+    total = int(row.get("paused_seconds") or 0)
+    if isinstance(row.get("paused_at"), datetime):
+        total += max(0, int((now - row["paused_at"]).total_seconds()))
+    return total
 
-    RouterOS limit-uptime only counts time spent logged in, so a one-day
-    package used two hours a day would last twelve days. The clock starts
-    when a voucher is used, or at payment for the payer's own grant.
+
+def hotspot_clock_grants(cursor):
+    """Every login still counting down by the clock, online or not.
+
+    RouterOS limit-uptime only counts time spent logged in, so the clock is
+    kept here: it starts when a voucher is used (at payment for the payer's
+    own grant) and stands still while the router is unreachable.
     """
     cursor.execute(
         """
-        SELECT v.id AS voucher_id, v.username, v.used_at AS started, v.seconds,
+        SELECT 'voucher' AS kind, v.id AS grant_id, v.username, v.password, v.used_at AS started,
+               v.seconds, v.paused_at, v.paused_seconds, v.redeemed_mac AS mac,
                v.purchase_id, v.device_id, d.tunnel_ip, d.api_secret
         FROM hotspot_vouchers v
         LEFT JOIN isp_mikrotik_devices d ON d.id = v.device_id
@@ -1753,16 +1775,13 @@ def hotspot_expiry_targets(cursor):
           AND v.used_at IS NOT NULL AND v.seconds > 0
         """
     )
-    now = datetime.now()
-    expired = [
-        row for row in cursor.fetchall()
-        if isinstance(row.get("started"), datetime)
-        and row["started"] + timedelta(seconds=int(row.get("seconds") or 0)) <= now
-    ]
+    grants = list(cursor.fetchall())
     cursor.execute(
         """
-        SELECT NULL AS voucher_id, pu.username, COALESCE(pu.paid_at, pu.created_at) AS started,
-               pu.periods, pu.id AS purchase_id, pu.device_id, d.tunnel_ip, d.api_secret,
+        SELECT 'purchase' AS kind, pu.id AS grant_id, pu.username, pu.password,
+               COALESCE(pu.paid_at, pu.created_at) AS started,
+               pu.periods, pu.paused_at, pu.paused_seconds, pu.mac,
+               pu.id AS purchase_id, pu.device_id, d.tunnel_ip, d.api_secret,
                COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
                COALESCE(p.validity_unit, c.validity_unit, 'days') AS validity_unit
         FROM hotspot_purchases pu
@@ -1778,12 +1797,44 @@ def hotspot_expiry_targets(cursor):
         """
     )
     for row in cursor.fetchall():
-        started = row.get("started")
-        seconds = int(row.get("periods") or 1) * validity_seconds(row["validity_amount"], row["validity_unit"])
-        if isinstance(started, datetime) and started + timedelta(seconds=seconds) <= now:
-            row["seconds"] = seconds
-            expired.append(row)
-    return expired
+        row["seconds"] = int(row.get("periods") or 1) * validity_seconds(row["validity_amount"], row["validity_unit"])
+        grants.append(row)
+    return [grant for grant in grants if isinstance(grant.get("started"), datetime)]
+
+
+def hotspot_grant_ends(grant, now=None):
+    """When the login runs out — None while its clock is paused."""
+    if grant.get("paused_at"):
+        return None
+    now = now or datetime.now()
+    return grant["started"] + timedelta(seconds=int(grant.get("seconds") or 0) + _paused_for(grant, now))
+
+
+def _grant_table(grant):
+    return "hotspot_vouchers" if grant["kind"] == "voucher" else "hotspot_purchases"
+
+
+def _pause_grants(cursor, grants):
+    for grant in grants:
+        if not grant.get("paused_at"):
+            cursor.execute(
+                f"UPDATE {_grant_table(grant)} SET paused_at = NOW() WHERE id = %s AND paused_at IS NULL",
+                (grant["grant_id"],),
+            )
+            print(f"event=hotspot-pause user={grant['username']}", flush=True)
+
+
+def _resume_grant(cursor, grant):
+    cursor.execute(
+        f"""
+        UPDATE {_grant_table(grant)}
+        SET paused_seconds = paused_seconds + GREATEST(0, TIMESTAMPDIFF(SECOND, paused_at, NOW())),
+            paused_at = NULL
+        WHERE id = %s AND paused_at IS NOT NULL
+        """,
+        (grant["grant_id"],),
+    )
+    print(f"event=hotspot-resume user={grant['username']}", flush=True)
 
 
 def _close_finished_purchases(cursor, purchase_ids):
@@ -1804,52 +1855,97 @@ def _close_finished_purchases(cursor, purchase_ids):
         )
 
 
-def expire_hotspot_grants(connect):
-    """Log out and remove hotspot logins whose paid time is over.
+def _expire_grants(cursor, grants):
+    finished = set()
+    for grant in grants:
+        name = grant["username"]
+        for table in ("radcheck", "radreply", "radusergroup"):
+            cursor.execute(f"DELETE FROM {table} WHERE username = %s", (name,))
+        # The payer's login often shares its username with the first
+        # voucher, which then must not be redeemable again.
+        cursor.execute(
+            """
+            UPDATE hotspot_vouchers
+            SET status = 'used', used_at = COALESCE(used_at, %s), expired_at = NOW()
+            WHERE purchase_id = %s AND username = %s AND status IN ('issued', 'used')
+            """,
+            (grant["started"], grant["purchase_id"], name),
+        )
+        finished.add(str(grant["purchase_id"]))
+        print(f"event=hotspot-expire user={name}", flush=True)
+    _close_finished_purchases(cursor, finished)
 
-    The device stays on the Wi-Fi unauthorized, so its next page opens the
-    payment portal and a recharge or voucher brings it straight back.
+
+def _sweep_router_clock(cursor, grants, now):
+    """One router's pass: pause on outage, resume on the first login back,
+    log out whatever has run out."""
+    router = grants[0]
+    if not (router.get("tunnel_ip") and router.get("api_secret")):
+        return
+    try:
+        password = routeros_api.open_password(router["api_secret"])
+        active = routeros_api.hotspot_active_sessions(
+            router["tunnel_ip"], password, usernames=[grant["username"] for grant in grants]
+        )
+    except (routeros_api.RouterError, OSError):
+        # The router is offline: nobody can surf, so nobody's time runs.
+        _pause_grants(cursor, grants)
+        return
+    online = {str(row.get("username") or "") for row in active}
+    due = []
+    for grant in grants:
+        if grant.get("paused_at"):
+            # Back from an outage: the clock waits for the device to log in
+            # again, then keeps running even if it disconnects later.
+            if grant["username"] in online:
+                _resume_grant(cursor, grant)
+            continue
+        ends = hotspot_grant_ends(grant, now)
+        if ends and ends <= now:
+            due.append(grant)
+    if not due:
+        return
+    try:
+        routeros_api.revoke_hotspot_client(router["tunnel_ip"], password, [grant["username"] for grant in due])
+    except (routeros_api.RouterError, OSError) as error:
+        print(f"event=hotspot-expire router={router['device_id']} error={error}", flush=True)
+        return
+    _expire_grants(cursor, due)
+
+
+def expire_hotspot_grants(connect):
+    """Run the hotspot clock against every router.
+
+    An expired device stays on the Wi-Fi unauthorized, so its next page
+    opens the payment portal and a recharge or voucher brings it back.
     """
     db = connect()
     try:
         with db.cursor() as cursor:
-            rows = hotspot_expiry_targets(cursor)
             routers = {}
-            for row in rows:
-                routers.setdefault(str(row.get("device_id") or ""), []).append(row)
-            finished = set()
+            for grant in hotspot_clock_grants(cursor):
+                routers.setdefault(str(grant.get("device_id") or ""), []).append(grant)
+            now = datetime.now()
             for grants in routers.values():
-                router = grants[0]
-                if router.get("tunnel_ip") and router.get("api_secret"):
-                    try:
-                        routeros_api.revoke_hotspot_client(
-                            router["tunnel_ip"],
-                            routeros_api.open_password(router["api_secret"]),
-                            [grant["username"] for grant in grants],
-                        )
-                    except (routeros_api.RouterError, OSError) as error:
-                        print(f"event=hotspot-expire router={router['device_id']} error={error}", flush=True)
-                        continue
-                for grant in grants:
-                    name = grant["username"]
-                    for table in ("radcheck", "radreply", "radusergroup"):
-                        cursor.execute(f"DELETE FROM {table} WHERE username = %s", (name,))
-                    # The payer's login often shares its username with the
-                    # first voucher, which then must not be redeemable again.
-                    cursor.execute(
-                        """
-                        UPDATE hotspot_vouchers
-                        SET status = 'used', used_at = COALESCE(used_at, %s), expired_at = NOW()
-                        WHERE purchase_id = %s AND username = %s AND status IN ('issued', 'used')
-                        """,
-                        (grant["started"], grant["purchase_id"], name),
-                    )
-                    finished.add(str(grant["purchase_id"]))
-                    print(f"event=hotspot-expire user={name}", flush=True)
-            _close_finished_purchases(cursor, finished)
+                _sweep_router_clock(cursor, grants, now)
         db.commit()
     finally:
         db.close()
+
+
+def hotspot_live_grant(cursor, device_id, mac):
+    """The unexpired login this device already paid for on this router."""
+    mac = str(mac or "").strip().upper()
+    if not mac:
+        return None
+    now = datetime.now()
+    for grant in hotspot_clock_grants(cursor):
+        if str(grant.get("device_id") or "") != str(device_id) or str(grant.get("mac") or "").upper() != mac:
+            continue
+        ends = hotspot_grant_ends(grant, now)
+        if ends is None or ends > now:
+            return grant
+    return None
 
 
 def hotspot_login_url(pending, username, password, dst=""):
@@ -2177,6 +2273,11 @@ class PortalHandler(BaseHTTPRequestHandler):
 <p class=note>Reconnect and try again, or contact the provider.</p>""",
                         )
                     )
+                grant = hotspot_live_grant(cursor, device["id"], ctx["mac"])
+                if grant:
+                    login_url = hotspot_login_url(ctx, grant["username"], grant["password"] or "")
+                    if login_url:
+                        return self._send(hotspot_resume_page(login_url))
                 offers = hotspot_packages(cursor, device["client_id"], device["id"])
                 payment = daraja_settings(cursor, device["client_id"])
                 phone = support_phone(cursor, device["client_id"])

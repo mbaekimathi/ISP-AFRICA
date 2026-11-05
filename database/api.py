@@ -1939,9 +1939,16 @@ def ensure_schema():
                 )
                 """
             )
-            cursor.execute("SHOW COLUMNS FROM hotspot_vouchers LIKE 'expired_at'")
-            if cursor.fetchone() is None:
-                cursor.execute("ALTER TABLE hotspot_vouchers ADD COLUMN expired_at TIMESTAMP NULL")
+            for table, column, definition in (
+                ("hotspot_vouchers", "expired_at", "expired_at TIMESTAMP NULL"),
+                ("hotspot_vouchers", "paused_at", "paused_at DATETIME NULL"),
+                ("hotspot_vouchers", "paused_seconds", "paused_seconds INT NOT NULL DEFAULT 0"),
+                ("hotspot_purchases", "paused_at", "paused_at DATETIME NULL"),
+                ("hotspot_purchases", "paused_seconds", "paused_seconds INT NOT NULL DEFAULT 0"),
+            ):
+                cursor.execute(f"SHOW COLUMNS FROM {table} LIKE %s", (column,))
+                if cursor.fetchone() is None:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS hotspot_limit_state (
