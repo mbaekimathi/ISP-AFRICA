@@ -1413,6 +1413,29 @@ def ensure_database():
         db.close()
 
 
+def start_hotspot_clock_now(cursor, table):
+    """First run of the clock-time hotspot rule: logins already handed out
+    used to count online time only, so their clock starts at this deploy
+    instead of cutting them off on the first pass. The router's own
+    limit-uptime still caps how long they can be online."""
+    if table == "hotspot_vouchers":
+        cursor.execute(
+            """
+            UPDATE hotspot_vouchers
+            SET paused_seconds = GREATEST(0, TIMESTAMPDIFF(SECOND, used_at, NOW()))
+            WHERE status = 'used' AND used_at IS NOT NULL
+            """
+        )
+    else:
+        cursor.execute(
+            """
+            UPDATE hotspot_purchases
+            SET paused_seconds = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(paid_at, created_at), NOW()))
+            WHERE status = 'paid' AND authorized = 1 AND ended_at IS NULL
+            """
+        )
+
+
 def ensure_schema():
     ensure_database()
     db = connect()
@@ -1968,6 +1991,8 @@ def ensure_schema():
                 cursor.execute(f"SHOW COLUMNS FROM {table} LIKE %s", (column,))
                 if cursor.fetchone() is None:
                     cursor.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+                    if column == "paused_seconds":
+                        start_hotspot_clock_now(cursor, table)
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS hotspot_limit_state (
