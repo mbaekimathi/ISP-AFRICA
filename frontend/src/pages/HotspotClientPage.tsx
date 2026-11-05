@@ -345,55 +345,6 @@ function gapLabel(from: string | null, to: string | null) {
   return `${Math.floor(hours / 24)} d ${hours % 24} h`;
 }
 
-function TreeEdge({ label, dashed }: { label?: string; dashed?: boolean }) {
-  return (
-    <div className="relative flex h-9 w-full justify-center" aria-hidden="true">
-      <span className={cn("h-full w-0 border-l-2", dashed ? "border-dashed border-border" : "border-primary/30")} />
-      {label ? (
-        <span className="absolute top-1/2 ml-2 -translate-y-1/2 translate-x-1/2 whitespace-nowrap rounded-full bg-surface-muted px-1.5 text-[10px] font-medium tabular-nums text-muted-foreground">
-          {label}
-        </span>
-      ) : null}
-    </div>
-  );
-}
-
-function TreeCard({
-  icon: Icon,
-  tone,
-  title,
-  at,
-  detail,
-  emphasis,
-}: {
-  icon: typeof Wifi;
-  tone: string;
-  title: string;
-  at?: string | null;
-  detail?: string;
-  emphasis?: boolean;
-}) {
-  return (
-    <div
-      className={cn(
-        "w-56 rounded-xl border bg-surface px-3 py-2.5 shadow-sm transition-shadow hover:shadow-md",
-        emphasis ? "border-primary/40 ring-4 ring-primary/5" : "border-border",
-      )}
-    >
-      <div className="flex items-center gap-2.5">
-        <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-full", tone)} aria-hidden="true">
-          <Icon className="h-4 w-4" />
-        </span>
-        <div className="min-w-0">
-          <p className="truncate text-sm font-semibold">{title}</p>
-          {at !== undefined ? <p className="text-[11px] tabular-nums text-muted-foreground">{at ?? "—"}</p> : null}
-        </div>
-      </div>
-      {detail ? <p className="mt-1.5 text-xs leading-5 text-muted-foreground">{detail}</p> : null}
-    </div>
-  );
-}
-
 export function GenerationTree({
   paid,
   events,
@@ -405,89 +356,66 @@ export function GenerationTree({
   vouchers: Voucher[];
   live: boolean;
 }) {
+  const multiDevice = vouchers.length > 1;
   const steps = [...events]
     .filter((entry) => entry.kind !== "paid")
-    .sort((a, b) => (stampMs(a.at) ?? 0) - (stampMs(b.at) ?? 0));
-  const branches: { device: string; mac: string; steps: ConnectionEvent[] }[] = [];
-  const branchFor = (device: string) => {
-    let branch = branches.find((item) => item.device === device);
-    if (!branch) {
-      branch = { device, mac: "", steps: [] };
-      branches.push(branch);
-    }
-    return branch;
-  };
-  for (const entry of steps) branchFor(entry.device || "This device").steps.push(entry);
-  for (const voucher of vouchers) {
-    if (voucher.status !== "used") continue;
-    const branch = branches.find((item) => item.device === voucher.code) ?? (branches.length === 0 ? branchFor(voucher.code) : null);
-    if (branch && !branch.mac) branch.mac = voucher.redeemedMac;
-  }
-  if (branches.length === 0) branches.push({ device: "This device", mac: "", steps: [] });
-  const many = branches.length > 1;
+    .sort((a, b) => (stampMs(b.at) ?? 0) - (stampMs(a.at) ?? 0));
+  const rows: ConnectionEvent[] = [
+    ...steps,
+    {
+      at: paid.paidAt,
+      kind: "paid",
+      event: `Paid ${money(paid.amount)}`,
+      device: "",
+      detail: [paid.packageName, paid.receipt].filter(Boolean).join(" · "),
+    },
+  ];
+  const running = live && steps[0]?.kind !== "expired";
 
   return (
-    <div className="overflow-x-auto pb-2">
-      <div className="mx-auto flex w-max min-w-full flex-col items-center px-2 pt-1">
-        <TreeCard
-          icon={CircleDollarSign}
-          tone="bg-emerald-500/10 text-emerald-600"
-          title={`Paid ${money(paid.amount)}`}
-          at={paid.paidAt}
-          detail={[paid.packageName, paid.receipt, paid.phone].filter(Boolean).join(" · ")}
-          emphasis
-        />
-        <TreeEdge />
-        <div className="flex items-start">
-          {branches.map((branch, index) => {
-            const last = branch.steps[branch.steps.length - 1];
-            const ended = last?.kind === "expired";
-            return (
-              <div key={branch.device} className="relative flex flex-col items-center px-3">
-                {many ? (
-                  <span
-                    className={cn(
-                      "absolute top-0 h-0 border-t-2 border-primary/30",
-                      index === 0 ? "left-1/2 right-0" : index === branches.length - 1 ? "left-0 right-1/2" : "left-0 right-0",
-                    )}
-                    aria-hidden="true"
-                  />
-                ) : null}
-                {many ? <TreeEdge /> : null}
-                <TreeCard
-                  icon={branch.device === "This device" ? UserRound : Ticket}
-                  tone="bg-primary/10 text-primary"
-                  title={branch.device}
-                  detail={branch.mac || undefined}
-                />
-                {branch.steps.map((entry, stepIndex) => {
-                  const look = connectionIcons[entry.kind] ?? { icon: History, tone: "bg-muted text-muted-foreground" };
-                  const previous = stepIndex === 0 ? paid.paidAt : branch.steps[stepIndex - 1].at;
-                  return (
-                    <div key={`${entry.at}-${stepIndex}`} className="flex flex-col items-center">
-                      <TreeEdge label={gapLabel(previous, entry.at)} />
-                      <TreeCard icon={look.icon} tone={look.tone} title={entry.event} at={entry.at} detail={entry.detail} />
-                    </div>
-                  );
-                })}
-                {!ended ? (
-                  <>
-                    <TreeEdge dashed />
-                    <div className="w-56 rounded-xl border border-dashed border-border px-3 py-2 text-center text-xs text-muted-foreground">
-                      {branch.steps.length === 0
-                        ? "No connection events yet"
-                        : live
-                          ? "Package still running"
-                          : "Access ended"}
-                    </div>
-                  </>
-                ) : null}
+    <ol className="relative">
+      {running ? (
+        <li className="relative flex gap-3 pb-4">
+          <span className="relative z-10 mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center" aria-hidden="true">
+            <span className="absolute h-3 w-3 animate-ping rounded-full bg-emerald-500/40" />
+            <span className="h-2.5 w-2.5 rounded-full bg-emerald-500" />
+          </span>
+          <span className="pt-0.5 text-sm font-medium text-emerald-600">Package still running</span>
+          <span className="absolute bottom-0 left-[11px] top-6 w-px bg-border" aria-hidden="true" />
+        </li>
+      ) : null}
+      {rows.map((entry, index) => {
+        const look = connectionIcons[entry.kind] ?? { icon: History, tone: "bg-muted text-muted-foreground" };
+        const Icon = look.icon;
+        const older = rows[index + 1];
+        const gap = older ? gapLabel(older.at, entry.at) : "";
+        const last = index === rows.length - 1;
+        return (
+          <li key={`${entry.kind}-${entry.at}-${index}`} className="relative flex gap-3 pb-4 last:pb-0">
+            {!last ? <span className="absolute bottom-0 left-[11px] top-6 w-px bg-border" aria-hidden="true" /> : null}
+            <span
+              className={cn("relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full", look.tone)}
+              aria-hidden="true"
+            >
+              <Icon className="h-3.5 w-3.5" />
+            </span>
+            <div className="min-w-0 flex-1">
+              <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                <p className="text-sm font-medium">
+                  {entry.event}
+                  {multiDevice && entry.device ? (
+                    <span className="ml-1.5 font-normal text-muted-foreground">· {entry.device}</span>
+                  ) : null}
+                </p>
+                <time className="text-xs tabular-nums text-muted-foreground">{entry.at ?? "—"}</time>
               </div>
-            );
-          })}
-        </div>
-      </div>
-    </div>
+              {entry.detail ? <p className="text-xs leading-5 text-muted-foreground">{entry.detail}</p> : null}
+              {gap ? <p className="text-[11px] text-subtle">{gap} after the previous step</p> : null}
+            </div>
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
@@ -749,7 +677,7 @@ export function HotspotClientPage() {
                 type="button"
                 onClick={copyVouchers}
                 title={detail.vouchers.length > 1 ? `Copy all ${detail.vouchers.length} voucher codes` : "Copy voucher code"}
-                className="inline-flex items-center gap-2 self-start rounded-xl border border-border bg-surface-muted/50 px-3 py-2 text-left transition hover:border-primary/40 sm:self-auto"
+                className="inline-flex items-center gap-2 self-start rounded-lg px-1 py-1 text-left text-muted-foreground transition hover:text-foreground sm:self-auto"
               >
                 <Ticket className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
                 <code className="font-mono text-sm font-semibold tracking-wide">{detail.vouchers[0].code}</code>
@@ -761,7 +689,7 @@ export function HotspotClientPage() {
             ) : null}
           </div>
 
-          <dl className="grid grid-cols-2 gap-px overflow-hidden rounded-xl border border-border bg-border lg:grid-cols-4">
+          <dl className="grid grid-cols-2 gap-x-4 gap-y-4 border-t border-border pt-4 lg:grid-cols-4">
             {[
               { label: "Status", value: statusLabel, hint: statusHint, tone: statusColor },
               { label: "Time left", value: online ? timeLeft : "—", hint: online ? "On the live session" : "No open session" },
@@ -772,7 +700,7 @@ export function HotspotClientPage() {
               },
               { label: "Paid", value: money(client.amount), hint: client.mpesaCode || client.status },
             ].map((stat) => (
-              <div key={stat.label} className="min-w-0 bg-surface px-4 py-3">
+              <div key={stat.label} className="min-w-0">
                 <dt className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{stat.label}</dt>
                 <dd className={cn("mt-1 truncate text-lg font-semibold tracking-tight", stat.tone)}>{stat.value}</dd>
                 <p className="truncate text-xs text-muted-foreground" title={stat.hint}>{stat.hint}</p>
@@ -884,7 +812,7 @@ export function HotspotClientPage() {
                   </ul>
                 )}
                 {(detail.hosts?.length ?? 0) ? (
-                  <div className="rounded-xl border border-warning/30 bg-warning/5 p-3">
+                  <div className="border-t border-border pt-3">
                     <p className="text-xs font-semibold text-warning">On the Wi-Fi, not surfing</p>
                     <ul className="mt-2 grid gap-1.5">
                       {(detail.hosts ?? []).map((host) => (
