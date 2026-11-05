@@ -1939,12 +1939,29 @@ def ensure_schema():
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS hotspot_events (
+                  id CHAR(36) NOT NULL PRIMARY KEY,
+                  purchase_id CHAR(36) NOT NULL,
+                  username VARCHAR(40) NOT NULL DEFAULT '',
+                  event VARCHAR(24) NOT NULL,
+                  detail VARCHAR(255) NOT NULL DEFAULT '',
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  KEY idx_hs_event_purchase (purchase_id, created_at)
+                )
+                """
+            )
             for table, column, definition in (
                 ("hotspot_vouchers", "expired_at", "expired_at TIMESTAMP NULL"),
                 ("hotspot_vouchers", "paused_at", "paused_at DATETIME NULL"),
                 ("hotspot_vouchers", "paused_seconds", "paused_seconds INT NOT NULL DEFAULT 0"),
                 ("hotspot_purchases", "paused_at", "paused_at DATETIME NULL"),
                 ("hotspot_purchases", "paused_seconds", "paused_seconds INT NOT NULL DEFAULT 0"),
+                ("hotspot_vouchers", "seen_online", "seen_online TINYINT NOT NULL DEFAULT 0"),
+                ("hotspot_vouchers", "router_back_at", "router_back_at DATETIME NULL"),
+                ("hotspot_purchases", "seen_online", "seen_online TINYINT NOT NULL DEFAULT 0"),
+                ("hotspot_purchases", "router_back_at", "router_back_at DATETIME NULL"),
             ):
                 cursor.execute(f"SHOW COLUMNS FROM {table} LIKE %s", (column,))
                 if cursor.fetchone() is None:

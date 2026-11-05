@@ -3228,7 +3228,8 @@ def hotspot_client_row(cursor, client_id, purchase_id):
 def hotspot_voucher_rows(cursor, purchase_id):
     cursor.execute(
         """
-        SELECT id, code, username, password, seconds, status, redeemed_ip, redeemed_mac, issued_at, used_at
+        SELECT id, code, username, password, seconds, status, redeemed_ip, redeemed_mac, issued_at, used_at,
+               paused_at, paused_seconds
         FROM hotspot_vouchers WHERE purchase_id = %s ORDER BY issued_at, id
         """,
         (purchase_id,),
@@ -3318,6 +3319,40 @@ def hotspot_device_purchases(cursor, client_id, row):
         [client_id, *args, str(row["id"])],
     )
     return cursor.fetchall()
+
+
+HOTSPOT_EVENT_LABELS = {
+    "paid": "Paid",
+    "connected": "Connected",
+    "disconnected": "Disconnected",
+    "router_offline": "Router went offline",
+    "router_online": "Router back online",
+    "reconnected": "Reconnected",
+    "expired": "Package expired",
+}
+
+
+def hotspot_connection_log(cursor, row, labels):
+    """Paid, connected, left, outage, back, reconnected, expired — oldest first."""
+    log = []
+    if row.get("paid_at"):
+        log.append({"at": stamp(row["paid_at"]), "kind": "paid", "event": "Paid", "device": "",
+                    "detail": f"KSh {format(Decimal(row['amount']), '.2f')} for {row['package_name']}."})
+    cursor.execute(
+        "SELECT username, event, detail, created_at FROM hotspot_events WHERE purchase_id = %s ORDER BY created_at, id",
+        (row["id"],),
+    )
+    for event in cursor.fetchall():
+        log.append(
+            {
+                "at": stamp(event["created_at"]),
+                "kind": event["event"],
+                "event": HOTSPOT_EVENT_LABELS.get(event["event"], event["event"]),
+                "device": labels.get(event["username"]) or event["username"],
+                "detail": event["detail"],
+            }
+        )
+    return log
 
 
 def hotspot_client_detail(cursor, client_id, purchase_id):
@@ -3479,7 +3514,9 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
                 {"at": stamp(session["acctstoptime"]), "event": "Dropped",
                  "detail": f"{labels.get(session['username']) or session['username']} — {str(cause).replace('-', ' ').lower()}."}
             )
-    if row.get("ended_at"):
+    connection_log = hotspot_connection_log(cursor, row, labels)
+    timeline.extend(entry for entry in connection_log if entry["kind"] != "paid")
+    if row.get("ended_at") and not any(entry["kind"] == "expired" for entry in connection_log):
         timeline.append({"at": stamp(row["ended_at"]), "event": "Access ended", "detail": "Removed by the account operator."})
     timeline = [event for event in timeline if event["at"]]
     timeline.sort(key=lambda event: event["at"], reverse=True)
@@ -3498,7 +3535,10 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
         live_entry = live_by_username.get(voucher["username"])
         seconds_left = None
         if voucher["status"] == "used" and voucher.get("used_at"):
-            remaining = voucher["used_at"] + timedelta(seconds=int(voucher["seconds"] or 0)) - now
+            paused = int(voucher.get("paused_seconds") or 0)
+            if isinstance(voucher.get("paused_at"), datetime):
+                paused += int((now - voucher["paused_at"]).total_seconds())
+            remaining = voucher["used_at"] + timedelta(seconds=int(voucher["seconds"] or 0) + paused) - now
             seconds_left = max(0, int(remaining.total_seconds()))
         devices.append(
             {
@@ -3587,6 +3627,7 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
         "usage": usage,
         "sessions": session_rows_out,
         "timeline": timeline,
+        "connectionLog": list(reversed(connection_log)),
         "transactions": [
             {
                 "id": purchase["id"],

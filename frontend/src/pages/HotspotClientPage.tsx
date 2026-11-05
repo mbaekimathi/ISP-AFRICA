@@ -9,16 +9,23 @@ import {
   CalendarClock,
   Check,
   ChevronDown,
+  CircleDollarSign,
   Copy,
   Gauge,
   History,
+  ListChecks,
+  LogIn,
+  LogOut,
   Power,
+  RefreshCw,
   Router,
   Ticket,
+  TimerOff,
   Trash2,
   UserRound,
   Wallet,
   Wifi,
+  WifiOff,
   Zap,
 } from "lucide-react";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
@@ -58,6 +65,18 @@ type GuestSession = {
 };
 
 type TimelineEvent = { at: string | null; event: string; detail: string };
+
+type ConnectionEvent = { at: string | null; kind: string; event: string; device: string; detail: string };
+
+const connectionIcons: Record<string, { icon: typeof Wifi; tone: string }> = {
+  paid: { icon: CircleDollarSign, tone: "bg-emerald-500/10 text-emerald-600" },
+  connected: { icon: LogIn, tone: "bg-emerald-500/10 text-emerald-600" },
+  disconnected: { icon: LogOut, tone: "bg-amber-500/10 text-amber-600" },
+  router_offline: { icon: WifiOff, tone: "bg-red-500/10 text-red-600" },
+  router_online: { icon: Wifi, tone: "bg-sky-500/10 text-sky-600" },
+  reconnected: { icon: RefreshCw, tone: "bg-emerald-500/10 text-emerald-600" },
+  expired: { icon: TimerOff, tone: "bg-muted text-muted-foreground" },
+};
 
 type LiveSession = {
   username: string;
@@ -157,6 +176,7 @@ type GuestDetail = {
   };
   sessions: GuestSession[];
   timeline: TimelineEvent[];
+  connectionLog?: ConnectionEvent[];
   live: LiveSession[];
   hosts?: HostEntry[];
   routerReachable: boolean;
@@ -877,6 +897,37 @@ export function HotspotClientPage() {
                     </div>
                   ) : null}
                 </div>
+              )}
+            </div>
+          </section>
+
+          <section className="card overflow-hidden">
+            <CardHeader icon={<ListChecks className="h-4 w-4" />} title="Connection log" />
+            <div className="px-5 py-4">
+              {(detail.connectionLog ?? []).length === 0 ? (
+                <p className="text-sm text-muted-foreground">Nothing recorded yet.</p>
+              ) : (
+                <ol className="grid gap-3">
+                  {(detail.connectionLog ?? []).map((entry, index) => {
+                    const look = connectionIcons[entry.kind] ?? { icon: History, tone: "bg-muted text-muted-foreground" };
+                    const Icon = look.icon;
+                    return (
+                      <li key={index} className="flex items-start gap-3 border-b border-border/60 pb-3 last:border-0">
+                        <span className={cn("flex h-7 w-7 shrink-0 items-center justify-center rounded-full", look.tone)} aria-hidden="true">
+                          <Icon className="h-3.5 w-3.5" />
+                        </span>
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-medium">
+                            {entry.event}
+                            {entry.device ? <span className="font-normal text-muted-foreground"> · {entry.device}</span> : null}
+                          </span>
+                          <span className="block text-xs leading-5 text-muted-foreground">{entry.detail}</span>
+                        </span>
+                        <span className="shrink-0 text-xs leading-5 tabular-nums text-muted-foreground">{entry.at ?? "—"}</span>
+                      </li>
+                    );
+                  })}
+                </ol>
               )}
             </div>
           </section>

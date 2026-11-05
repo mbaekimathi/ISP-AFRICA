@@ -1767,7 +1767,8 @@ def hotspot_clock_grants(cursor):
     cursor.execute(
         """
         SELECT 'voucher' AS kind, v.id AS grant_id, v.username, v.password, v.used_at AS started,
-               v.seconds, v.paused_at, v.paused_seconds, v.redeemed_mac AS mac,
+               v.seconds, v.paused_at, v.paused_seconds, v.seen_online, v.router_back_at,
+               v.redeemed_mac AS mac,
                v.purchase_id, v.device_id, d.tunnel_ip, d.api_secret
         FROM hotspot_vouchers v
         LEFT JOIN isp_mikrotik_devices d ON d.id = v.device_id
@@ -1780,7 +1781,7 @@ def hotspot_clock_grants(cursor):
         """
         SELECT 'purchase' AS kind, pu.id AS grant_id, pu.username, pu.password,
                COALESCE(pu.paid_at, pu.created_at) AS started,
-               pu.periods, pu.paused_at, pu.paused_seconds, pu.mac,
+               pu.periods, pu.paused_at, pu.paused_seconds, pu.seen_online, pu.router_back_at, pu.mac,
                pu.id AS purchase_id, pu.device_id, d.tunnel_ip, d.api_secret,
                COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
                COALESCE(p.validity_unit, c.validity_unit, 'days') AS validity_unit
@@ -1814,27 +1815,48 @@ def _grant_table(grant):
     return "hotspot_vouchers" if grant["kind"] == "voucher" else "hotspot_purchases"
 
 
+HOTSPOT_EVENTS = {
+    "paid": "Paid",
+    "connected": "Connected",
+    "disconnected": "Disconnected",
+    "router_offline": "Router went offline",
+    "router_online": "Router back online",
+    "reconnected": "Reconnected",
+    "expired": "Package expired",
+}
+
+
+def log_hotspot_event(cursor, grant, event, detail=""):
+    """One line on the guest's connection log."""
+    cursor.execute(
+        """
+        INSERT INTO hotspot_events (id, purchase_id, username, event, detail)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (str(uuid.uuid4()), str(grant["purchase_id"]), str(grant["username"])[:40], event, str(detail)[:255]),
+    )
+    print(f"event=hotspot-{event.replace('_', '-')} user={grant['username']}", flush=True)
+
+
+def _set_grant(cursor, grant, assignments):
+    cursor.execute(f"UPDATE {_grant_table(grant)} SET {assignments} WHERE id = %s", (grant["grant_id"],))
+
+
 def _pause_grants(cursor, grants):
     for grant in grants:
         if not grant.get("paused_at"):
-            cursor.execute(
-                f"UPDATE {_grant_table(grant)} SET paused_at = NOW() WHERE id = %s AND paused_at IS NULL",
-                (grant["grant_id"],),
-            )
-            print(f"event=hotspot-pause user={grant['username']}", flush=True)
+            _set_grant(cursor, grant, "paused_at = NOW(), router_back_at = NULL, seen_online = 0")
+            log_hotspot_event(cursor, grant, "router_offline", "Time paused until the device reconnects.")
 
 
 def _resume_grant(cursor, grant):
-    cursor.execute(
-        f"""
-        UPDATE {_grant_table(grant)}
-        SET paused_seconds = paused_seconds + GREATEST(0, TIMESTAMPDIFF(SECOND, paused_at, NOW())),
-            paused_at = NULL
-        WHERE id = %s AND paused_at IS NOT NULL
-        """,
-        (grant["grant_id"],),
+    _set_grant(
+        cursor,
+        grant,
+        "paused_seconds = paused_seconds + GREATEST(0, TIMESTAMPDIFF(SECOND, paused_at, NOW())),"
+        " paused_at = NULL, router_back_at = NULL, seen_online = 1",
     )
-    print(f"event=hotspot-resume user={grant['username']}", flush=True)
+    log_hotspot_event(cursor, grant, "reconnected", "Time is counting again.")
 
 
 def _close_finished_purchases(cursor, purchase_ids):
@@ -1872,7 +1894,7 @@ def _expire_grants(cursor, grants):
             (grant["started"], grant["purchase_id"], name),
         )
         finished.add(str(grant["purchase_id"]))
-        print(f"event=hotspot-expire user={name}", flush=True)
+        log_hotspot_event(cursor, grant, "expired", "Paid time is over; the device was logged out.")
     _close_finished_purchases(cursor, finished)
 
 
@@ -1894,12 +1916,22 @@ def _sweep_router_clock(cursor, grants, now):
     online = {str(row.get("username") or "") for row in active}
     due = []
     for grant in grants:
+        is_online = grant["username"] in online
         if grant.get("paused_at"):
             # Back from an outage: the clock waits for the device to log in
             # again, then keeps running even if it disconnects later.
-            if grant["username"] in online:
+            if not grant.get("router_back_at"):
+                _set_grant(cursor, grant, "router_back_at = NOW()")
+                log_hotspot_event(cursor, grant, "router_online", "Waiting for the device to reconnect.")
+            if is_online:
                 _resume_grant(cursor, grant)
             continue
+        if is_online and not grant.get("seen_online"):
+            _set_grant(cursor, grant, "seen_online = 1")
+            log_hotspot_event(cursor, grant, "connected", "Started surfing.")
+        elif not is_online and grant.get("seen_online"):
+            _set_grant(cursor, grant, "seen_online = 0")
+            log_hotspot_event(cursor, grant, "disconnected", "Left before the package ran out; time keeps counting.")
         ends = hotspot_grant_ends(grant, now)
         if ends and ends <= now:
             due.append(grant)

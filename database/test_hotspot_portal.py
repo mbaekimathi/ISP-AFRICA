@@ -1092,7 +1092,8 @@ def clock_grant(**extra):
     row = {
         "kind": "voucher", "grant_id": "v1", "username": "hs-u1", "password": "pw1",
         "started": datetime.now() - timedelta(hours=2), "seconds": 86400,
-        "paused_at": None, "paused_seconds": 0, "mac": "AA:BB:CC:00:00:01",
+        "paused_at": None, "paused_seconds": 0, "seen_online": 0, "router_back_at": None,
+        "mac": "AA:BB:CC:00:00:01",
         "purchase_id": "pu-1", "device_id": "router-1",
         "tunnel_ip": "10.88.0.5", "api_secret": "sealed",
     }
@@ -1101,6 +1102,10 @@ def clock_grant(**extra):
 
 
 class HotspotClockTests(unittest.TestCase):
+    @staticmethod
+    def events(cursor):
+        return [write[1][3] for write in cursor.updates("INSERT INTO hotspot_events")]
+
     def sweep(self, cursor, online=(), offline=False):
         db = LimitDb(cursor)
         sessions = mock.Mock(
@@ -1123,6 +1128,7 @@ class HotspotClockTests(unittest.TestCase):
         self.assertEqual(revoke.call_args[0][2], ["hs-u1"])
         expired = cursor.updates("UPDATE hotspot_vouchers SET status = 'used'")
         self.assertEqual(expired[0][1][1:], ("pu-1", "hs-u1"))
+        self.assertIn("expired", self.events(cursor))
         self.assertEqual(cursor.updates("UPDATE hotspot_purchases pu")[0][1], ("pu-1",))
         self.assertTrue(db.committed)
 
@@ -1146,6 +1152,7 @@ class HotspotClockTests(unittest.TestCase):
         revoke.assert_not_called()
         paused = cursor.updates("UPDATE hotspot_vouchers SET paused_at = NOW()")
         self.assertEqual(paused[0][1], ("v1",))
+        self.assertEqual(self.events(cursor), ["router_offline"])
         self.assertFalse(cursor.updates("UPDATE hotspot_purchases"))
 
     def test_paused_clock_waits_for_the_device_to_log_back_in(self):
@@ -1156,12 +1163,25 @@ class HotspotClockTests(unittest.TestCase):
         cursor = ExpiryCursor(vouchers=[grant])
         revoke, _db = self.sweep(cursor, online=())
         revoke.assert_not_called()
-        self.assertFalse(cursor.updates("UPDATE"))
-        cursor = ExpiryCursor(vouchers=[grant])
+        self.assertEqual(self.events(cursor), ["router_online"])
+        self.assertFalse(cursor.updates("UPDATE hotspot_vouchers SET paused_seconds"))
+        cursor = ExpiryCursor(vouchers=[dict(grant, router_back_at=datetime.now())])
         revoke, _db = self.sweep(cursor, online=("hs-u1",))
         revoke.assert_not_called()
         resumed = cursor.updates("UPDATE hotspot_vouchers SET paused_seconds")
         self.assertEqual(resumed[0][1], ("v1",))
+        self.assertEqual(self.events(cursor), ["reconnected"])
+
+    def test_connect_and_disconnect_are_logged(self):
+        cursor = ExpiryCursor(vouchers=[clock_grant()])
+        self.sweep(cursor, online=("hs-u1",))
+        self.assertEqual(self.events(cursor), ["connected"])
+        cursor = ExpiryCursor(vouchers=[clock_grant(seen_online=1)])
+        self.sweep(cursor, online=())
+        self.assertEqual(self.events(cursor), ["disconnected"])
+        cursor = ExpiryCursor(vouchers=[clock_grant(seen_online=1)])
+        self.sweep(cursor, online=("hs-u1",))
+        self.assertEqual(self.events(cursor), [])
 
     def test_paused_time_is_added_back(self):
         # 25 hours since start with 2 hours paused: a one-day grant has 1 hour left.
