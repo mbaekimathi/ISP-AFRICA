@@ -233,7 +233,7 @@ export function CompanyGatewayControlsPage() {
       ) : null}
 
       <section className="card mt-6">
-        <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+        <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
           <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><ShieldCheck className="h-4 w-4" /></span>
           <h2 className="text-sm font-semibold">Gateway controls</h2>
           {settings?.configured ? (
@@ -540,7 +540,7 @@ function ClientRulesCard({
 
   return (
     <section className="card mt-6">
-      <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+      <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
         <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><SlidersHorizontal className="h-4 w-4" /></span>
         <h2 className="text-sm font-semibold">Client settlement rules</h2>
         <p className="ml-auto text-xs text-muted-foreground">

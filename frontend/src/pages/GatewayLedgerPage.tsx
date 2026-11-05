@@ -308,7 +308,7 @@ export function GatewayLedgerPage() {
 
           {tab === "payments" ? (
             <section className="card mt-4 overflow-hidden">
-              <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+              <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
                 <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><ArrowLeftRight className="h-4 w-4" /></span>
                 <h2 className="text-sm font-semibold">All gateway transactions</h2>
                 <select
@@ -379,7 +379,7 @@ export function GatewayLedgerPage() {
 
           {tab === "payouts" ? (
             <section className="card mt-4 overflow-hidden">
-              <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+              <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
                 <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><ArrowLeftRight className="h-4 w-4" /></span>
                 <h2 className="text-sm font-semibold">Settlement payouts</h2>
               </header>
@@ -421,7 +421,7 @@ export function GatewayLedgerPage() {
 
           {tab === "ledger" ? (
             <section className="card mt-4 overflow-hidden">
-              <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+              <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
                 <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><ScrollText className="h-4 w-4" /></span>
                 <h2 className="text-sm font-semibold">Pool ledger</h2>
                 <p className="ml-auto text-xs text-muted-foreground">Append-only — corrections appear as new entries</p>
@@ -462,7 +462,7 @@ export function GatewayLedgerPage() {
 
           {tab === "notices" ? (
             <section className="card mt-4 overflow-hidden">
-              <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+              <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
                 <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><BellRing className="h-4 w-4" /></span>
                 <h2 className="text-sm font-semibold">Gateway notices</h2>
               </header>
