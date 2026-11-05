@@ -389,144 +389,6 @@ function InfoRow({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
-function TreeNode({
-  icon,
-  tone,
-  last,
-  children,
-}: {
-  icon: ReactNode;
-  tone: string;
-  last: boolean;
-  children: ReactNode;
-}) {
-  return (
-    <li className="relative pl-8">
-      <span className={cn("absolute left-[11px] top-0 w-px bg-border", last ? "h-4" : "h-full")} aria-hidden="true" />
-      <span className="absolute left-[11px] top-4 h-px w-4 bg-border" aria-hidden="true" />
-      <span
-        className={cn("absolute left-0 top-1.5 flex h-6 w-6 items-center justify-center rounded-full ring-4 ring-surface", tone)}
-        aria-hidden="true"
-      >
-        {icon}
-      </span>
-      <div className="pb-4">{children}</div>
-    </li>
-  );
-}
-
-function PaymentTree({
-  transactions,
-  vouchers,
-  events,
-  root,
-  openHref,
-}: {
-  transactions: GuestTransaction[];
-  vouchers: Voucher[];
-  events: ConnectionEvent[];
-  root: string;
-  openHref: (id: string) => string;
-}) {
-  const steps = [...events].reverse().filter((entry) => entry.kind !== "paid");
-  return (
-    <div>
-      <div className="flex items-center gap-2.5">
-        <span className="flex h-7 w-7 items-center justify-center rounded-full bg-primary/10 text-primary" aria-hidden="true">
-          <UserRound className="h-3.5 w-3.5" />
-        </span>
-        <span className="text-sm font-semibold">{root}</span>
-        <span className="text-xs text-muted-foreground">
-          {transactions.length} payment{transactions.length === 1 ? "" : "s"}
-        </span>
-      </div>
-      <ul className="ml-[3px] mt-2">
-        {transactions.map((tx, index) => (
-          <TreeNode
-            key={tx.id}
-            last={index === transactions.length - 1}
-            tone={tx.status === "paid" ? "bg-emerald-500/10 text-emerald-600" : tx.status === "failed" ? "bg-red-500/10 text-red-600" : "bg-amber-500/10 text-amber-600"}
-            icon={<Wallet className="h-3 w-3" />}
-          >
-            <div className={cn("rounded-lg border border-border px-3 py-2.5", tx.current && "border-primary/40 bg-primary/5")}>
-              <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                <span className="text-sm font-semibold">{tx.packageName}</span>
-                <span className="text-sm font-medium tabular-nums">{money(tx.amount)}</span>
-                <StatusBadge tone={statusTone[tx.status] ?? "neutral"}>{tx.status}</StatusBadge>
-                {tx.deleted ? <span className="text-xs text-muted-foreground">deleted</span> : null}
-                <span className="ml-auto">
-                  {tx.current ? (
-                    <span className="text-xs font-medium text-muted-foreground">This page</span>
-                  ) : (
-                    <Link to={openHref(tx.id)} className="text-xs font-semibold text-primary hover:underline">
-                      Open
-                    </Link>
-                  )}
-                </span>
-              </div>
-              <div className="mt-1 flex flex-wrap gap-x-4 gap-y-0.5 text-xs text-muted-foreground">
-                <span>Requested {tx.createdAt ?? "—"}</span>
-                <span>{tx.paidAt ? `Paid ${tx.paidAt}` : tx.status === "pending" ? "Awaiting M-Pesa" : "Not paid"}</span>
-                <span className="font-mono" title={tx.checkoutId || undefined}>
-                  {tx.mpesaCode || (tx.checkoutId ? `${tx.checkoutId.slice(0, 12)}…` : "—")}
-                </span>
-                <span>
-                  {tx.devices} device{tx.devices === 1 ? "" : "s"} × {tx.periods} period{tx.periods === 1 ? "" : "s"}
-                </span>
-                <span>{tx.phone || "—"}</span>
-              </div>
-            </div>
-            {tx.current && (vouchers.length > 0 || steps.length > 0) ? (
-              <ul className="ml-[3px] mt-3">
-                {vouchers.map((voucher, vIndex) => {
-                  const mine = steps.filter((entry) => entry.device === voucher.code || (vIndex === 0 && entry.device === "This device"));
-                  return (
-                    <TreeNode
-                      key={voucher.id}
-                      last={vIndex === vouchers.length - 1}
-                      tone={voucher.status === "used" ? "bg-sky-500/10 text-sky-600" : "bg-muted text-muted-foreground"}
-                      icon={<Ticket className="h-3 w-3" />}
-                    >
-                      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                        <span className="font-mono text-sm font-semibold">{voucher.code}</span>
-                        <StatusBadge tone={statusTone[voucher.status] ?? "neutral"}>{voucher.status}</StatusBadge>
-                        <span className="text-xs text-muted-foreground">
-                          {voucher.redeemedMac || "Not redeemed"}
-                          {voucher.usedAt ? ` · used ${voucher.usedAt}` : ""}
-                        </span>
-                      </div>
-                      {mine.length ? (
-                        <ul className="ml-[3px] mt-2">
-                          {mine.map((entry, eIndex) => {
-                            const look = connectionIcons[entry.kind] ?? { icon: History, tone: "bg-muted text-muted-foreground" };
-                            const Icon = look.icon;
-                            return (
-                              <TreeNode key={eIndex} last={eIndex === mine.length - 1} tone={look.tone} icon={<Icon className="h-3 w-3" />}>
-                                <div className="flex flex-wrap items-baseline gap-x-2">
-                                  <span className="text-sm font-medium">{entry.event}</span>
-                                  <span className="text-xs tabular-nums text-muted-foreground">{entry.at ?? "—"}</span>
-                                </div>
-                                <p className="text-xs leading-5 text-muted-foreground">{entry.detail}</p>
-                              </TreeNode>
-                            );
-                          })}
-                        </ul>
-                      ) : null}
-                    </TreeNode>
-                  );
-                })}
-              </ul>
-            ) : null}
-          </TreeNode>
-        ))}
-      </ul>
-      <p className="mt-1 text-xs text-muted-foreground">
-        Every M-Pesa prompt from this device. Open another payment to see its own vouchers and events.
-      </p>
-    </div>
-  );
-}
-
 export function HotspotClientPage() {
   const { purchaseId = "" } = useParams();
   const { user } = useAuth();
@@ -1114,13 +976,65 @@ export function HotspotClientPage() {
                 detail.transactions.length === 0 ? (
                   <p className="text-sm text-muted-foreground">No payments recorded for this device yet.</p>
                 ) : (
-                  <PaymentTree
-                    transactions={detail.transactions}
-                    vouchers={detail.vouchers}
-                    events={detail.connectionLog ?? []}
-                    root={detail.client.phone || detail.client.mac || "This guest"}
-                    openHref={(id) => home(`/hotspot/${id}`)}
-                  />
+                  <div className="overflow-x-auto">
+                    <table className="data-table min-w-[56rem]">
+                      <thead className="border-b border-border text-xs text-muted-foreground">
+                        <tr>
+                          <th className="px-2 py-2 font-medium">Requested</th>
+                          <th className="px-2 py-2 font-medium">Package</th>
+                          <th className="px-2 py-2 font-medium">Amount</th>
+                          <th className="px-2 py-2 font-medium">Status</th>
+                          <th className="px-2 py-2 font-medium">Receipt</th>
+                          <th className="px-2 py-2 font-medium">Covers</th>
+                          <th className="px-2 py-2 font-medium">Vouchers</th>
+                          <th className="px-2 py-2 font-medium"><span className="sr-only">Open</span></th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {detail.transactions.map((tx) => (
+                          <tr key={tx.id} className={cn("border-b border-border last:border-0", tx.current && "bg-surface-muted/50")}>
+                            <td className="px-2 py-2">
+                              <div>{tx.createdAt ?? "—"}</div>
+                              <div className="text-xs text-muted-foreground">
+                                {tx.paidAt ? `Paid ${tx.paidAt}` : tx.status === "pending" ? "Awaiting M-Pesa" : "Not paid"}
+                              </div>
+                            </td>
+                            <td className="px-2 py-2">
+                              <div className="font-medium">{tx.packageName}</div>
+                              <div className="text-xs text-muted-foreground">{tx.routerName || "—"}</div>
+                            </td>
+                            <td className="px-2 py-2">
+                              <div className="font-medium">{money(tx.amount)}</div>
+                              <div className="text-xs text-muted-foreground">{tx.phone || "—"}</div>
+                            </td>
+                            <td className="px-2 py-2">
+                              <StatusBadge tone={statusTone[tx.status] ?? "neutral"}>{tx.status}</StatusBadge>
+                              {tx.deleted ? <span className="ml-1.5 text-xs text-muted-foreground">deleted</span> : null}
+                            </td>
+                            <td className="px-2 py-2 font-mono text-xs" title={tx.checkoutId || undefined}>
+                              {tx.mpesaCode || (tx.checkoutId ? `${tx.checkoutId.slice(0, 12)}…` : "—")}
+                            </td>
+                            <td className="px-2 py-2 text-xs">
+                              {tx.devices} device{tx.devices === 1 ? "" : "s"} × {tx.periods} period{tx.periods === 1 ? "" : "s"}
+                            </td>
+                            <td className="px-2 py-2 text-xs">{tx.vouchers ? `${tx.vouchersUsed}/${tx.vouchers} used` : "—"}</td>
+                            <td className="px-2 py-2 text-right">
+                              {tx.current ? (
+                                <span className="text-xs font-medium text-muted-foreground">This page</span>
+                              ) : (
+                                <Link to={home(`/hotspot/${tx.id}`)} className="text-xs font-semibold text-primary hover:underline">
+                                  Open
+                                </Link>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                    <p className="mt-2 text-xs text-muted-foreground">
+                      Every M-Pesa prompt from this device — open another payment to see its own vouchers and sessions.
+                    </p>
+                  </div>
                 )
               ) : tab === "vouchers" ? (
                 detail.vouchers.length === 0 ? (
