@@ -1413,6 +1413,29 @@ def ensure_database():
         db.close()
 
 
+def start_hotspot_clock_now(cursor, table):
+    """First run of the clock-time hotspot rule: logins already handed out
+    used to count online time only, so their clock starts at this deploy
+    instead of cutting them off on the first pass. The router's own
+    limit-uptime still caps how long they can be online."""
+    if table == "hotspot_vouchers":
+        cursor.execute(
+            """
+            UPDATE hotspot_vouchers
+            SET paused_seconds = GREATEST(0, TIMESTAMPDIFF(SECOND, used_at, NOW()))
+            WHERE status = 'used' AND used_at IS NOT NULL
+            """
+        )
+    else:
+        cursor.execute(
+            """
+            UPDATE hotspot_purchases
+            SET paused_seconds = GREATEST(0, TIMESTAMPDIFF(SECOND, COALESCE(paid_at, created_at), NOW()))
+            WHERE status = 'paid' AND authorized = 1 AND ended_at IS NULL
+            """
+        )
+
+
 def ensure_schema():
     ensure_database()
     db = connect()
@@ -1939,6 +1962,37 @@ def ensure_schema():
                 )
                 """
             )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS hotspot_events (
+                  id CHAR(36) NOT NULL PRIMARY KEY,
+                  purchase_id CHAR(36) NOT NULL,
+                  username VARCHAR(40) NOT NULL DEFAULT '',
+                  event VARCHAR(24) NOT NULL,
+                  detail VARCHAR(255) NOT NULL DEFAULT '',
+                  seq BIGINT NOT NULL AUTO_INCREMENT,
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  UNIQUE KEY uq_hs_event_seq (seq),
+                  KEY idx_hs_event_purchase (purchase_id, created_at)
+                )
+                """
+            )
+            for table, column, definition in (
+                ("hotspot_vouchers", "expired_at", "expired_at TIMESTAMP NULL"),
+                ("hotspot_vouchers", "paused_at", "paused_at DATETIME NULL"),
+                ("hotspot_vouchers", "paused_seconds", "paused_seconds INT NOT NULL DEFAULT 0"),
+                ("hotspot_purchases", "paused_at", "paused_at DATETIME NULL"),
+                ("hotspot_purchases", "paused_seconds", "paused_seconds INT NOT NULL DEFAULT 0"),
+                ("hotspot_vouchers", "seen_online", "seen_online TINYINT NOT NULL DEFAULT 0"),
+                ("hotspot_vouchers", "router_back_at", "router_back_at DATETIME NULL"),
+                ("hotspot_purchases", "seen_online", "seen_online TINYINT NOT NULL DEFAULT 0"),
+                ("hotspot_purchases", "router_back_at", "router_back_at DATETIME NULL"),
+            ):
+                cursor.execute(f"SHOW COLUMNS FROM {table} LIKE %s", (column,))
+                if cursor.fetchone() is None:
+                    cursor.execute(f"ALTER TABLE {table} ADD COLUMN {definition}")
+                    if column == "paused_seconds":
+                        start_hotspot_clock_now(cursor, table)
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS hotspot_limit_state (
@@ -8348,6 +8402,10 @@ def hotspot_limit_loop():
     interval = max(15, int(os.environ.get("ISP_HOTSPOT_LIMIT_SECONDS", "60")))
     while True:
         time.sleep(interval)
+        try:
+            portal_server.expire_hotspot_grants(connect)
+        except Exception as error:
+            print(f"event=hotspot-expire error={error}", flush=True)
         try:
             portal_server.enforce_hotspot_limits(connect)
         except Exception as error:

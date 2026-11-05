@@ -966,6 +966,20 @@ def portal_base():
     return f"http://{host}:{PORTAL_PORT}"
 
 
+def hotspot_resume_page(login_url):
+    """A device that still has paid time skips the shop and logs back in."""
+    url = esc(login_url)
+    return page(
+        "Reconnecting",
+        f"""<span class="ic blue">{ICON_WIFI}</span>
+<h1>Your package is still active</h1>
+<p class=sub>Reconnecting you now…</p>
+<p style="text-align:center;margin-top:8px"><span class=spin></span></p>
+<p class=note><a href="{url}">Tap here if nothing happens.</a></p>""",
+        f'<meta http-equiv="refresh" content="0; url={url}">',
+    )
+
+
 def router_page(name):
     """Pages fetched onto the router; $(...) tokens are filled by RouterOS."""
     if name == "login.html":
@@ -1460,7 +1474,7 @@ def _hotspot_pending_rows(cursor, where, params):
         f"""
         SELECT pu.id AS purchase_id, pu.client_id, pu.device_id, pu.mac, pu.ip, pu.devices, pu.periods,
                pu.status, pu.username, pu.password, pu.authorized, pu.login_url, pu.orig_url,
-               pu.paid_at, pu.created_at, pu.mpesa_code,
+               pu.paid_at, pu.created_at, pu.mpesa_code, pu.ended_at, pu.deleted,
                d.tunnel_ip, d.api_secret,
                COALESCE(p.download_mbps, c.download_mbps, 0) AS download_mbps,
                COALESCE(p.upload_mbps, c.upload_mbps, 0) AS upload_mbps,
@@ -1497,7 +1511,8 @@ def hotspot_unauthorized(cursor, seconds):
     strand a paid bundle on the captive side."""
     return _hotspot_pending_rows(
         cursor,
-        "pu.status = 'paid' AND pu.authorized = 0 AND pu.paid_at < NOW() - INTERVAL %s SECOND",
+        "pu.status = 'paid' AND pu.authorized = 0 AND pu.ended_at IS NULL AND pu.deleted = 0"
+        " AND pu.paid_at < NOW() - INTERVAL %s SECOND",
         (max(15, int(seconds)),),
     )
 
@@ -1557,7 +1572,7 @@ def hotspot_limit_targets(cursor):
         JOIN isp_mikrotik_devices d ON d.id = v.device_id
         LEFT JOIN isp_packages p ON p.id = v.package_id
         LEFT JOIN company_packages c ON c.id = p.company_package_id
-        WHERE v.status = 'used' AND v.username <> ''
+        WHERE v.status = 'used' AND v.username <> '' AND v.expired_at IS NULL
           AND pu.status = 'paid' AND pu.deleted = 0 AND pu.ended_at IS NULL
         """
     )
@@ -1733,6 +1748,236 @@ def enforce_hotspot_limits(connect):
         db.commit()
     finally:
         db.close()
+
+
+def _paused_for(row, now):
+    total = int(row.get("paused_seconds") or 0)
+    if isinstance(row.get("paused_at"), datetime):
+        total += max(0, int((now - row["paused_at"]).total_seconds()))
+    return total
+
+
+def hotspot_clock_grants(cursor):
+    """Every login still counting down by the clock, online or not.
+
+    RouterOS limit-uptime only counts time spent logged in, so the clock is
+    kept here: it starts when a voucher is used (at payment for the payer's
+    own grant) and stands still while the router is unreachable.
+    """
+    cursor.execute(
+        """
+        SELECT 'voucher' AS kind, v.id AS grant_id, v.username, v.password, v.used_at AS started,
+               v.seconds, v.paused_at, v.paused_seconds, v.seen_online, v.router_back_at,
+               v.redeemed_mac AS mac,
+               v.purchase_id, v.device_id, d.tunnel_ip, d.api_secret
+        FROM hotspot_vouchers v
+        LEFT JOIN isp_mikrotik_devices d ON d.id = v.device_id
+        WHERE v.status = 'used' AND v.expired_at IS NULL AND v.username <> ''
+          AND v.used_at IS NOT NULL AND v.seconds > 0
+        """
+    )
+    grants = list(cursor.fetchall())
+    cursor.execute(
+        """
+        SELECT 'purchase' AS kind, pu.id AS grant_id, pu.username, pu.password,
+               COALESCE(pu.paid_at, pu.created_at) AS started,
+               pu.periods, pu.paused_at, pu.paused_seconds, pu.seen_online, pu.router_back_at, pu.mac,
+               pu.id AS purchase_id, pu.device_id, d.tunnel_ip, d.api_secret,
+               COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
+               COALESCE(p.validity_unit, c.validity_unit, 'days') AS validity_unit
+        FROM hotspot_purchases pu
+        LEFT JOIN isp_mikrotik_devices d ON d.id = pu.device_id
+        LEFT JOIN isp_packages p ON p.id = pu.package_id
+        LEFT JOIN company_packages c ON c.id = p.company_package_id
+        WHERE pu.status = 'paid' AND pu.authorized = 1 AND pu.username <> ''
+          AND pu.ended_at IS NULL
+          AND NOT EXISTS (
+              SELECT 1 FROM hotspot_vouchers v
+              WHERE v.purchase_id = pu.id AND v.username = pu.username AND v.status = 'used'
+          )
+        """
+    )
+    for row in cursor.fetchall():
+        row["seconds"] = int(row.get("periods") or 1) * validity_seconds(row["validity_amount"], row["validity_unit"])
+        grants.append(row)
+    return [grant for grant in grants if isinstance(grant.get("started"), datetime)]
+
+
+def hotspot_grant_ends(grant, now=None):
+    """When the login runs out — None while its clock is paused."""
+    if grant.get("paused_at"):
+        return None
+    now = now or datetime.now()
+    return grant["started"] + timedelta(seconds=int(grant.get("seconds") or 0) + _paused_for(grant, now))
+
+
+def _grant_table(grant):
+    return "hotspot_vouchers" if grant["kind"] == "voucher" else "hotspot_purchases"
+
+
+HOTSPOT_EVENTS = {
+    "paid": "Paid",
+    "connected": "Connected",
+    "disconnected": "Disconnected",
+    "router_offline": "Router went offline",
+    "router_online": "Router back online",
+    "reconnected": "Reconnected",
+    "expired": "Package expired",
+}
+
+
+def log_hotspot_event(cursor, grant, event, detail=""):
+    """One line on the guest's connection log."""
+    cursor.execute(
+        """
+        INSERT INTO hotspot_events (id, purchase_id, username, event, detail)
+        VALUES (%s, %s, %s, %s, %s)
+        """,
+        (str(uuid.uuid4()), str(grant["purchase_id"]), str(grant["username"])[:40], event, str(detail)[:255]),
+    )
+    print(f"event=hotspot-{event.replace('_', '-')} user={grant['username']}", flush=True)
+
+
+def _set_grant(cursor, grant, assignments):
+    cursor.execute(f"UPDATE {_grant_table(grant)} SET {assignments} WHERE id = %s", (grant["grant_id"],))
+
+
+def _pause_grants(cursor, grants):
+    for grant in grants:
+        if not grant.get("paused_at"):
+            _set_grant(cursor, grant, "paused_at = NOW(), router_back_at = NULL, seen_online = 0")
+            log_hotspot_event(cursor, grant, "router_offline", "Time paused until the device reconnects.")
+
+
+def _resume_grant(cursor, grant):
+    _set_grant(
+        cursor,
+        grant,
+        "paused_seconds = paused_seconds + GREATEST(0, TIMESTAMPDIFF(SECOND, paused_at, NOW())),"
+        " paused_at = NULL, router_back_at = NULL, seen_online = 1",
+    )
+    log_hotspot_event(cursor, grant, "reconnected", "Time is counting again.")
+
+
+def _close_finished_purchases(cursor, purchase_ids):
+    """A purchase ends once none of its logins or unused vouchers are left."""
+    for purchase_id in sorted(purchase_ids):
+        cursor.execute(
+            """
+            UPDATE hotspot_purchases pu
+            SET pu.authorized = 0, pu.ended_at = NOW()
+            WHERE pu.id = %s AND pu.ended_at IS NULL
+              AND NOT EXISTS (
+                  SELECT 1 FROM hotspot_vouchers v
+                  WHERE v.purchase_id = pu.id
+                    AND (v.status = 'issued' OR (v.status = 'used' AND v.expired_at IS NULL))
+              )
+            """,
+            (purchase_id,),
+        )
+
+
+def _expire_grants(cursor, grants):
+    finished = set()
+    for grant in grants:
+        name = grant["username"]
+        for table in ("radcheck", "radreply", "radusergroup"):
+            cursor.execute(f"DELETE FROM {table} WHERE username = %s", (name,))
+        # The payer's login often shares its username with the first
+        # voucher, which then must not be redeemable again.
+        cursor.execute(
+            """
+            UPDATE hotspot_vouchers
+            SET status = 'used', used_at = COALESCE(used_at, %s), expired_at = NOW()
+            WHERE purchase_id = %s AND username = %s AND status IN ('issued', 'used')
+            """,
+            (grant["started"], grant["purchase_id"], name),
+        )
+        finished.add(str(grant["purchase_id"]))
+        log_hotspot_event(cursor, grant, "expired", "Paid time is over; the device was logged out.")
+    _close_finished_purchases(cursor, finished)
+
+
+def _sweep_router_clock(cursor, grants, now):
+    """One router's pass: pause on outage, resume on the first login back,
+    log out whatever has run out."""
+    router = grants[0]
+    if not (router.get("tunnel_ip") and router.get("api_secret")):
+        return
+    try:
+        password = routeros_api.open_password(router["api_secret"])
+        active = routeros_api.hotspot_active_sessions(
+            router["tunnel_ip"], password, usernames=[grant["username"] for grant in grants]
+        )
+    except (routeros_api.RouterError, OSError):
+        # The router is offline: nobody can surf, so nobody's time runs.
+        _pause_grants(cursor, grants)
+        return
+    online = {str(row.get("username") or "") for row in active}
+    due = []
+    for grant in grants:
+        is_online = grant["username"] in online
+        if grant.get("paused_at"):
+            # Back from an outage: the clock waits for the device to log in
+            # again, then keeps running even if it disconnects later.
+            if not grant.get("router_back_at"):
+                _set_grant(cursor, grant, "router_back_at = NOW()")
+                log_hotspot_event(cursor, grant, "router_online", "Waiting for the device to reconnect.")
+            if is_online:
+                _resume_grant(cursor, grant)
+            continue
+        if is_online and not grant.get("seen_online"):
+            _set_grant(cursor, grant, "seen_online = 1")
+            log_hotspot_event(cursor, grant, "connected", "Started surfing.")
+        elif not is_online and grant.get("seen_online"):
+            _set_grant(cursor, grant, "seen_online = 0")
+            log_hotspot_event(cursor, grant, "disconnected", "Left before the package ran out; time keeps counting.")
+        ends = hotspot_grant_ends(grant, now)
+        if ends and ends <= now:
+            due.append(grant)
+    if not due:
+        return
+    try:
+        routeros_api.revoke_hotspot_client(router["tunnel_ip"], password, [grant["username"] for grant in due])
+    except (routeros_api.RouterError, OSError) as error:
+        print(f"event=hotspot-expire router={router['device_id']} error={error}", flush=True)
+        return
+    _expire_grants(cursor, due)
+
+
+def expire_hotspot_grants(connect):
+    """Run the hotspot clock against every router.
+
+    An expired device stays on the Wi-Fi unauthorized, so its next page
+    opens the payment portal and a recharge or voucher brings it back.
+    """
+    db = connect()
+    try:
+        with db.cursor() as cursor:
+            routers = {}
+            for grant in hotspot_clock_grants(cursor):
+                routers.setdefault(str(grant.get("device_id") or ""), []).append(grant)
+            now = datetime.now()
+            for grants in routers.values():
+                _sweep_router_clock(cursor, grants, now)
+        db.commit()
+    finally:
+        db.close()
+
+
+def hotspot_live_grant(cursor, device_id, mac):
+    """The unexpired login this device already paid for on this router."""
+    mac = str(mac or "").strip().upper()
+    if not mac:
+        return None
+    now = datetime.now()
+    for grant in hotspot_clock_grants(cursor):
+        if str(grant.get("device_id") or "") != str(device_id) or str(grant.get("mac") or "").upper() != mac:
+            continue
+        ends = hotspot_grant_ends(grant, now)
+        if ends is None or ends > now:
+            return grant
+    return None
 
 
 def hotspot_login_url(pending, username, password, dst=""):
@@ -2060,6 +2305,11 @@ class PortalHandler(BaseHTTPRequestHandler):
 <p class=note>Reconnect and try again, or contact the provider.</p>""",
                         )
                     )
+                grant = hotspot_live_grant(cursor, device["id"], ctx["mac"])
+                if grant:
+                    login_url = hotspot_login_url(ctx, grant["username"], grant["password"] or "")
+                    if login_url:
+                        return self._send(hotspot_resume_page(login_url))
                 offers = hotspot_packages(cursor, device["client_id"], device["id"])
                 payment = daraja_settings(cursor, device["client_id"])
                 phone = support_phone(cursor, device["client_id"])
@@ -2675,6 +2925,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                 row = hotspot_pending_purchase(cursor, purchase_id)
                 if not row or row["status"] != "paid":
                     return self._send(b'{"error":"That purchase is not ready to connect."}', 404, "application/json")
+                if row.get("ended_at") or row.get("deleted"):
+                    return self._send(b'{"error":"This package has ended. Buy a new one to get back online."}', 410, "application/json")
                 if row["username"] and row["authorized"]:
                     login_url = hotspot_login_url(
                         {"login": row.get("login_url"), "orig": row.get("orig_url")},
