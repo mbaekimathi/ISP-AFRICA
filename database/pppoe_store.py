@@ -880,18 +880,32 @@ def packages_for_router(cursor, client_id, router_id):
     return packages
 
 
+def username_taken(cursor, username, ignore_id=None):
+    candidates = {username.lower()} | {alias.lower() for alias in pppoe_service.phone_variants(username)}
+    marks = ", ".join(["%s"] * len(candidates))
+    own = None
+    if ignore_id:
+        cursor.execute("SELECT pppoe_username FROM pppoe_subscribers WHERE id = %s", (ignore_id,))
+        found = cursor.fetchone()
+        own = found["pppoe_username"].lower() if found else None
+    cursor.execute(
+        f"SELECT id FROM pppoe_subscribers WHERE LOWER(pppoe_username) IN ({marks}) AND id <> %s",
+        [*candidates, ignore_id or ""],
+    )
+    if cursor.fetchone() is not None:
+        return True
+    cursor.execute(
+        f"SELECT id FROM radcheck WHERE LOWER(username) IN ({marks}) AND LOWER(username) <> %s",
+        [*candidates, own or ""],
+    )
+    return cursor.fetchone() is not None
+
+
 def check_username(cursor, client_id, username):
     if not allow_username_check(client_id):
         raise PppoeError(429, "Too many username checks. Wait a moment and try again.")
-    text = str(username or "").strip()
-    candidates = {text.lower()} | {alias.lower() for alias in pppoe_service.phone_variants(text)}
-    marks = ", ".join(["%s"] * len(candidates))
-    cursor.execute(f"SELECT id FROM pppoe_subscribers WHERE LOWER(pppoe_username) IN ({marks})", list(candidates))
-    taken = cursor.fetchone() is not None
-    if not taken:
-        cursor.execute(f"SELECT id FROM radcheck WHERE LOWER(username) IN ({marks})", list(candidates))
-        taken = cursor.fetchone() is not None
-    return {"username": text, "available": not taken}
+    text = pppoe_service.clean_username(username)
+    return {"username": text, "available": not username_taken(cursor, text)}
 
 
 def public_row(row):
@@ -1780,7 +1794,40 @@ def sync_router_access(cursor, client_id, router_id):
         (client_id, router_id),
     )
     for row in cursor.fetchall():
-        apply_plan(cursor, row, subscription_can_surf(row, today))
+        try:
+            apply_plan(cursor, row, subscription_can_surf(row, today))
+        except routeros_api.RouterError:
+            # One unreadable password must not stop the rest of the router's clients from syncing.
+            print(f"event=pppoe-sync result=unreadable-password subscriber={row['id']}", flush=True)
+
+
+def repair_plain_passwords(cursor):
+    """Re-seal passwords that ticket activation once stored as plain text.
+
+    Those rows hold the ticket's typed password verbatim in password_sealed,
+    so it can never be opened and RADIUS never got a login for them."""
+    cursor.execute(
+        """
+        SELECT s.id, s.password_sealed
+        FROM pppoe_subscribers s
+        JOIN isp_onboardings o ON o.pppoe_username = s.pppoe_username AND o.pppoe_password = s.password_sealed
+        WHERE s.deleted = 0 AND o.pppoe_password <> ''
+        """
+    )
+    repaired = []
+    for row in cursor.fetchall():
+        try:
+            routeros_api.open_password(row["password_sealed"])
+            continue
+        except routeros_api.RouterError:
+            pass
+        try:
+            sealed = routeros_api.seal_password(row["password_sealed"])
+        except routeros_api.RouterError:
+            continue
+        cursor.execute("UPDATE pppoe_subscribers SET password_sealed = %s WHERE id = %s", (sealed, row["id"]))
+        repaired.append(row["id"])
+    return repaired
 
 
 def apply_plan(cursor, row, active):
@@ -2431,7 +2478,7 @@ def reset_password(cursor, client_id, subscriber_id, payload):
     row = require_owned(cursor, client_id, subscriber_id)
     password = str(payload.get("password") or "") or pppoe_service.generate_password()
     if not pppoe_service.password_ok(password):
-        raise PppoeError(400, "Use 8 to 12 characters without O or l. A phone number like 0723864156 works.")
+        raise PppoeError(400, pppoe_service.PASSWORD_HINT)
     begin(cursor)
     try:
         sealed = routeros_api.seal_password(password)
@@ -2440,7 +2487,7 @@ def reset_password(cursor, client_id, subscriber_id, payload):
             (sealed, subscriber_id),
         )
         row["password_sealed"] = sealed
-        apply_plan(cursor, row, row["status"] == "active")
+        apply_plan(cursor, row, subscription_can_surf(row, date.today()))
         log_event(cursor, client_id, subscriber_id, client_id, "password", "Password replaced.")
         finish(cursor)
     except Exception as error:
@@ -2516,16 +2563,55 @@ def edit_subscriber(cursor, client_id, subscriber_id, payload):
         )
         if cursor.fetchone():
             raise PppoeError(400, "That serial number is already registered.")
-    cursor.execute(
-        """
-        UPDATE pppoe_subscribers
-        SET first_name = %s, last_name = %s, phone = %s, email = %s, building_name = %s, house_number = %s, router_serial = %s
-        WHERE id = %s AND client_id = %s
-        """,
-        (first, last, phone, email, building, house, serial or None, subscriber_id, client_id),
-    )
-    log_event(cursor, client_id, subscriber_id, client_id, "edit", "Customer details updated.")
-    return subscriber_detail(cursor, client_id, subscriber_id)
+    old_username = row["pppoe_username"]
+    username = pppoe_service.clean_username(payload.get("username")) or old_username
+    renamed = username != old_username
+    if renamed:
+        if not pppoe_service.USERNAME_PATTERN.fullmatch(username):
+            raise PppoeError(400, "Use 3 to 64 letters, numbers, hyphens, or underscores for the PPPoE username.")
+        if username_taken(cursor, username, subscriber_id):
+            raise PppoeError(400, "That PPPoE username is already used.")
+    password = str(payload.get("password") or "")
+    if password and not pppoe_service.password_ok(password):
+        raise PppoeError(400, pppoe_service.PASSWORD_HINT)
+    begin(cursor)
+    try:
+        sealed = routeros_api.seal_password(password) if password else row["password_sealed"]
+        cursor.execute(
+            """
+            UPDATE pppoe_subscribers
+            SET first_name = %s, last_name = %s, phone = %s, email = %s, building_name = %s, house_number = %s,
+                router_serial = %s, pppoe_username = %s, password_sealed = %s
+            WHERE id = %s AND client_id = %s
+            """,
+            (first, last, phone, email, building, house, serial or None, username, sealed, subscriber_id, client_id),
+        )
+        if renamed:
+            for table in ("radcheck", "radreply", "radusergroup"):
+                cursor.execute(f"DELETE FROM {table} WHERE username = %s", (old_username,))
+            # Accounting updates match on session id, so open sessions keep counting under the new name.
+            cursor.execute("UPDATE radacct SET username = %s WHERE username = %s", (username, old_username))
+        if renamed or password:
+            row["pppoe_username"] = username
+            row["password_sealed"] = sealed
+            apply_plan(cursor, row, subscription_can_surf(row, date.today()))
+        changes = ["Customer details updated."]
+        if renamed:
+            changes.append(f"Username {old_username} -> {username}.")
+        if password:
+            changes.append("Password replaced.")
+        log_event(cursor, client_id, subscriber_id, client_id, "edit", " ".join(changes))
+        finish(cursor)
+    except PppoeError:
+        abort(cursor)
+        raise
+    except Exception as error:
+        abort(cursor)
+        raise PppoeError(400, "The customer details were not saved.") from error
+    body = subscriber_detail(cursor, client_id, subscriber_id)
+    if password:
+        body["password"] = password
+    return body
 
 
 def sessions_export(cursor, client_id, subscriber_id, query):

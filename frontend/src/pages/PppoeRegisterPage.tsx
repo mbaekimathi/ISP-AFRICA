@@ -106,6 +106,7 @@ export function PppoeRegisterPage() {
     return () => window.clearTimeout(timer);
   }, [form.username]);
 
+  const phoneDigits = form.phone.replace(/\D/g, "");
   const selectedPackage = packages.find((item) => item.id === form.packageId);
   const preview = useMemo(() => {
     if (!form.startDate) return "No start date. The account stays pending and RADIUS will not grant access.";
@@ -212,11 +213,32 @@ export function PppoeRegisterPage() {
               }}
               required
             />
+            <SecondaryButton
+              type="button"
+              className="mt-2"
+              disabled={!phoneDigits}
+              onClick={() => {
+                setUsernameEdited(true);
+                setField("username", phoneDigits);
+              }}
+            >
+              Use phone number
+            </SecondaryButton>
           </FormField>
-          <FormField id="password" label="PPPoE password" error={errors.password} hint="Use 8 to 12 characters without O or l. A phone number like 0723864156 works.">
+          <FormField id="password" label="PPPoE password" error={errors.password} hint="Use 4 to 64 characters with no spaces at the start or end. A phone number like 0723864156 works.">
             <div className="flex flex-wrap gap-2">
               <input id="password" className="field" type={showPassword ? "text" : "password"} value={form.password} onChange={(event) => setField("password", event.target.value)} required />
               <SecondaryButton type="button" onClick={() => setShowPassword((current) => !current)}>{showPassword ? "Hide" : "Show"}</SecondaryButton>
+              <SecondaryButton
+                type="button"
+                disabled={!phoneDigits}
+                onClick={() => {
+                  setField("password", phoneDigits);
+                  setShowPassword(true);
+                }}
+              >
+                Use phone number
+              </SecondaryButton>
               <SecondaryButton type="button" onClick={() => setField("password", generatePassword())}>Regenerate</SecondaryButton>
               <SecondaryButton type="button" onClick={() => void copyPassword()}>Copy</SecondaryButton>
             </div>

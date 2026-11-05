@@ -635,5 +635,90 @@ class RenewHealTests(unittest.TestCase):
         self.assertIn("LEFT JOIN isp_packages", joined)
 
 
+class CredentialTests(unittest.TestCase):
+    def test_phone_numbers_work_as_password_and_username(self):
+        for value in ("0723864156", "+254723864156", "254723864156", "Mary@2024", "kilimo123", "abcd"):
+            self.assertTrue(pppoe_service.password_ok(value), value)
+        for value in ("abc", " padded", "x" * 65, "tab\there"):
+            self.assertFalse(pppoe_service.password_ok(value), value)
+        self.assertEqual(pppoe_service.clean_username("+254 723 864 156"), "254723864156")
+        self.assertEqual(pppoe_service.clean_username("0723-864-156"), "0723864156")
+        self.assertEqual(pppoe_service.clean_username("amina-home"), "amina-home")
+
+    def test_registration_accepts_a_phone_as_both_credentials(self):
+        checked = pppoe_service.validate_pppoe_provisioning(
+            payload(username="+254712345678", password="+254712345678"), context(), TODAY
+        )
+        self.assertEqual(checked["errors"], [])
+        self.assertEqual(checked["normalized"]["username"], "254712345678")
+        self.assertEqual(checked["normalized"]["password"], "+254712345678")
+
+    def edit(self, body):
+        cursor = RenewCursor(subless_row())
+        with patch("pppoe_store.apply_plan", return_value={}) as plan, patch(
+            "pppoe_store.subscriber_detail", return_value={"id": "sub-1"}
+        ), patch("routeros_api.seal_password", side_effect=lambda value: f"sealed:{value}"):
+            result = pppoe_store.edit_subscriber(
+                cursor,
+                "client-1",
+                "sub-1",
+                {"firstName": "Amina", "phone": "0712345678", **body},
+            )
+        return cursor, plan, result
+
+    def test_edit_renames_the_login_and_sets_the_password(self):
+        cursor, plan, result = self.edit({"username": "0712 345 678", "password": "0712345678"})
+        update = cursor.ran("UPDATE pppoe_subscribers SET first_name")[0]
+        self.assertEqual(update[7:9], ["0712345678", "sealed:0712345678"])
+        self.assertEqual(cursor.ran("DELETE FROM radcheck"), [["amina-home"]])
+        self.assertEqual(cursor.ran("UPDATE radacct SET username"), [["0712345678", "amina-home"]])
+        plan.assert_called_once()
+        self.assertEqual(plan.call_args[0][1]["pppoe_username"], "0712345678")
+        self.assertEqual(result["password"], "0712345678")
+        self.assertEqual(cursor.connection.commits, 1)
+
+    def test_edit_without_credentials_leaves_radius_alone(self):
+        cursor, plan, _ = self.edit({"username": "amina-home", "password": ""})
+        plan.assert_not_called()
+        self.assertEqual(cursor.ran("DELETE FROM radcheck"), [])
+
+    def test_edit_rejects_a_taken_username(self):
+        cursor = RenewCursor(subless_row())
+        with patch("pppoe_store.username_taken", return_value=True):
+            with self.assertRaises(pppoe_store.PppoeError) as raised:
+                pppoe_store.edit_subscriber(
+                    cursor, "client-1", "sub-1", {"firstName": "Amina", "phone": "0712345678", "username": "brian"}
+                )
+        self.assertIn("already used", str(raised.exception))
+        self.assertEqual(cursor.ran("UPDATE pppoe_subscribers"), [])
+
+    def test_reset_password_accepts_an_operator_password(self):
+        cursor = RenewCursor(subless_row())
+        with patch("pppoe_store.apply_plan", return_value={}), patch(
+            "pppoe_store.subscriber_detail", return_value={"id": "sub-1"}
+        ), patch("routeros_api.seal_password", side_effect=lambda value: f"sealed:{value}"):
+            body = pppoe_store.reset_password(cursor, "client-1", "sub-1", {"password": "Mary@2024"})
+        self.assertEqual(body["password"], "Mary@2024")
+        self.assertEqual(cursor.ran("UPDATE pppoe_subscribers SET password_sealed"), [["sealed:Mary@2024", "sub-1"]])
+
+    def test_plain_ticket_passwords_are_resealed(self):
+        class Cursor:
+            def __init__(self):
+                self.updates = []
+
+            def execute(self, sql, args=None):
+                if sql.startswith("UPDATE"):
+                    self.updates.append(args)
+
+            def fetchall(self):
+                return [{"id": "sub-1", "password_sealed": "0712345678"}]
+
+        cursor = Cursor()
+        with patch("routeros_api.seal_password", side_effect=lambda value: f"sealed:{value}"):
+            repaired = pppoe_store.repair_plain_passwords(cursor)
+        self.assertEqual(repaired, ["sub-1"])
+        self.assertEqual(cursor.updates, [("sealed:0712345678", "sub-1")])
+
+
 if __name__ == "__main__":
     unittest.main()

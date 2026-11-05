@@ -2220,6 +2220,9 @@ def ensure_schema():
             )
             router_jobs.ensure_tables(cursor)
             pppoe_store.ensure_schema(cursor)
+            repaired = pppoe_store.repair_plain_passwords(cursor)
+            if repaired:
+                print(f"event=pppoe-repair result=resealed count={len(repaired)}", flush=True)
             gateway_store.ensure_schema(cursor)
             gateway_store.backfill_gateway_modes(cursor)
             gateway_store.reconcile_company_status(cursor)
@@ -3984,8 +3987,8 @@ class Handler(BaseHTTPRequestHandler):
         router_id = str(payload.get("routerId", "")).strip()[:36] or None
         package_id = str(payload.get("packageId", "")).strip()[:36] or None
         serial = str(payload.get("serial", "")).strip()[:64]
-        pppoe_username = str(payload.get("pppoeUsername", "")).strip()[:64]
-        pppoe_password = str(payload.get("pppoePassword", "")).strip()[:64]
+        pppoe_username = pppoe_service.clean_username(payload.get("pppoeUsername"))[:64]
+        pppoe_password = str(payload.get("pppoePassword", ""))[:64]
         if len(first) < 2 or len(last) < 2:
             raise ApiError(400, "Enter the client's first and last name.")
         digits = re.sub(r"\D", "", phone)
@@ -3993,10 +3996,10 @@ class Handler(BaseHTTPRequestHandler):
             raise ApiError(400, "Enter a phone number with 10 to 15 digits.")
         if not re.match(r"^[^\s@]+@[^\s@]+\.[^\s@]+$", email):
             raise ApiError(400, "Enter a valid email address.")
-        if len(pppoe_username) < 3:
-            raise ApiError(400, "Enter the PPPoE username (at least 3 characters).")
-        if len(pppoe_password) < 4:
-            raise ApiError(400, "Enter the PPPoE password.")
+        if not pppoe_service.USERNAME_PATTERN.fullmatch(pppoe_username):
+            raise ApiError(400, "Use 3 to 64 letters, numbers, hyphens, or underscores for the PPPoE username.")
+        if not pppoe_service.password_ok(pppoe_password):
+            raise ApiError(400, pppoe_service.PASSWORD_HINT)
         if not router_id:
             raise ApiError(400, "Choose the MikroTik router for this client.")
         cursor.execute(
@@ -4060,12 +4063,12 @@ class Handler(BaseHTTPRequestHandler):
             )
         else:
             fields = self.clean_ticket_details(payload)
-            pppoe_username = str(payload.get("pppoeUsername", "")).strip()[:64]
-            pppoe_password = str(payload.get("pppoePassword", "")).strip()[:64]
-            if len(pppoe_username) < 3:
-                raise ApiError(400, "Enter the PPPoE username (at least 3 characters).")
-            if len(pppoe_password) < 4:
-                raise ApiError(400, "Enter the PPPoE password.")
+            pppoe_username = pppoe_service.clean_username(payload.get("pppoeUsername"))[:64]
+            pppoe_password = str(payload.get("pppoePassword", ""))[:64]
+            if not pppoe_service.USERNAME_PATTERN.fullmatch(pppoe_username):
+                raise ApiError(400, "Use 3 to 64 letters, numbers, hyphens, or underscores for the PPPoE username.")
+            if not pppoe_service.password_ok(pppoe_password):
+                raise ApiError(400, pppoe_service.PASSWORD_HINT)
             cursor.execute(
                 """INSERT INTO isp_onboardings
                    (id, client_id, staff_id, first_name, last_name, phone, email, building_name, house_number, package_name, pppoe_username, pppoe_password, kind, status)
@@ -4120,18 +4123,25 @@ class Handler(BaseHTTPRequestHandler):
                 )
                 if cursor.fetchone():
                     raise ApiError(409, "That PPPoE username or phone number is already registered.")
-                cursor.execute(
-                    """INSERT INTO pppoe_subscribers
-                       (id, client_id, first_name, last_name, phone, email, building_name, house_number,
-                        pppoe_username, password_sealed, router_id, package_id, router_serial,
-                        status, service, start_date, created_by)
-                       VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, 'active', 'pppoe', CURDATE(), %s)""",
-                    (
-                        str(uuid.uuid4()), row["client_id"], row["first_name"], row["last_name"],
-                        row["phone"], row["email"], row["building_name"], row["house_number"],
-                        row["pppoe_username"], row["pppoe_password"], row["router_id"], row["package_id"],
-                        row["serial"] or None, row["staff_id"],
-                    ),
+                # Same path as the Register form: seals the password, writes the
+                # RADIUS login, and opens the subscription from today.
+                pppoe_store.register_subscriber(
+                    cursor,
+                    row["client_id"],
+                    {
+                        "firstName": row["first_name"],
+                        "lastName": row["last_name"],
+                        "phone": row["phone"],
+                        "email": row["email"],
+                        "buildingName": row["building_name"],
+                        "houseNumber": row["house_number"],
+                        "username": row["pppoe_username"],
+                        "password": row["pppoe_password"],
+                        "routerId": row["router_id"],
+                        "packageId": row["package_id"],
+                        "serial": row["serial"] or "",
+                        "startDate": datetime.now().date().isoformat(),
+                    },
                 )
             cursor.execute("UPDATE isp_onboardings SET status = 'completed', completed_at = NOW() WHERE id = %s", (row["id"],))
         elif action == "return":
@@ -4168,8 +4178,8 @@ class Handler(BaseHTTPRequestHandler):
             router_id = str(payload.get("routerId", "")).strip()[:36] or None
             package_id = str(payload.get("packageId", "")).strip()[:36] or None
             serial = str(payload.get("serial", "")).strip()[:64]
-            pppoe_username = str(payload.get("pppoeUsername", "")).strip()[:64]
-            pppoe_password = str(payload.get("pppoePassword", "")).strip()[:64]
+            pppoe_username = pppoe_service.clean_username(payload.get("pppoeUsername"))[:64]
+            pppoe_password = str(payload.get("pppoePassword", ""))[:64]
             if not router_id:
                 raise ApiError(400, "Choose the MikroTik router for this client.")
             cursor.execute(
@@ -4180,10 +4190,10 @@ class Handler(BaseHTTPRequestHandler):
                 raise ApiError(400, "That router is not part of this account.")
             if not package_id:
                 raise ApiError(400, "Choose the client's package.")
-            if len(pppoe_username) < 3:
-                raise ApiError(400, "Enter the PPPoE username (at least 3 characters).")
-            if len(pppoe_password) < 4:
-                raise ApiError(400, "Enter the PPPoE password.")
+            if not pppoe_service.USERNAME_PATTERN.fullmatch(pppoe_username):
+                raise ApiError(400, "Use 3 to 64 letters, numbers, hyphens, or underscores for the PPPoE username.")
+            if not pppoe_service.password_ok(pppoe_password):
+                raise ApiError(400, pppoe_service.PASSWORD_HINT)
             cursor.execute(
                 """UPDATE isp_onboardings
                    SET router_id = %s, package_id = %s, package_name = %s, serial = %s,
