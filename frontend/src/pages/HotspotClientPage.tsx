@@ -278,7 +278,7 @@ function ActionDialog({
   );
 }
 
-type HistoryTab = "payments" | "vouchers" | "sessions" | "timeline";
+type HistoryTab = "tree" | "payments" | "vouchers" | "sessions" | "timeline";
 
 function TrendChart({
   data,
@@ -389,6 +389,170 @@ function InfoRow({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+function stampMs(at: string | null) {
+  if (!at) return null;
+  const ms = Date.parse(at.replace(" ", "T"));
+  return Number.isNaN(ms) ? null : ms;
+}
+
+function gapLabel(from: string | null, to: string | null) {
+  const a = stampMs(from);
+  const b = stampMs(to);
+  if (a === null || b === null || b < a) return "";
+  const minutes = Math.round((b - a) / 60000);
+  if (minutes < 1) return "under a minute";
+  if (minutes < 60) return `${minutes} min`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours} h ${minutes % 60} min`;
+  return `${Math.floor(hours / 24)} d ${hours % 24} h`;
+}
+
+function TreeEdge({ label, dashed }: { label?: string; dashed?: boolean }) {
+  return (
+    <div className="relative flex h-9 w-full justify-center" aria-hidden="true">
+      <span className={cn("h-full w-0 border-l-2", dashed ? "border-dashed border-border" : "border-primary/30")} />
+      {label ? (
+        <span className="absolute top-1/2 ml-2 -translate-y-1/2 translate-x-1/2 whitespace-nowrap rounded-full bg-surface-muted px-1.5 text-[10px] font-medium tabular-nums text-muted-foreground">
+          {label}
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+function TreeCard({
+  icon: Icon,
+  tone,
+  title,
+  at,
+  detail,
+  emphasis,
+}: {
+  icon: typeof Wifi;
+  tone: string;
+  title: string;
+  at?: string | null;
+  detail?: string;
+  emphasis?: boolean;
+}) {
+  return (
+    <div
+      className={cn(
+        "w-56 rounded-xl border bg-surface px-3 py-2.5 shadow-sm transition-shadow hover:shadow-md",
+        emphasis ? "border-primary/40 ring-4 ring-primary/5" : "border-border",
+      )}
+    >
+      <div className="flex items-center gap-2.5">
+        <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-full", tone)} aria-hidden="true">
+          <Icon className="h-4 w-4" />
+        </span>
+        <div className="min-w-0">
+          <p className="truncate text-sm font-semibold">{title}</p>
+          {at !== undefined ? <p className="text-[11px] tabular-nums text-muted-foreground">{at ?? "—"}</p> : null}
+        </div>
+      </div>
+      {detail ? <p className="mt-1.5 text-xs leading-5 text-muted-foreground">{detail}</p> : null}
+    </div>
+  );
+}
+
+export function GenerationTree({
+  paid,
+  events,
+  vouchers,
+  live,
+}: {
+  paid: { amount: string; packageName: string; paidAt: string | null; receipt: string; phone: string };
+  events: ConnectionEvent[];
+  vouchers: Voucher[];
+  live: boolean;
+}) {
+  const steps = [...events]
+    .filter((entry) => entry.kind !== "paid")
+    .sort((a, b) => (stampMs(a.at) ?? 0) - (stampMs(b.at) ?? 0));
+  const branches: { device: string; mac: string; steps: ConnectionEvent[] }[] = [];
+  const branchFor = (device: string) => {
+    let branch = branches.find((item) => item.device === device);
+    if (!branch) {
+      branch = { device, mac: "", steps: [] };
+      branches.push(branch);
+    }
+    return branch;
+  };
+  for (const entry of steps) branchFor(entry.device || "This device").steps.push(entry);
+  for (const voucher of vouchers) {
+    if (voucher.status !== "used") continue;
+    const branch = branches.find((item) => item.device === voucher.code) ?? (branches.length === 0 ? branchFor(voucher.code) : null);
+    if (branch && !branch.mac) branch.mac = voucher.redeemedMac;
+  }
+  if (branches.length === 0) branches.push({ device: "This device", mac: "", steps: [] });
+  const many = branches.length > 1;
+
+  return (
+    <div className="overflow-x-auto pb-2">
+      <div className="mx-auto flex w-max min-w-full flex-col items-center px-2 pt-1">
+        <TreeCard
+          icon={CircleDollarSign}
+          tone="bg-emerald-500/10 text-emerald-600"
+          title={`Paid ${money(paid.amount)}`}
+          at={paid.paidAt}
+          detail={[paid.packageName, paid.receipt, paid.phone].filter(Boolean).join(" · ")}
+          emphasis
+        />
+        <TreeEdge />
+        <div className="flex items-start">
+          {branches.map((branch, index) => {
+            const last = branch.steps[branch.steps.length - 1];
+            const ended = last?.kind === "expired";
+            return (
+              <div key={branch.device} className="relative flex flex-col items-center px-3">
+                {many ? (
+                  <span
+                    className={cn(
+                      "absolute top-0 h-0 border-t-2 border-primary/30",
+                      index === 0 ? "left-1/2 right-0" : index === branches.length - 1 ? "left-0 right-1/2" : "left-0 right-0",
+                    )}
+                    aria-hidden="true"
+                  />
+                ) : null}
+                {many ? <TreeEdge /> : null}
+                <TreeCard
+                  icon={branch.device === "This device" ? UserRound : Ticket}
+                  tone="bg-primary/10 text-primary"
+                  title={branch.device}
+                  detail={branch.mac || undefined}
+                />
+                {branch.steps.map((entry, stepIndex) => {
+                  const look = connectionIcons[entry.kind] ?? { icon: History, tone: "bg-muted text-muted-foreground" };
+                  const previous = stepIndex === 0 ? paid.paidAt : branch.steps[stepIndex - 1].at;
+                  return (
+                    <div key={`${entry.at}-${stepIndex}`} className="flex flex-col items-center">
+                      <TreeEdge label={gapLabel(previous, entry.at)} />
+                      <TreeCard icon={look.icon} tone={look.tone} title={entry.event} at={entry.at} detail={entry.detail} />
+                    </div>
+                  );
+                })}
+                {!ended ? (
+                  <>
+                    <TreeEdge dashed />
+                    <div className="w-56 rounded-xl border border-dashed border-border px-3 py-2 text-center text-xs text-muted-foreground">
+                      {branch.steps.length === 0
+                        ? "No connection events yet"
+                        : live
+                          ? "Package still running"
+                          : "Access ended"}
+                    </div>
+                  </>
+                ) : null}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export function HotspotClientPage() {
   const { purchaseId = "" } = useParams();
   const { user } = useAuth();
@@ -397,7 +561,7 @@ export function HotspotClientPage() {
   const [detail, setDetail] = useState<GuestDetail | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
-  const [tab, setTab] = useState<HistoryTab>("payments");
+  const [tab, setTab] = useState<HistoryTab>("tree");
   const [dialog, setDialog] = useState<"recharge" | "end" | "delete" | null>(null);
   const [voucherCount, setVoucherCount] = useState(1);
   const [rechargePeriods, setRechargePeriods] = useState(1);
@@ -526,6 +690,7 @@ export function HotspotClientPage() {
   const timeLeft = firstLive?.sessionTimeLeft || "—";
   const usedVouchers = detail.vouchers.filter((voucher) => voucher.status === "used").length;
   const historyTabs: { id: HistoryTab; label: string; count: number }[] = [
+    { id: "tree", label: "Journey", count: (detail.connectionLog ?? []).length },
     { id: "payments", label: "Payments", count: detail.transactions.length },
     { id: "vouchers", label: "Vouchers", count: detail.vouchers.length },
     { id: "sessions", label: "Sessions", count: detail.sessions.length },
@@ -972,7 +1137,20 @@ export function HotspotClientPage() {
               </div>
             </CardHeader>
             <div className="px-5 pb-5 pt-4" role="tabpanel">
-              {tab === "payments" ? (
+              {tab === "tree" ? (
+                <GenerationTree
+                  paid={{
+                    amount: client.amount,
+                    packageName: client.packageName,
+                    paidAt: client.paidAt,
+                    receipt: client.mpesaCode,
+                    phone: client.phone,
+                  }}
+                  events={detail.connectionLog ?? []}
+                  vouchers={detail.vouchers}
+                  live={!ended && !client.deleted}
+                />
+              ) : tab === "payments" ? (
                 detail.transactions.length === 0 ? (
                   <p className="text-sm text-muted-foreground">No payments recorded for this device yet.</p>
                 ) : (
