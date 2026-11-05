@@ -1947,7 +1947,9 @@ def ensure_schema():
                   username VARCHAR(40) NOT NULL DEFAULT '',
                   event VARCHAR(24) NOT NULL,
                   detail VARCHAR(255) NOT NULL DEFAULT '',
+                  seq BIGINT NOT NULL AUTO_INCREMENT,
                   created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  UNIQUE KEY uq_hs_event_seq (seq),
                   KEY idx_hs_event_purchase (purchase_id, created_at)
                 )
                 """

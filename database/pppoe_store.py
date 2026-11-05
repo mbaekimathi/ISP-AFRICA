@@ -3339,7 +3339,7 @@ def hotspot_connection_log(cursor, row, labels):
         log.append({"at": stamp(row["paid_at"]), "kind": "paid", "event": "Paid", "device": "",
                     "detail": f"KSh {format(Decimal(row['amount']), '.2f')} for {row['package_name']}."})
     cursor.execute(
-        "SELECT username, event, detail, created_at FROM hotspot_events WHERE purchase_id = %s ORDER BY created_at, id",
+        "SELECT username, event, detail, created_at FROM hotspot_events WHERE purchase_id = %s ORDER BY created_at, seq",
         (row["id"],),
     )
     for event in cursor.fetchall():
