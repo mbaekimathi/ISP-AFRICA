@@ -376,6 +376,7 @@ export function PppoeCustomerPage() {
   const [subscriber, setSubscriber] = useState<Subscriber | null>(null);
   const [message, setMessage] = useState("");
   const [password, setPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
   const [packages, setPackages] = useState<PackageOption[]>([]);
   const [routers, setRouters] = useState<RouterOption[]>([]);
   const [packageId, setPackageId] = useState("");
@@ -515,6 +516,7 @@ export function PppoeCustomerPage() {
 
   function closeDialog() {
     setDialog(null);
+    setNewPassword("");
     setReason("");
   }
 
@@ -548,8 +550,17 @@ export function PppoeCustomerPage() {
       buildingName: data.get("buildingName"),
       houseNumber: data.get("houseNumber"),
       serial: data.get("serial"),
+      username: data.get("username"),
+      password: data.get("password"),
     });
     closeDialog();
+  }
+
+  function copyPhoneInto(form: HTMLFormElement | null, field: "username" | "password") {
+    if (!form) return;
+    const phone = (form.elements.namedItem("phone") as HTMLInputElement | null)?.value ?? "";
+    const target = form.elements.namedItem(field) as HTMLInputElement | null;
+    if (target) target.value = phone.replace(/\D/g, "");
   }
 
   async function removeCustomer() {
@@ -1267,15 +1278,35 @@ export function PppoeCustomerPage() {
               </div>
               <code className="mt-1 block truncate text-sm font-semibold">{password || "••••••••••"}</code>
             </div>
+            <FormField id="own-password" label="Set your own password" hint="4 to 64 characters. Leave empty and press Reset for a random one.">
+              <div className="flex flex-wrap gap-2">
+                <input
+                  id="own-password"
+                  className="field"
+                  value={newPassword}
+                  autoComplete="new-password"
+                  onChange={(event) => setNewPassword(event.target.value)}
+                />
+                <SecondaryButton type="button" onClick={() => setNewPassword(subscriber.phone.replace(/\D/g, ""))}>
+                  Use phone number
+                </SecondaryButton>
+              </div>
+            </FormField>
             {message ? <p className="text-sm text-destructive">{message}</p> : null}
             <div className="flex flex-wrap justify-end gap-2">
               <SecondaryButton type="button" onClick={closeDialog}>Close</SecondaryButton>
-              <PrimaryButton type="button" disabled={busyAction} onClick={() => void post("password", {})}>
+              <PrimaryButton
+                type="button"
+                disabled={busyAction}
+                onClick={() => void post("password", newPassword ? { password: newPassword } : {}).then(() => setNewPassword(""))}
+              >
                 {busyAction ? (
                   <span className="inline-flex items-center gap-2">
                     <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
                     Working…
                   </span>
+                ) : newPassword ? (
+                  "Save password"
                 ) : (
                   "Reset password"
                 )}
@@ -1304,6 +1335,20 @@ export function PppoeCustomerPage() {
                 <FormField id="edit-buildingName" label="Building"><input id="edit-buildingName" className="field" name="buildingName" defaultValue={subscriber.buildingName} /></FormField>
                 <FormField id="edit-houseNumber" label="House number"><input id="edit-houseNumber" className="field" name="houseNumber" defaultValue={subscriber.houseNumber} /></FormField>
                 <FormField id="edit-serial" label="Device serial"><input id="edit-serial" className="field" name="serial" defaultValue={subscriber.serial} /></FormField>
+              </div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <FormField id="edit-username" label="PPPoE username" hint="The router must dial with this name.">
+                  <input id="edit-username" className="field" name="username" defaultValue={subscriber.username} />
+                  <SecondaryButton type="button" className="mt-2" onClick={(event) => copyPhoneInto(event.currentTarget.form, "username")}>
+                    Use phone number
+                  </SecondaryButton>
+                </FormField>
+                <FormField id="edit-password" label="New PPPoE password" hint="Leave empty to keep the current one. 4 to 64 characters.">
+                  <input id="edit-password" className="field" name="password" autoComplete="new-password" placeholder="Keep current password" />
+                  <SecondaryButton type="button" className="mt-2" onClick={(event) => copyPhoneInto(event.currentTarget.form, "password")}>
+                    Use phone number
+                  </SecondaryButton>
+                </FormField>
               </div>
               {message ? <p className="text-sm text-destructive">{message}</p> : null}
               <div className="flex flex-wrap justify-end gap-2">

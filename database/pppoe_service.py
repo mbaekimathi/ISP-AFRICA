@@ -15,6 +15,7 @@ CYCLES = {"weekly", "monthly", "quarterly", "custom"}
 PHONE_PATTERN = re.compile(r"^254[17]\d{8}$")
 EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 USERNAME_PATTERN = re.compile(r"^[A-Za-z0-9_-]{3,64}$")
+PASSWORD_HINT = "Use 4 to 64 characters with no spaces at the start or end. A phone number like 0723864156 works."
 RESTRICTED_GROUP = "pppoe-restricted"
 EXPIRED_GROUP = "pppoe-expired"
 RESTRICTED_SESSION_SECONDS = 900
@@ -75,10 +76,19 @@ def generate_password(length=10):
 
 
 def password_ok(value):
+    """Operators may type any password the router accepts, including a phone number."""
     text = str(value or "")
-    if not 8 <= len(text) <= 12:
+    if not 4 <= len(text) <= 64 or text != text.strip():
         return False
-    return all(character in PASSWORD_ALPHABET for character in text)
+    return all(" " <= character <= "~" for character in text)
+
+
+def clean_username(value):
+    """A phone typed as +254 712 345 678 or 0712-345-678 becomes its digits."""
+    text = str(value or "").strip()
+    if re.fullmatch(r"\+?[\d\s-]+", text) and phone_variants(text):
+        return "".join(character for character in text if character.isdigit())
+    return text
 
 
 def add_months(day, months):
@@ -174,7 +184,7 @@ def validate_pppoe_provisioning(payload, context, today=None):
     if len(house) > 40:
         issue(errors, "houseNumber", "Enter a shorter house number.")
     entered_phone = "".join(character for character in str(payload.get("phone") or "") if character.isdigit())
-    username = str(payload.get("username") or entered_phone or "").strip()
+    username = clean_username(payload.get("username") or entered_phone)
     if not USERNAME_PATTERN.fullmatch(username):
         issue(errors, "username", "Use 3 to 64 letters, numbers, hyphens, or underscores.")
     else:
@@ -189,7 +199,7 @@ def validate_pppoe_provisioning(payload, context, today=None):
         issue(errors, "phone", "That phone number is already registered.")
     password = str(payload.get("password", ""))
     if not password_ok(password):
-        issue(errors, "password", "Use 8 to 12 characters without O or l. A phone number like 0723864156 works.")
+        issue(errors, "password", PASSWORD_HINT)
     method = str(payload.get("authMethod") or "mschap2").strip().lower()
     if method not in {"mschap2", "chap"}:
         issue(errors, "authMethod", "Choose MS-CHAPv2 or CHAP.")
