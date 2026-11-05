@@ -49,10 +49,7 @@ export function FormPicker({
 }) {
   return (
     <div className="grid gap-1.5" role="tablist" aria-label={label}>
-      <div
-        className="grid gap-1 rounded-lg border border-border bg-surface-muted p-1"
-        style={{ gridTemplateColumns: `repeat(${options.length}, minmax(0, 1fr))` }}
-      >
+      <div className="flex gap-1 overflow-x-auto rounded-lg border border-border bg-surface-muted p-1 [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
         {options.map((option) => {
           const selected = value === option.id;
           return (
@@ -62,7 +59,7 @@ export function FormPicker({
               role="tab"
               aria-selected={selected}
               className={cn(
-                "min-h-9 rounded-md px-2 text-sm font-medium transition duration-fast ease-out",
+                "min-h-9 flex-1 shrink-0 whitespace-nowrap rounded-md px-3 text-sm font-medium transition duration-fast ease-out",
                 selected
                   ? "bg-surface text-foreground shadow-xs ring-1 ring-inset ring-border"
                   : "text-muted-foreground hover:bg-surface/60 hover:text-foreground",

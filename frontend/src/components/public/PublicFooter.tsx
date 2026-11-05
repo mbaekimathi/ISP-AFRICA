@@ -22,7 +22,7 @@ export function PublicFooter() {
             ISP <span className="text-primary">CENTRIC</span>
           </span>
         </Link>
-        <nav aria-label="Footer" className="flex flex-1 flex-wrap items-center gap-x-4 gap-y-1">
+        <nav aria-label="Footer" className="order-last flex w-full flex-wrap items-center gap-x-4 gap-y-1 sm:order-none sm:w-auto sm:flex-1">
           {FOOTER_LINKS.map((item) => (
             <Link
               key={item.to}
@@ -33,7 +33,7 @@ export function PublicFooter() {
             </Link>
           ))}
         </nav>
-        <p className="text-caption text-subtle">© {new Date().getFullYear()} ISP CENTRIC</p>
+        <p className="ml-auto text-caption text-subtle sm:ml-0">© {new Date().getFullYear()} ISP CENTRIC</p>
       </div>
     </footer>
   );

@@ -230,11 +230,11 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
   return (
     <div className="page-shell py-8 sm:py-10">
       <div className="mx-auto grid w-full max-w-lg gap-5">
-        <div className="flex items-start gap-3.5">
+        <div className="flex flex-wrap items-start gap-3.5">
           <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
             <Wifi className="h-5 w-5" aria-hidden="true" />
           </span>
-          <div className="min-w-0 flex-1">
+          <div className="min-w-[12rem] flex-1">
             <div className="flex flex-wrap items-center gap-2">
               <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">{view.title}</h1>
               <StatusBadge tone={kind === "pppoe" ? "active" : "neutral"}>{kind === "pppoe" ? "PPPoE" : "Hotspot"}</StatusBadge>

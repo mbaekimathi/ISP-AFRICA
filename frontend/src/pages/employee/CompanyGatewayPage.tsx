@@ -393,7 +393,7 @@ export function CompanyGatewayPage() {
 
       {tab === "held" ? (
         <section className="card mt-4 overflow-hidden">
-          <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+          <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><HandCoins className="h-4 w-4" /></span>
             <h2 className="text-sm font-semibold">Held balances</h2>
             <p className="ml-auto text-xs text-muted-foreground">
@@ -475,7 +475,7 @@ export function CompanyGatewayPage() {
 
       {tab === "payments" ? (
         <section className="card mt-4 overflow-hidden">
-          <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+          <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><ReceiptText className="h-4 w-4" /></span>
             <h2 className="text-sm font-semibold">Pooled payments</h2>
             <SecondaryButton type="button" className="ml-auto" onClick={() => exportCsv("payments")}>
@@ -513,7 +513,7 @@ export function CompanyGatewayPage() {
 
       {tab === "payouts" ? (
         <section className="card mt-4 overflow-hidden">
-          <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+          <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><ArrowLeftRight className="h-4 w-4" /></span>
             <h2 className="text-sm font-semibold">Settlement payouts</h2>
             <SecondaryButton type="button" className="ml-auto" onClick={() => exportCsv("payouts")}>
@@ -570,7 +570,7 @@ export function CompanyGatewayPage() {
 
       {tab === "batches" ? (
         <section className="card mt-4 overflow-hidden">
-          <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+          <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><ScrollText className="h-4 w-4" /></span>
             <h2 className="text-sm font-semibold">Settlement batches</h2>
             <SecondaryButton type="button" className="ml-auto" onClick={() => exportCsv("batches")}>
@@ -601,7 +601,7 @@ export function CompanyGatewayPage() {
 
       {tab === "suspense" ? (
         <section className="card mt-4 overflow-hidden">
-          <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+          <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-destructive-soft/70 text-destructive"><FileWarning className="h-4 w-4" /></span>
             <h2 className="text-sm font-semibold">Unmatched payments</h2>
             <p className="ml-auto text-xs text-muted-foreground">C2B receipts and amount mismatches waiting for attribution</p>
@@ -654,7 +654,7 @@ export function CompanyGatewayPage() {
 
       {tab === "pending" ? (
         <section className="card mt-4 overflow-hidden">
-          <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+          <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-warning-soft/70 text-warning"><Timer className="h-4 w-4" /></span>
             <h2 className="text-sm font-semibold">Pending destination changes</h2>
             <p className="ml-auto text-xs text-muted-foreground">Apply after the 24-hour cooling-off window</p>
@@ -681,7 +681,7 @@ export function CompanyGatewayPage() {
 
       {tab === "audit" ? (
         <section className="card mt-4 overflow-hidden">
-          <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+          <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><ShieldCheck className="h-4 w-4" /></span>
             <h2 className="text-sm font-semibold">Gateway audit log</h2>
           </header>
@@ -704,7 +704,7 @@ export function CompanyGatewayPage() {
 
       {tab === "notices" ? (
         <section className="card mt-4 overflow-hidden">
-          <header className="flex items-center gap-2.5 border-b border-border px-5 py-4">
+          <header className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
             <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary"><AlertTriangle className="h-4 w-4" /></span>
             <h2 className="text-sm font-semibold">Gateway notices</h2>
           </header>
