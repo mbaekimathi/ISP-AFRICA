@@ -31,6 +31,7 @@ import gateway_crypto
 import gateway_notify
 import gateway_settle
 import gateway_store
+import isp_c2b
 import pppoe_service
 import pppoe_store
 import portal_server
@@ -2033,6 +2034,20 @@ def ensure_schema():
             )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS isp_system_health_events (
+                  id CHAR(36) NOT NULL PRIMARY KEY,
+                  subject VARCHAR(80) NOT NULL,
+                  reason VARCHAR(200) NOT NULL,
+                  severity ENUM('warning', 'critical') NOT NULL DEFAULT 'warning',
+                  started_at DATETIME NOT NULL,
+                  ended_at DATETIME NULL,
+                  KEY idx_system_health_open (subject, ended_at, started_at),
+                  KEY idx_system_health_started (started_at)
+                )
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS isp_wan_settings (
                   device_id CHAR(36) NOT NULL PRIMARY KEY,
                   client_id CHAR(36) NOT NULL,
@@ -2806,6 +2821,7 @@ def ensure_schema():
             gateway_store.ensure_schema(cursor)
             gateway_store.backfill_gateway_modes(cursor)
             gateway_store.reconcile_company_status(cursor)
+            isp_c2b.ensure_schema(cursor)
     finally:
         db.close()
 
@@ -3681,18 +3697,256 @@ def company_notification_items(cursor):
                 }
             )
     if prefs["systemPerformance"]:
-        items += system_performance_feed_items()
+        items += system_performance_feed_items(cursor)
     items += gateway_feed_items(cursor, "company")
     items.sort(key=lambda item: item["at"] or "", reverse=True)
     return items
 
 
-def system_performance_feed_items():
-    """Host pressure alerts for the company feed. IDs bucket by day + metric +
-    severity so a sustained spike notifies once, not on every poll."""
+SYSTEM_HEALTH_SUBJECTS = (
+    "CPU",
+    "Memory",
+    "Disk space",
+    "Database",
+    "System performance",
+    "VPS connection",
+)
+
+
+def system_health_observations(snapshot, measured=None):
+    """Map a live snapshot to (subject, reason, severity) for open drops, or
+    (subject, None, None) when that check recovered. Only subjects listed in
+    `measured` are updated — callers that skip a probe leave those rows alone."""
+    observations = []
+    measured = set(measured or SYSTEM_HEALTH_SUBJECTS)
+
+    def percent_issue(subject, percent, detail):
+        if subject not in measured:
+            return
+        if percent is None:
+            # Host could not report this metric (common on Windows) — leave alone.
+            return
+        if percent < 75:
+            observations.append((subject, None, None))
+            return
+        band = "critical" if percent >= 90 else "warning"
+        observations.append((subject, f"{detail} — {band} threshold.", band))
+
+    cpu = snapshot.get("cpu") or {}
+    percent = cpu.get("percent")
+    if "CPU" in measured and percent is not None:
+        load = cpu.get("load1")
+        cores = cpu.get("cores") or 1
+        detail = (
+            f"Host CPU is at {percent}% (load {load} across {cores} cores)"
+            if load is not None
+            else f"Host CPU is at {percent}%"
+        )
+        percent_issue("CPU", percent, detail)
+
+    memory = snapshot.get("memory")
+    if "Memory" in measured and memory and memory.get("percent") is not None:
+        percent_issue(
+            "Memory",
+            memory.get("percent"),
+            f"Memory is at {memory.get('percent')}% "
+            f"({_format_bytes(memory.get('used') or 0)} of {_format_bytes(memory.get('total') or 0)})",
+        )
+
+    disk = snapshot.get("disk") or {}
+    if "Disk space" in measured and disk.get("percent") is not None:
+        percent_issue(
+            "Disk space",
+            disk.get("percent"),
+            f"Disk is at {disk.get('percent')}% with {_format_bytes(disk.get('free') or 0)} free",
+        )
+
+    database = snapshot.get("database") or {}
+    db_ms = database.get("latencyMs")
+    if "Database" in measured and db_ms is not None:
+        if db_ms < 500:
+            observations.append(("Database", None, None))
+        else:
+            band = "critical" if db_ms >= 2000 else "warning"
+            threads = database.get("threads") or 0
+            observations.append(
+                (
+                    "Database",
+                    f"Database responded in {db_ms} ms with {threads} open connections — {band} latency.",
+                    band,
+                )
+            )
+
+    api = snapshot.get("api") or {}
+    api_ms = api.get("avgMs")
+    if "System performance" in measured and api_ms is not None:
+        if api_ms < 400:
+            observations.append(("System performance", None, None))
+        else:
+            band = "critical" if api_ms >= 1000 else "warning"
+            rpm = api.get("requestsPerMinute") or 0
+            observations.append(
+                (
+                    "System performance",
+                    f"Average API response is {api_ms} ms at {rpm} req/min — {band} latency.",
+                    band,
+                )
+            )
+
+    uplink = snapshot.get("uplink") or {}
+    if "VPS connection" in measured and uplink.get("status"):
+        if uplink.get("status") == "ok":
+            observations.append(("VPS connection", None, None))
+        else:
+            observations.append(
+                (
+                    "VPS connection",
+                    "Outbound internet check to 8.8.8.8:53 failed — connection is down.",
+                    "critical",
+                )
+            )
+    return observations
+
+
+def _format_bytes(value):
+    try:
+        size = float(value)
+    except (TypeError, ValueError):
+        return "0 B"
+    units = ["B", "KB", "MB", "GB", "TB"]
+    unit = 0
+    while size >= 1024 and unit < len(units) - 1:
+        size /= 1024
+        unit += 1
+    return f"{int(round(size))} {units[unit]}" if size >= 100 else f"{size:.1f} {units[unit]}"
+
+
+def sync_system_health_events(cursor, observations):
+    """Open or close host health drops the same way router health events work.
+    Only subjects present in `observations` are touched — omitted probes stay as-is."""
+    changed = False
+    for subject, reason, severity in observations:
+        cursor.execute(
+            """
+            SELECT id FROM isp_system_health_events
+            WHERE subject = %s AND ended_at IS NULL
+            ORDER BY started_at DESC
+            LIMIT 1
+            """,
+            (subject,),
+        )
+        open_event = cursor.fetchone()
+        if reason and not open_event:
+            cursor.execute(
+                """
+                INSERT INTO isp_system_health_events (id, subject, reason, severity, started_at)
+                VALUES (%s, %s, %s, %s, CURRENT_TIMESTAMP)
+                """,
+                (str(uuid.uuid4()), subject, str(reason)[:200], severity or "warning"),
+            )
+            changed = True
+        elif reason and open_event:
+            cursor.execute(
+                """
+                UPDATE isp_system_health_events
+                SET reason = %s, severity = %s
+                WHERE id = %s
+                """,
+                (str(reason)[:200], severity or "warning", open_event["id"]),
+            )
+        elif reason is None and open_event:
+            cursor.execute(
+                "UPDATE isp_system_health_events SET ended_at = CURRENT_TIMESTAMP WHERE id = %s",
+                (open_event["id"],),
+            )
+            changed = True
+    if changed:
+        notify_push_now()
+
+
+def list_system_health_drops(cursor, limit=24):
+    cursor.execute(
+        """
+        SELECT subject, reason, severity, started_at, ended_at
+        FROM isp_system_health_events
+        ORDER BY started_at DESC
+        LIMIT %s
+        """,
+        (limit,),
+    )
+    now = datetime.now()
+    drops = []
+    for event in cursor.fetchall():
+        item = routeros_api.health_event(
+            event["subject"], event["reason"], event["started_at"], event["ended_at"], now
+        )
+        item["severity"] = event["severity"]
+        drops.append(item)
+    return drops
+
+
+def probe_system_health_snapshot():
+    """Lightweight host probe used by the company feed — enough to open/close
+    the same health drops the System performance page records."""
+    disk_payload = {"total": 0, "used": 0, "free": 0, "percent": None}
+    try:
+        disk = shutil.disk_usage(os.environ.get("ISP_DISK_PATH", "/"))
+        disk_payload = {
+            "total": disk.total,
+            "used": disk.used,
+            "free": disk.free,
+            "percent": round(disk.used / disk.total * 100, 1),
+        }
+    except OSError:
+        pass
+    return {
+        "cpu": cpu_usage(),
+        "memory": memory_usage(),
+        "disk": disk_payload,
+        "database": {"latencyMs": None, "threads": 0},
+        "api": {"avgMs": None, "requestsPerMinute": 0},
+        "uplink": uplink_probe(),
+    }
+
+
+def system_performance_feed_items(cursor=None):
+    """Host pressure alerts for the company feed. When a cursor is available,
+    sync persisted health drops so duration and cause match System performance."""
     day = datetime.now().strftime("%Y-%m-%d")
     now = datetime.now().isoformat(timespec="seconds")
     items = []
+
+    if cursor is not None:
+        sync_system_health_events(
+            cursor,
+            system_health_observations(
+                probe_system_health_snapshot(),
+                measured=("CPU", "Memory", "Disk space", "VPS connection"),
+            ),
+        )
+        cursor.execute(
+            """
+            SELECT id, subject, reason, severity, started_at
+            FROM isp_system_health_events
+            WHERE ended_at IS NULL
+            ORDER BY started_at DESC
+            LIMIT 20
+            """
+        )
+        for row in cursor.fetchall():
+            started = row["started_at"]
+            duration = routeros_api.duration_label(started, None, datetime.now())
+            items.append(
+                {
+                    "id": f"perf-{row['id']}",
+                    "kind": "systemPerformance",
+                    "subject": f"System {row['subject']} is {row['severity']}",
+                    "detail": f"{row['reason']} Ongoing for {duration}.",
+                    "at": stamp(started) or now,
+                    "open": True,
+                }
+            )
+        return items
 
     def add(metric, percent, label):
         if percent is None or percent < 75:
@@ -3709,20 +3963,13 @@ def system_performance_feed_items():
             }
         )
 
-    cpu = cpu_usage()
-    add("cpu", cpu.get("percent"), "CPU")
-    memory = memory_usage()
+    snapshot = probe_system_health_snapshot()
+    add("cpu", (snapshot.get("cpu") or {}).get("percent"), "CPU")
+    memory = snapshot.get("memory")
     if memory:
         add("memory", memory.get("percent"), "memory")
-    try:
-        disk = shutil.disk_usage(os.environ.get("ISP_DISK_PATH", "/"))
-        add("disk", round(disk.used / disk.total * 100, 1), "disk")
-    except OSError:
-        pass
-    try:
-        with socket.create_connection(("8.8.8.8", 53), timeout=0.4):
-            pass
-    except OSError:
+    add("disk", (snapshot.get("disk") or {}).get("percent"), "disk")
+    if (snapshot.get("uplink") or {}).get("status") != "ok":
         items.append(
             {
                 "id": f"perf-uplink-{day}-down",
@@ -3848,6 +4095,97 @@ def uplink_probe():
         return {"status": "ok", "latencyMs": int((time.perf_counter() - started) * 1000)}
     except OSError:
         return {"status": "down", "latencyMs": None}
+
+
+def active_session_summary(cursor):
+    """Who is signed into client/employee accounts right now — names + codes."""
+    cursor.execute(
+        """
+        SELECT s.account_kind, s.account_id, s.opened_by, s.created_at,
+               c.first_name AS client_first, c.last_name AS client_last,
+               c.client_code, c.login_code AS client_login,
+               e.first_name AS emp_first, e.last_name AS emp_last,
+               e.employee_code, e.login_code AS emp_login, e.role AS emp_role,
+               st.first_name AS staff_first, st.last_name AS staff_last,
+               st.login_code AS staff_login, st.role AS staff_role, st.title AS staff_title
+        FROM isp_sessions s
+        LEFT JOIN isp_clients c
+          ON s.account_kind = 'client' AND c.id = s.account_id
+        LEFT JOIN isp_employees e
+          ON s.account_kind = 'employee' AND e.id = s.account_id
+        LEFT JOIN isp_client_employees st
+          ON s.opened_by IS NOT NULL AND st.id = s.opened_by
+        WHERE s.created_at >= DATE_SUB(NOW(), INTERVAL %s SECOND)
+        ORDER BY s.created_at DESC
+        """,
+        (SESSION_SECONDS,),
+    )
+    people = []
+    clients = 0
+    employees = 0
+    for row in cursor.fetchall():
+        since = stamp(row["created_at"])
+        if row["account_kind"] == "employee":
+            employees += 1
+            name = f"{row['emp_first'] or ''} {row['emp_last'] or ''}".strip() or "Staff"
+            code = display_account_code(row["employee_code"]) or row["employee_code"] or row["emp_login"] or ""
+            people.append(
+                {
+                    "kind": "employee",
+                    "label": "Company staff",
+                    "name": name,
+                    "code": code,
+                    "loginCode": row["emp_login"] or "",
+                    "role": row["emp_role"] or "",
+                    "accountName": "",
+                    "since": since,
+                }
+            )
+            continue
+        clients += 1
+        account_name = f"{row['client_first'] or ''} {row['client_last'] or ''}".strip() or "Client"
+        account_code = display_account_code(row["client_code"]) or row["client_code"] or row["client_login"] or ""
+        if row["opened_by"] and (row["staff_first"] or row["staff_last"] or row["staff_login"]):
+            staff_name = f"{row['staff_first'] or ''} {row['staff_last'] or ''}".strip() or "ISP staff"
+            role = CLIENT_STAFF_ROLE_LABELS.get(row["staff_role"]) or row["staff_title"] or "ISP employee"
+            people.append(
+                {
+                    "kind": "client-staff",
+                    "label": role,
+                    "name": staff_name,
+                    "code": account_code,
+                    "loginCode": row["staff_login"] or "",
+                    "role": row["staff_role"] or "",
+                    "accountName": account_name,
+                    "since": since,
+                }
+            )
+        else:
+            people.append(
+                {
+                    "kind": "client",
+                    "label": "ISP client",
+                    "name": account_name,
+                    "code": account_code,
+                    "loginCode": row["client_login"] or "",
+                    "role": "",
+                    "accountName": "",
+                    "since": since,
+                }
+            )
+    subscribers = None
+    try:
+        cursor.execute("SELECT COUNT(*) AS live FROM radacct WHERE acctstoptime IS NULL")
+        subscribers = int(cursor.fetchone()["live"] or 0)
+    except pymysql.MySQLError:
+        pass
+    return {
+        "clients": clients,
+        "employees": employees,
+        "subscribers": subscribers,
+        "total": clients + employees,
+        "people": people,
+    }
 
 
 def api_request_stats():
@@ -4092,6 +4430,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.save_company_payments(cursor, payload, token.get("isp_employee_session")), None
         if method == "POST" and path == "/api/employee/company/payments/test":
             return {"test": self.test_company_payments(cursor, payload, token.get("isp_employee_session"))}, None
+        if method == "GET" and path == "/api/employee/company/payments/c2b":
+            return self.read_company_c2b(cursor, token.get("isp_employee_session")), None
+        if method == "POST" and path == "/api/employee/company/payments/c2b/register":
+            return self.register_company_c2b(cursor, token.get("isp_employee_session")), None
         if path.startswith("/api/employee/company/gateway"):
             return self.company_gateway(cursor, method, path, payload, query, token), None
         if method == "GET" and path == "/api/employee/company/communications":
@@ -4163,6 +4505,17 @@ class Handler(BaseHTTPRequestHandler):
                 if not supplied or not hmac.compare_digest(supplied, expected):
                     raise ApiError(403, "That callback was not recognised.")
             return {"callback": pppoe_store.record_daraja_callback(cursor, payload)}, None
+        routed_isp = isp_c2b.route(path) if method == "POST" else None
+        if routed_isp:
+            # /api/daraja/isp/<callback_secret>/<endpoint> — optional own-Daraja
+            # C2B. Unknown or disabled secrets look like a missing path.
+            secret, endpoint = routed_isp
+            client_id = isp_c2b.client_for_secret(cursor, secret)
+            if not client_id:
+                raise ApiError(404, "Not found.")
+            if endpoint == "c2b/confirmation":
+                isp_c2b.enqueue(connect, client_id, endpoint, payload)
+            return isp_c2b.ACK, None
         routed = gateway_callbacks.route(path) if method == "POST" else None
         if routed:
             # /api/daraja/<callback_secret>/<endpoint> — an unknown secret or
@@ -4284,6 +4637,12 @@ class Handler(BaseHTTPRequestHandler):
             return self.save_payments(cursor, payload, token.get("isp_client_session")), None
         if method == "POST" and path == "/api/payments/test":
             return {"test": self.test_payments(cursor, payload, token.get("isp_client_session"))}, None
+        if method == "GET" and path == "/api/payments/c2b":
+            return self.read_isp_c2b(cursor, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/payments/c2b":
+            return self.save_isp_c2b(cursor, payload, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/payments/c2b/register":
+            return self.register_isp_c2b(cursor, token.get("isp_client_session")), None
         if path.startswith("/api/gateway"):
             return self.isp_gateway(cursor, method, path, payload, query, token), None
         if method == "GET" and path == "/api/communications":
@@ -5514,25 +5873,14 @@ document.getElementById('pay').onclick=async function(){{
             "SHOW GLOBAL STATUS WHERE Variable_name IN ('Threads_connected', 'Uptime')"
         )
         status_rows = {row["Variable_name"]: row["Value"] for row in cursor.fetchall()}
-        cursor.execute(
-            "SELECT account_kind, COUNT(*) AS total FROM isp_sessions "
-            "WHERE created_at >= DATE_SUB(NOW(), INTERVAL %s SECOND) GROUP BY account_kind",
-            (SESSION_SECONDS,),
-        )
-        sessions = {"clients": 0, "employees": 0, "subscribers": None}
-        for row in cursor.fetchall():
-            if row["account_kind"] == "client":
-                sessions["clients"] = int(row["total"])
-            elif row["account_kind"] == "employee":
-                sessions["employees"] = int(row["total"])
-        sessions["total"] = sessions["clients"] + sessions["employees"]
-        try:
-            cursor.execute("SELECT COUNT(*) AS live FROM radacct WHERE acctstoptime IS NULL")
-            sessions["subscribers"] = int(cursor.fetchone()["live"] or 0)
-        except pymysql.MySQLError:
-            pass
+        sessions = active_session_summary(cursor)
         disk = shutil.disk_usage(os.environ.get("ISP_DISK_PATH", "/"))
-        return {
+        db_status = "ok"
+        if db_ms >= 2000:
+            db_status = "critical"
+        elif db_ms >= 500:
+            db_status = "warning"
+        snapshot = {
             "at": datetime.now().isoformat(timespec="seconds"),
             "cpu": cpu_usage(),
             "memory": memory_usage(),
@@ -5543,7 +5891,7 @@ document.getElementById('pay').onclick=async function(){{
                 "percent": round(disk.used / disk.total * 100, 1),
             },
             "database": {
-                "status": "ok",
+                "status": db_status,
                 "latencyMs": db_ms,
                 "threads": int(status_rows.get("Threads_connected") or 0),
                 "uptimeSeconds": int(status_rows.get("Uptime") or 0),
@@ -5553,6 +5901,9 @@ document.getElementById('pay').onclick=async function(){{
             "host": {"uptimeSeconds": host_uptime()},
             "uplink": uplink_probe(),
         }
+        sync_system_health_events(cursor, system_health_observations(snapshot))
+        snapshot["drops"] = list_system_health_drops(cursor)
+        return snapshot
 
     def dashboard_summary(self, cursor, token):
         client_id = self.require_client(cursor, token)
@@ -7970,7 +8321,42 @@ document.getElementById('pay').onclick=async function(){{
             "mode": preference["mode"] if preference else None,
             "own": public_payment(rows.get("own")),
             "company": public_payment(rows.get("company")),
+            "c2b": isp_c2b.health(cursor, client_id, rows.get("own")),
         }
+
+    def read_isp_c2b(self, cursor, token):
+        client_id = self.require_payment_client(cursor, token)
+        row = self.payment_rows(cursor, client_id).get("own")
+        return {"c2b": isp_c2b.health(cursor, client_id, row)}
+
+    def save_isp_c2b(self, cursor, payload, token):
+        client_id = require_owner_client(cursor, token, "payment settings")
+        enabled = bool(payload.get("enabled"))
+        isp_c2b.set_enabled(cursor, client_id, enabled)
+        row = self.payment_rows(cursor, client_id).get("own")
+        return {"c2b": isp_c2b.health(cursor, client_id, row)}
+
+    def register_isp_c2b(self, cursor, token):
+        client_id = require_owner_client(cursor, token, "payment settings")
+        row = self.payment_rows(cursor, client_id).get("own")
+        if not row:
+            raise ApiError(400, "Save your Daraja Paybill credentials first.")
+        connection = cursor.connection
+        connection.autocommit(False)
+        try:
+            result, error = isp_c2b.register(cursor, client_id, row, open_secret)
+            if error:
+                connection.commit()
+                raise ApiError(400, error)
+            connection.commit()
+        except ApiError:
+            raise
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.autocommit(True)
+        return result
 
     def save_payments(self, cursor, payload, token):
         client_id = require_owner_client(cursor, token, "payment settings")
@@ -8381,6 +8767,7 @@ document.getElementById('pay').onclick=async function(){{
             "daraja": daraja,
             "other": public_other_gateway(self.company_other_gateway_row(cursor)),
             "checklist": daraja_checklist(daraja_row or {}, base),
+            "c2b": gateway_store.c2b_health(cursor),
         }
 
     def save_company_payments(self, cursor, payload, token):
@@ -8495,6 +8882,33 @@ document.getElementById('pay').onclick=async function(){{
         if not key or not secret:
             return {"connected": False, "reason": "Enter the consumer key and secret, or save the Daraja details first."}
         return daraja_oauth_probe(environment, key, secret)
+
+    def read_company_c2b(self, cursor, token):
+        require_director(cursor, token, "company payments")
+        gateway_store.remember_public_base(cursor, self.learned_public_base())
+        gateway_store.ensure_callback_secret(cursor)
+        return {"c2b": gateway_store.c2b_health(cursor)}
+
+    def register_company_c2b(self, cursor, token):
+        employee_id = require_director(cursor, token, "company payments")
+        gateway_store.remember_public_base(cursor, self.learned_public_base())
+        gateway_store.ensure_callback_secret(cursor)
+        connection = cursor.connection
+        connection.autocommit(False)
+        try:
+            result, error = gateway_api.register_c2b(cursor, employee_id)
+            if error:
+                connection.commit()  # persist failed registration stamp
+                raise ApiError(400, error)
+            connection.commit()
+        except ApiError:
+            raise
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.autocommit(True)
+        return result
 
     # --- Company gateway (director-only custody & ops) ---------------------------
 

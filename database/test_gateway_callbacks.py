@@ -70,6 +70,13 @@ class MiniCursor:
                 (pid, client, source, sub, hs, msisdn, amount, checkout) = args
                 self.insert_payment(pid, client, source, amount, checkout,
                                     msisdn=msisdn, subscriber=sub, hotspot=hs, status="initiated")
+            elif "subscriber_id" in flat and "'confirmed'" in flat:
+                (pid, client, sub, msisdn, amount, receipt, ref, raw) = args
+                if any(p.get("mpesa_receipt") == receipt for p in d.table("gateway_payments")):
+                    raise UniqueViolation("mpesa_receipt")
+                self.insert_payment(pid, client, "pppoe", amount, None, msisdn=msisdn,
+                                    subscriber=sub, receipt=receipt, ref=ref, raw=raw,
+                                    status="confirmed", channel="c2b", confirmed_at="now")
             else:
                 (pid, msisdn, amount, receipt, ref, raw) = args
                 if any(p.get("mpesa_receipt") == receipt for p in d.table("gateway_payments")):
@@ -142,7 +149,9 @@ class MiniCursor:
                  "checkout_id": p["checkout_id"], "created_at": p.get("created_at")}
                 for p in rows
             ]
-        elif "FROM gateway_payments" in flat and "checkout_id" in flat:
+        elif "FROM gateway_payments WHERE status = 'unmatched'" in flat:
+            self._result = [_clone(p) for p in d.table("gateway_payments") if p.get("status") == "unmatched"]
+        elif "FROM gateway_payments" in flat and "WHERE checkout_id" in flat:
             row = self.find_payment(checkout=args[-1])
             self._result = [_clone(row)] if row else []
         elif flat.startswith("SELECT id, client_id, checkout_id, created_at\n") or "stale" in flat:
@@ -173,9 +182,59 @@ class MiniCursor:
         elif flat.startswith("SELECT balance_after FROM gateway_ledger_entries"):
             entries = [e for e in d.table("gateway_ledger_entries") if e["client_id"] == args[0]]
             self._result = [{"balance_after": entries[-1]["balance_after"]}] if entries else []
+        elif flat.startswith("INSERT INTO isp_payout_settings"):
+            client_id = args[0]
+            if not any(r["client_id"] == client_id for r in d.table("isp_payout_settings")):
+                d.table("isp_payout_settings").append(
+                    {"client_id": client_id, "gateway_mode": "company_gateway"}
+                )
+            self.rowcount = 1
         elif flat.startswith("SELECT client_id FROM isp_payout_settings"):
             rows = [r for r in d.table("isp_payout_settings") if r["client_id"] == args[0]]
             self._result = [_clone(rows[0])] if rows else [{"client_id": args[0]}]
+        elif "LEFT JOIN isp_payout_settings" in flat and "FROM pppoe_subscribers" in flat:
+            ref = str(args[0] or "")
+            matches = []
+            for sub in d.table("pppoe_subscribers"):
+                if int(sub.get("deleted") or 0) != 0:
+                    continue
+                if (sub.get("service") or "pppoe") != "pppoe":
+                    continue
+                if str(sub.get("pppoe_username") or "").lower() != ref.lower():
+                    continue
+                settings = [r for r in d.table("isp_payout_settings") if r["client_id"] == sub.get("client_id")]
+                mode = (settings[0].get("gateway_mode") if settings else "none") or "none"
+                matches.append({"pppoe_username": sub["pppoe_username"], "gateway_mode": mode})
+            self._result = matches[:5]
+        elif "FROM pppoe_subscribers s" in flat and "isp_payout_settings" in flat:
+            ref = str(args[0] or "")
+            exact = "LOWER(s.pppoe_username) = LOWER(%s)" in flat
+            matches = []
+            for sub in d.table("pppoe_subscribers"):
+                if int(sub.get("deleted") or 0) != 0:
+                    continue
+                if (sub.get("service") or "pppoe") != "pppoe":
+                    continue
+                settings = [
+                    r for r in d.table("isp_payout_settings")
+                    if r["client_id"] == sub.get("client_id")
+                    and r.get("gateway_mode") == "company_gateway"
+                ]
+                if not settings:
+                    continue
+                username = str(sub.get("pppoe_username") or "")
+                if exact:
+                    hit = username.lower() == ref.lower()
+                else:
+                    hit = username.lower().startswith(ref.lower())
+                if hit:
+                    matches.append({
+                        "subscriber_id": sub["id"],
+                        "client_id": sub["client_id"],
+                        "pppoe_username": username,
+                        "package_id": sub.get("package_id"),
+                    })
+            self._result = matches[:2]
         elif flat.startswith("SELECT * FROM settlement_batches"):
             rows = [b for b in d.table("settlement_batches") if b["id"] == args[0]]
             self._result = [_clone(rows[0])] if rows else []
@@ -220,11 +279,44 @@ class MiniCursor:
         elif flat.startswith("SELECT callback_secret_enc FROM company_daraja_settings"):
             rows = d.table("company_daraja_settings")
             self._result = [_clone(rows[0])] if rows else []
+        elif "c2b_registered_at" in flat and "FROM company_daraja_settings" in flat:
+            rows = d.table("company_daraja_settings")
+            if rows:
+                row = rows[0]
+                self._result = [{
+                    "c2b_registered_at": row.get("c2b_registered_at"),
+                    "c2b_register_ok": row.get("c2b_register_ok", 0),
+                    "c2b_register_detail": row.get("c2b_register_detail", ""),
+                    "account_type": row.get("account_type", ""),
+                    "short_code": row.get("short_code", ""),
+                }]
+            else:
+                self._result = []
+        elif flat.startswith("SELECT public_base FROM company_daraja_settings"):
+            rows = d.table("company_daraja_settings")
+            self._result = [{"public_base": (rows[0].get("public_base") if rows else "") or ""}]
+        elif flat.startswith("UPDATE company_daraja_settings") and "c2b_registered_at" in flat:
+            rows = d.table("company_daraja_settings")
+            if rows:
+                rows[0]["c2b_registered_at"] = "now"
+                rows[0]["c2b_register_ok"] = args[0]
+                rows[0]["c2b_register_detail"] = args[1]
+                self.rowcount = 1
         elif flat.startswith("UPDATE company_daraja_settings"):
             rows = d.table("company_daraja_settings")
             if rows:
-                rows[0]["last_known_balance"] = args[0]
+                if "last_known_balance" in flat:
+                    rows[0]["last_known_balance"] = args[0]
                 self.rowcount = 1
+        elif "FROM gateway_payments WHERE channel = 'c2b'" in flat and "SUM" in flat:
+            matched = sum(1 for p in d.table("gateway_payments")
+                          if p.get("channel") == "c2b" and p.get("status") == "confirmed")
+            unmatched = sum(1 for p in d.table("gateway_payments")
+                            if p.get("channel") == "c2b" and p.get("status") == "unmatched")
+            self._result = [{"matched": matched, "unmatched": unmatched}]
+        elif "FROM gateway_payments" in flat and "channel = 'c2b'" in flat:
+            rows = [p for p in d.table("gateway_payments") if p.get("channel") == "c2b"]
+            self._result = [_clone(p) for p in rows]
         elif flat.startswith("INSERT INTO gateway_audit_log"):
             d.table("gateway_audit_log").append({"id": args[0], "action": args[5]})
             self.rowcount = 1
@@ -312,7 +404,7 @@ class MiniCursor:
                "msisdn": kw.get("msisdn", ""), "amount": amount, "mpesa_receipt": kw.get("receipt"),
                "checkout_id": checkout, "account_reference": kw.get("ref", ""),
                "status": kw.get("status", "initiated"), "raw_callback": kw.get("raw"),
-               "confirmed_at": None}
+               "confirmed_at": kw.get("confirmed_at")}
         self.db.table("gateway_payments").append(row)
         return row
 
@@ -482,6 +574,21 @@ class ConfirmTests(unittest.TestCase):
 
 
 class C2bTests(unittest.TestCase):
+    def seed_subscriber(self, username="john", client="client-1", sub="sub-1",
+                        mode="company_gateway", package="pkg-1"):
+        db = MiniDb()
+        db.insert("isp_payout_settings", client_id=client, gateway_mode=mode)
+        db.insert(
+            "pppoe_subscribers",
+            id=sub,
+            client_id=client,
+            pppoe_username=username,
+            package_id=package,
+            service="pppoe",
+            deleted=0,
+        )
+        return db
+
     def test_unmatched_receipt_lands_in_suspense(self):
         db = MiniDb()
         gateway_callbacks.process_c2b_confirmation(
@@ -501,6 +608,150 @@ class C2bTests(unittest.TestCase):
         gateway_callbacks.process_c2b_confirmation(FakeConnect(db), payload)
         gateway_callbacks.process_c2b_confirmation(FakeConnect(db), payload)
         self.assertEqual(len(db.table("gateway_payments")), 1)
+
+    def test_matching_account_credits_and_renews(self):
+        db = self.seed_subscriber()
+        with patch("pppoe_store.renew") as renew:
+            gateway_callbacks.process_c2b_confirmation(
+                FakeConnect(db),
+                {
+                    "TransID": "QAB888",
+                    "TransAmount": "500.00",
+                    "MSISDN": "254700111222",
+                    "BillRefNumber": "John",
+                },
+            )
+            renew.assert_called_once()
+            args = renew.call_args.args
+            self.assertEqual(args[1], "client-1")
+            self.assertEqual(args[2], "sub-1")
+            self.assertEqual(args[3]["mpesaReference"], "QAB888")
+            self.assertEqual(args[3]["amount"], "500.00")
+        payment = db.table("gateway_payments")[0]
+        self.assertEqual(payment["status"], "confirmed")
+        self.assertEqual(payment["client_id"], "client-1")
+        self.assertEqual(payment["subscriber_id"], "sub-1")
+        self.assertEqual(payment["channel"], "c2b")
+        self.assertEqual(payment["account_reference"], "John")
+        self.assertEqual(len(db.table("gateway_ledger_entries")), 1)
+        self.assertEqual(str(db.table("gateway_ledger_entries")[0]["balance_after"]), "500.00")
+        self.assertEqual(len(db.table("gateway_notifications")), 0)
+
+    def test_prefix_match_when_unique(self):
+        db = self.seed_subscriber(username="johnathan")
+        with patch("pppoe_store.renew") as renew:
+            gateway_callbacks.process_c2b_confirmation(
+                FakeConnect(db),
+                {"TransID": "QAB901", "TransAmount": "200.00", "BillRefNumber": "john"},
+            )
+            renew.assert_called_once()
+        self.assertEqual(db.table("gateway_payments")[0]["status"], "confirmed")
+
+    def test_ambiguous_prefix_stays_unmatched(self):
+        db = self.seed_subscriber(username="johnathan")
+        db.insert(
+            "pppoe_subscribers",
+            id="sub-2",
+            client_id="client-1",
+            pppoe_username="johnson",
+            package_id="pkg-1",
+            service="pppoe",
+            deleted=0,
+        )
+        with patch("pppoe_store.renew") as renew:
+            gateway_callbacks.process_c2b_confirmation(
+                FakeConnect(db),
+                {"TransID": "QAB902", "TransAmount": "200.00", "BillRefNumber": "john"},
+            )
+            renew.assert_not_called()
+        self.assertEqual(db.table("gateway_payments")[0]["status"], "unmatched")
+
+    def test_own_daraja_subscriber_not_auto_matched(self):
+        db = self.seed_subscriber(mode="own_daraja")
+        with patch("pppoe_store.renew") as renew:
+            gateway_callbacks.process_c2b_confirmation(
+                FakeConnect(db),
+                {"TransID": "QAB903", "TransAmount": "200.00", "BillRefNumber": "john"},
+            )
+            renew.assert_not_called()
+        self.assertEqual(db.table("gateway_payments")[0]["status"], "unmatched")
+
+    def test_matched_duplicate_receipt_does_not_renew_twice(self):
+        db = self.seed_subscriber()
+        payload = {
+            "TransID": "QAB904",
+            "TransAmount": "500.00",
+            "MSISDN": "254700111222",
+            "BillRefNumber": "john",
+        }
+        with patch("pppoe_store.renew") as renew:
+            gateway_callbacks.process_c2b_confirmation(FakeConnect(db), payload)
+            gateway_callbacks.process_c2b_confirmation(FakeConnect(db), payload)
+            renew.assert_called_once()
+        self.assertEqual(len(db.table("gateway_payments")), 1)
+        self.assertEqual(len(db.table("gateway_ledger_entries")), 1)
+
+    def test_renew_failure_keeps_collection_and_notifies(self):
+        db = self.seed_subscriber()
+        with patch("pppoe_store.renew", side_effect=RuntimeError("no package")):
+            gateway_callbacks.process_c2b_confirmation(
+                FakeConnect(db),
+                {"TransID": "QAB905", "TransAmount": "500.00", "BillRefNumber": "john"},
+            )
+        payment = db.table("gateway_payments")[0]
+        self.assertEqual(payment["status"], "confirmed")
+        self.assertEqual(len(db.table("gateway_ledger_entries")), 1)
+        self.assertEqual(len(db.table("gateway_notifications")), 1)
+
+    def test_invalid_amount_goes_to_suspense(self):
+        db = self.seed_subscriber()
+        with patch("pppoe_store.renew") as renew:
+            gateway_callbacks.process_c2b_confirmation(
+                FakeConnect(db),
+                {"TransID": "QAB906", "TransAmount": "0", "BillRefNumber": "john"},
+            )
+            renew.assert_not_called()
+        self.assertEqual(db.table("gateway_payments")[0]["status"], "unmatched")
+
+    def test_diagnose_explains_wrong_mode(self):
+        db = self.seed_subscriber(mode="own_daraja")
+        diagnosis = gateway_store.diagnose_c2b_ref(db.cursor(), "john")
+        self.assertEqual(diagnosis["code"], "wrong_mode")
+        self.assertIn("own_daraja", diagnosis["message"])
+
+    def test_diagnose_explains_unknown_ref(self):
+        db = self.seed_subscriber()
+        diagnosis = gateway_store.diagnose_c2b_ref(db.cursor(), "nobody")
+        self.assertEqual(diagnosis["code"], "unknown_ref")
+
+    def test_suspense_includes_why(self):
+        db = MiniDb()
+        db.cursor().insert_payment(
+            "u-1", None, "manual", Decimal("100.00"), None,
+            receipt="QAB1", ref="ghost", status="unmatched", channel="c2b",
+        )
+        rows = gateway_store.suspense_payments(db.cursor())
+        self.assertEqual(len(rows), 1)
+        self.assertIn("No PPPoE username matches", rows[0]["reason"])
+
+    def test_c2b_health_reports_missing_pieces(self):
+        db = MiniDb()
+        db.insert(
+            "company_daraja_settings",
+            id=1,
+            account_type="paybill",
+            short_code="123456",
+            public_base="",
+            callback_secret_enc="",
+            c2b_register_ok=0,
+            c2b_register_detail="",
+        )
+        health = gateway_store.c2b_health(db.cursor())
+        self.assertFalse(health["ready"])
+        keys = {item["key"]: item["ok"] for item in health["checks"]}
+        self.assertFalse(keys["callbackBase"])
+        self.assertFalse(keys["registered"])
+        self.assertTrue(keys["paybill"])
 
 
 class PayoutResultTests(unittest.TestCase):

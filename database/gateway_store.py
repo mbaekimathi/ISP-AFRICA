@@ -7,6 +7,11 @@ row. Whoever verifies the payment first — the portal /pay/status poll, the
 confirm_collection inside the same transaction as the subscriber credit, so
 the ledger entry and pppoe_store.renew each happen exactly once.
 
+Manual Paybill (C2B) confirmations arrive with a BillRefNumber. When that
+account number uniquely resolves to a company_gateway PPPoE subscriber,
+record_c2b_matched credits the ISP ledger and renews the line; otherwise the
+receipt lands in suspense for director assignment.
+
 Tables created here follow the same convention as api.ensure_schema():
 CREATE TABLE IF NOT EXISTS plus SHOW COLUMNS / ALTER for additive changes,
 so every start is idempotent. Rollback is manual — UNDO_STATEMENTS mirrors
@@ -75,6 +80,9 @@ UNDO_STATEMENTS = [
     "ALTER TABLE company_daraja_settings DROP COLUMN manual_min",
     "ALTER TABLE company_daraja_settings DROP COLUMN manual_max",
     "ALTER TABLE company_daraja_settings DROP COLUMN manual_transfers_enabled",
+    "ALTER TABLE company_daraja_settings DROP COLUMN c2b_registered_at",
+    "ALTER TABLE company_daraja_settings DROP COLUMN c2b_register_ok",
+    "ALTER TABLE company_daraja_settings DROP COLUMN c2b_register_detail",
 ]
 
 
@@ -104,6 +112,9 @@ def ensure_schema(cursor):
         ("manual_min", "manual_min DECIMAL(12,2) NOT NULL DEFAULT 0"),
         ("manual_max", "manual_max DECIMAL(12,2) NOT NULL DEFAULT 0"),
         ("manual_transfers_enabled", "manual_transfers_enabled TINYINT NOT NULL DEFAULT 1"),
+        ("c2b_registered_at", "c2b_registered_at DATETIME NULL"),
+        ("c2b_register_ok", "c2b_register_ok TINYINT NOT NULL DEFAULT 0"),
+        ("c2b_register_detail", "c2b_register_detail VARCHAR(255) NOT NULL DEFAULT ''"),
     ):
         cursor.execute("SHOW COLUMNS FROM company_daraja_settings LIKE %s", (column,))
         if cursor.fetchone() is None:
@@ -730,6 +741,115 @@ def record_collection_receipt(cursor, checkout_id, receipt):
         "UPDATE pppoe_invoices SET mpesa_reference = %s WHERE mpesa_reference = %s",
         (receipt[:40], checkout_id[:40]),
     )
+
+
+def resolve_c2b_subscriber(cursor, bill_reference):
+    """Map a Paybill account number to exactly one pooled PPPoE subscriber.
+
+    Portal instructions tell customers to enter their pppoe_username as the
+    account reference. Exact case-insensitive match wins; when Safaricom
+    truncates the ref we accept a unique username prefix among company_gateway
+    clients. Ambiguous or missing refs return None so the payment stays in
+    suspense instead of crediting the wrong line."""
+    ref = str(bill_reference or "").strip()
+    if not ref:
+        return None
+    cursor.execute(
+        """
+        SELECT s.id AS subscriber_id, s.client_id, s.pppoe_username, s.package_id
+        FROM pppoe_subscribers s
+        INNER JOIN isp_payout_settings p ON p.client_id = s.client_id
+        WHERE s.deleted = 0
+          AND s.service = 'pppoe'
+          AND p.gateway_mode = 'company_gateway'
+          AND LOWER(s.pppoe_username) = LOWER(%s)
+        LIMIT 2
+        """,
+        (ref[:64],),
+    )
+    rows = list(cursor.fetchall() or [])
+    if len(rows) == 1:
+        return rows[0]
+    if len(rows) > 1:
+        return None
+    # Prefix fallback for truncated BillRefNumber values (Daraja often caps
+    # account references). Require a single candidate so "jo" never picks
+    # between john and joyce.
+    if len(ref) < 3:
+        return None
+    cursor.execute(
+        """
+        SELECT s.id AS subscriber_id, s.client_id, s.pppoe_username, s.package_id
+        FROM pppoe_subscribers s
+        INNER JOIN isp_payout_settings p ON p.client_id = s.client_id
+        WHERE s.deleted = 0
+          AND s.service = 'pppoe'
+          AND p.gateway_mode = 'company_gateway'
+          AND LOWER(s.pppoe_username) LIKE CONCAT(LOWER(%s), '%%')
+        LIMIT 2
+        """,
+        (ref[:64],),
+    )
+    rows = list(cursor.fetchall() or [])
+    return rows[0] if len(rows) == 1 else None
+
+
+def record_c2b_matched(cursor, receipt, amount, msisdn, bill_reference, raw,
+                       client_id, subscriber_id):
+    """Attribute a manual Paybill payment to a subscriber and credit the
+    ISP ledger exactly once. Duplicate receipts dedupe on the unique key."""
+    payment_id = str(uuid.uuid4())
+    money = Decimal(str(amount))
+    # Ensure the per-client ledger lock row exists before we take it.
+    cursor.execute(
+        "INSERT INTO isp_payout_settings (client_id) VALUES (%s) "
+        "ON DUPLICATE KEY UPDATE client_id = client_id",
+        (client_id,),
+    )
+    cursor.execute(
+        "SELECT client_id FROM isp_payout_settings WHERE client_id = %s FOR UPDATE",
+        (client_id,),
+    )
+    try:
+        cursor.execute(
+            """
+            INSERT INTO gateway_payments
+              (id, client_id, source, subscriber_id, channel, msisdn, amount,
+               mpesa_receipt, account_reference, status, raw_callback, confirmed_at)
+            VALUES (%s, %s, 'pppoe', %s, 'c2b', %s, %s, %s, %s, 'confirmed', %s, NOW())
+            """,
+            (
+                payment_id,
+                client_id,
+                subscriber_id,
+                str(msisdn or "")[:20],
+                money,
+                str(receipt or "")[:40],
+                str(bill_reference or "")[:40],
+                raw,
+            ),
+        )
+    except pymysql.MySQLError:
+        return None
+    balance = _last_balance(cursor, client_id) + money
+    cursor.execute(
+        """
+        INSERT INTO gateway_ledger_entries
+          (id, client_id, payment_id, type, amount, balance_after)
+        VALUES (%s, %s, %s, 'collection', %s, %s)
+        """,
+        (str(uuid.uuid4()), client_id, payment_id, money, balance),
+    )
+    audit(
+        cursor, client_id, "system", "gateway", "payment.confirmed",
+        new={
+            "paymentId": payment_id,
+            "subscriberId": subscriber_id,
+            "reason": "c2b-account-match",
+            "receipt": str(receipt or "")[:40],
+        },
+    )
+    return payment_id
 
 
 def record_c2b_unmatched(cursor, receipt, amount, msisdn, bill_reference, raw):
@@ -1432,6 +1552,228 @@ def list_batches(cursor, client_id=None, limit=200, offset=0):
     return list(cursor.fetchall())
 
 
+def diagnose_c2b_ref(cursor, bill_reference):
+    """Explain why a Paybill account number did or did not auto-match."""
+    ref = str(bill_reference or "").strip()
+    if not ref:
+        return {
+            "code": "missing_ref",
+            "message": "No account number was entered on the Paybill payment",
+        }
+    matched = resolve_c2b_subscriber(cursor, ref)
+    if matched:
+        return {
+            "code": "matched",
+            "message": f"Matches PPPoE username {matched['pppoe_username']}",
+            "subscriberId": matched["subscriber_id"],
+            "clientId": matched["client_id"],
+            "username": matched["pppoe_username"],
+        }
+    cursor.execute(
+        """
+        SELECT s.pppoe_username, COALESCE(p.gateway_mode, 'none') AS gateway_mode
+        FROM pppoe_subscribers s
+        LEFT JOIN isp_payout_settings p ON p.client_id = s.client_id
+        WHERE s.deleted = 0 AND s.service = 'pppoe'
+          AND LOWER(s.pppoe_username) = LOWER(%s)
+        LIMIT 5
+        """,
+        (ref[:64],),
+    )
+    exact = list(cursor.fetchall() or [])
+    if exact:
+        modes = sorted({str(row.get("gateway_mode") or "none") for row in exact})
+        return {
+            "code": "wrong_mode",
+            "message": (
+                f"Account matches {exact[0]['pppoe_username']}, but that ISP is on "
+                f"{', '.join(modes)} — only company gateway auto-credits"
+            ),
+        }
+    if len(ref) >= 3:
+        cursor.execute(
+            """
+            SELECT s.pppoe_username
+            FROM pppoe_subscribers s
+            INNER JOIN isp_payout_settings p ON p.client_id = s.client_id
+            WHERE s.deleted = 0 AND s.service = 'pppoe'
+              AND p.gateway_mode = 'company_gateway'
+              AND LOWER(s.pppoe_username) LIKE CONCAT(LOWER(%s), '%%')
+            LIMIT 5
+            """,
+            (ref[:64],),
+        )
+        prefix = list(cursor.fetchall() or [])
+        if len(prefix) > 1:
+            names = ", ".join(row["pppoe_username"] for row in prefix[:3])
+            return {
+                "code": "ambiguous",
+                "message": f"Account number matches more than one subscriber ({names})",
+            }
+    return {
+        "code": "unknown_ref",
+        "message": f"No PPPoE username matches account “{ref}”",
+    }
+
+
+def explain_unmatched_payment(cursor, channel, account_reference):
+    """Human-readable reason for a suspense row."""
+    if str(channel or "") == "stk":
+        return "STK amount did not match the requested amount"
+    diagnosis = diagnose_c2b_ref(cursor, account_reference)
+    if diagnosis["code"] == "matched":
+        # Rare: matched now but was unmatched earlier (subscriber created later).
+        return "Account number can match now — reassign from suspense if still held"
+    return diagnosis["message"]
+
+
+def mark_c2b_registered(cursor, ok, detail=""):
+    cursor.execute(
+        """
+        UPDATE company_daraja_settings
+        SET c2b_registered_at = NOW(),
+            c2b_register_ok = %s,
+            c2b_register_detail = %s
+        WHERE id = 1
+        """,
+        (1 if ok else 0, str(detail or "")[:255]),
+    )
+
+
+def c2b_registration(cursor):
+    cursor.execute(
+        """
+        SELECT c2b_registered_at, c2b_register_ok, c2b_register_detail,
+               account_type, short_code
+        FROM company_daraja_settings WHERE id = 1
+        """
+    )
+    row = cursor.fetchone() or {}
+    return {
+        "registeredAt": row.get("c2b_registered_at"),
+        "ok": bool(row.get("c2b_register_ok")),
+        "detail": row.get("c2b_register_detail") or "",
+        "accountType": row.get("account_type") or "",
+        "shortCode": row.get("short_code") or "",
+    }
+
+
+def c2b_recent_activity(cursor, limit=25):
+    """Recent manual Paybill receipts with match outcome and reason."""
+    cursor.execute(
+        """
+        SELECT id, client_id, subscriber_id, msisdn, amount, mpesa_receipt,
+               account_reference, status, created_at, confirmed_at
+        FROM gateway_payments
+        WHERE channel = 'c2b'
+        ORDER BY created_at DESC
+        LIMIT %s
+        """,
+        (int(limit),),
+    )
+    rows = list(cursor.fetchall() or [])
+    activity = []
+    for row in rows:
+        status = row.get("status")
+        if status == "confirmed":
+            reason = "Auto-matched and credited"
+            if row.get("subscriber_id"):
+                reason = "Auto-matched to subscriber and line renewed"
+            elif row.get("client_id"):
+                reason = "Assigned to ISP (collection confirmed)"
+        else:
+            reason = explain_unmatched_payment(
+                cursor, "c2b", row.get("account_reference")
+            )
+        activity.append(
+            {
+                "id": row["id"],
+                "receipt": row.get("mpesa_receipt"),
+                "accountReference": row.get("account_reference") or "",
+                "amount": str(row.get("amount") or "0"),
+                "msisdn": mask_msisdn(row.get("msisdn")),
+                "status": status,
+                "reason": reason,
+                "clientId": row.get("client_id"),
+                "subscriberId": row.get("subscriber_id"),
+                "createdAt": row.get("created_at"),
+                "confirmedAt": row.get("confirmed_at"),
+            }
+        )
+    return activity
+
+
+def c2b_health(cursor):
+    """Director checklist for manual Paybill auto-recognition."""
+    base = public_base(cursor)
+    secret = callback_secret(cursor)
+    registration = c2b_registration(cursor)
+    confirmation = (
+        f"{base}/api/daraja/{secret}/c2b/confirmation" if base and secret else ""
+    )
+    validation = (
+        f"{base}/api/daraja/{secret}/c2b/validation" if base and secret else ""
+    )
+    checks = [
+        {
+            "key": "callbackBase",
+            "label": "Public HTTPS callback address",
+            "ok": bool(base),
+            "detail": base or "Open Company payments through the public https domain, or set ISP_GATEWAY_PUBLIC_URL",
+        },
+        {
+            "key": "callbackSecret",
+            "label": "Callback secret issued",
+            "ok": bool(secret),
+            "detail": "Generated automatically on the company payments page",
+        },
+        {
+            "key": "paybill",
+            "label": "Company account type is Paybill",
+            "ok": registration.get("accountType") == "paybill",
+            "detail": (
+                f"Shortcode {registration.get('shortCode')}"
+                if registration.get("accountType") == "paybill"
+                else "C2B account numbers require a Paybill (Till has no account reference)"
+            ),
+        },
+        {
+            "key": "registered",
+            "label": "C2B URLs registered with Safaricom",
+            "ok": bool(registration.get("ok")),
+            "detail": (
+                registration.get("detail")
+                or (
+                    f"Last registered {registration['registeredAt']}"
+                    if registration.get("registeredAt")
+                    else "Not registered yet — use Register C2B URLs below"
+                )
+            ),
+        },
+    ]
+    cursor.execute(
+        """
+        SELECT
+          SUM(CASE WHEN status = 'confirmed' THEN 1 ELSE 0 END) AS matched,
+          SUM(CASE WHEN status = 'unmatched' THEN 1 ELSE 0 END) AS unmatched
+        FROM gateway_payments WHERE channel = 'c2b'
+        """
+    )
+    counts = cursor.fetchone() or {}
+    return {
+        "ready": all(item["ok"] for item in checks),
+        "checks": checks,
+        "confirmationUrl": confirmation,
+        "validationUrl": validation,
+        "registration": registration,
+        "counts": {
+            "matched": int(counts.get("matched") or 0),
+            "unmatched": int(counts.get("unmatched") or 0),
+        },
+        "recent": c2b_recent_activity(cursor),
+    }
+
+
 def suspense_payments(cursor, limit=200):
     """Unmatched money — C2B payments and STK amount mismatches waiting for
     a director to attribute them."""
@@ -1447,6 +1789,9 @@ def suspense_payments(cursor, limit=200):
     rows = list(cursor.fetchall())
     for row in rows:
         row["msisdn"] = mask_msisdn(row.get("msisdn"))
+        row["reason"] = explain_unmatched_payment(
+            cursor, row.get("channel"), row.get("account_reference")
+        )
     return rows
 
 

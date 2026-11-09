@@ -69,10 +69,41 @@ type PaymentRecord = {
 
 type ConnectionCheck = { state: "idle" | "checking" | "ok" | "failed"; reason: string };
 
+type C2bCheck = { key: string; label: string; ok: boolean; detail: string };
+
+type C2bActivity = {
+  id: string;
+  receipt: string | null;
+  accountReference: string;
+  amount: string;
+  status: string;
+  reason: string;
+  createdAt: string;
+};
+
+type C2bHealth = {
+  optional: boolean;
+  enabled: boolean;
+  ready: boolean;
+  checks: C2bCheck[];
+  confirmationUrl: string;
+  validationUrl: string;
+  registration: {
+    registeredAt: string | null;
+    ok: boolean;
+    detail: string;
+    accountType: string;
+    shortCode: string;
+  };
+  counts: { matched: number; unmatched: number };
+  recent: C2bActivity[];
+};
+
 type PaymentSettings = {
   mode: "own" | "company" | null;
   own: PaymentRecord | null;
   company: PaymentRecord | null;
+  c2b?: C2bHealth;
 };
 
 const emptyDraft: PaymentDraft = {
@@ -118,6 +149,8 @@ export function IspPaymentsPage() {
   const [loaded, setLoaded] = useState(false);
   const [view, setView] = useState<"own" | "company">("own");
   const [gatewayMode, setGatewayMode] = useState<GatewayMode>("none");
+  const [c2b, setC2b] = useState<C2bHealth | null>(null);
+  const [c2bBusy, setC2bBusy] = useState(false);
 
   const testConnection = useCallback((form?: PaymentDraft) => {
     setCheck({ state: "checking", reason: "" });
@@ -155,6 +188,7 @@ export function IspPaymentsPage() {
     (body: PaymentSettings) => {
       setRecord(body.own);
       setDraft(draftFrom(body.own));
+      setC2b(body.c2b ?? null);
       setLoaded(true);
       if (body.own) testConnection();
     },
@@ -189,6 +223,59 @@ export function IspPaymentsPage() {
 
   function update(field: keyof PaymentDraft, value: string) {
     setDraft((current) => ({ ...current, [field]: value }));
+  }
+
+  function refreshC2b() {
+    apiRequest<{ c2b: C2bHealth }>("/api/payments/c2b")
+      .then((body) => setC2b(body.c2b))
+      .catch((cause: unknown) =>
+        setError(cause instanceof Error ? cause.message : "Manual Paybill status could not be loaded."),
+      );
+  }
+
+  function setC2bEnabled(enabled: boolean) {
+    setError("");
+    setNotice("");
+    setC2bBusy(true);
+    apiRequest<{ c2b: C2bHealth }>("/api/payments/c2b", {
+      method: "POST",
+      body: JSON.stringify({ enabled }),
+    })
+      .then((body) => {
+        setC2b(body.c2b);
+        setNotice(
+          enabled
+            ? "Manual Paybill auto-credit is on — register the C2B URLs with Safaricom next."
+            : "Manual Paybill auto-credit is off.",
+        );
+      })
+      .catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : "Could not update manual Paybill settings.");
+      })
+      .finally(() => setC2bBusy(false));
+  }
+
+  function registerC2b() {
+    setError("");
+    setNotice("");
+    setC2bBusy(true);
+    apiRequest<{ c2b: C2bHealth }>("/api/payments/c2b/register", { method: "POST", body: "{}" })
+      .then((body) => {
+        setC2b(body.c2b);
+        setNotice("C2B URLs registered on your Paybill — manual payments can now renew lines automatically.");
+        if (body.c2b.confirmationUrl) {
+          setDraft((current) => ({
+            ...current,
+            confirmationUrl: body.c2b.confirmationUrl,
+            validationUrl: body.c2b.validationUrl,
+          }));
+        }
+      })
+      .catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : "C2B registration failed.");
+        refreshC2b();
+      })
+      .finally(() => setC2bBusy(false));
   }
 
   if (!ready) {
@@ -300,6 +387,7 @@ export function IspPaymentsPage() {
         </div>
       </fieldset>
       {view === "own" ? (
+      <>
       <form
         className="form-card mt-6 max-w-2xl"
         onSubmit={(event) => {
@@ -454,8 +542,8 @@ export function IspPaymentsPage() {
             <div className="grid gap-1">
               <h3 className="text-sm font-semibold text-foreground">Payment URLs &amp; security</h3>
               <p className="text-sm text-muted-foreground">
-                Optional — the callback URL receives STK push results, the confirmation and validation URLs receive
-                manual M-Pesa payments, and the initiator credentials are used for payouts and reversals.
+                Optional — STK callback and initiator credentials. Manual Paybill confirmation/validation URLs are
+                managed in the optional auto-credit panel below when you turn that on.
               </p>
             </div>
             <FormField
@@ -472,36 +560,6 @@ export function IspPaymentsPage() {
                 onChange={(event) => update("callbackUrl", event.target.value)}
               />
             </FormField>
-            <div className="grid gap-4 sm:grid-cols-2">
-              <FormField
-                id="daraja-confirmation-url"
-                label="Confirmation URL"
-                hint="Receives completed Paybill or Till payments made directly."
-              >
-                <input
-                  id="daraja-confirmation-url"
-                  className="field"
-                  inputMode="url"
-                  placeholder="https://portal.example.com/c2b/confirmation"
-                  value={draft.confirmationUrl}
-                  onChange={(event) => update("confirmationUrl", event.target.value)}
-                />
-              </FormField>
-              <FormField
-                id="daraja-validation-url"
-                label="Validation URL"
-                hint="Optional — checks a payment before it is accepted."
-              >
-                <input
-                  id="daraja-validation-url"
-                  className="field"
-                  inputMode="url"
-                  placeholder="https://portal.example.com/c2b/validation"
-                  value={draft.validationUrl}
-                  onChange={(event) => update("validationUrl", event.target.value)}
-                />
-              </FormField>
-            </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <FormField
                 id="daraja-initiator-name"
@@ -547,6 +605,122 @@ export function IspPaymentsPage() {
           </fieldset>
         </div>
       </form>
+      {view === "own" ? (
+        <section className="form-card mt-6 max-w-2xl">
+          <h2 className="text-lg font-semibold">Manual Paybill recognition (optional)</h2>
+          <p className="text-sm text-muted-foreground">
+            Off by default. Turn this on if customers pay your Paybill without STK and enter their PPPoE username as
+            the account number — the system will match and renew the line automatically.
+          </p>
+          {c2b ? (
+            <>
+              <label className="flex items-start gap-3 rounded-lg border border-border bg-surface-muted/40 px-3.5 py-3 text-sm">
+                <input
+                  type="checkbox"
+                  className="mt-1"
+                  checked={c2b.enabled}
+                  disabled={c2bBusy || gatewayMode === "company_gateway"}
+                  onChange={(event) => setC2bEnabled(event.target.checked)}
+                />
+                <span>
+                  <span className="font-medium">Auto-credit manual Paybill payments</span>
+                  <span className="mt-0.5 block text-caption text-muted-foreground">
+                    Only applies while this account uses your own Daraja API — not the company gateway.
+                  </span>
+                </span>
+              </label>
+              {c2b.enabled ? (
+                <>
+                  <p className="flex items-center gap-2 text-sm text-muted-foreground">
+                    <span className={`h-2 w-2 rounded-full ${c2b.ready ? "bg-success" : "bg-destructive"}`} />
+                    {c2b.ready
+                      ? "Ready — matched payments renew the line automatically."
+                      : "Not ready yet — fix the items below, then register the C2B URLs."}
+                  </p>
+                  <ul className="grid gap-1.5 rounded-lg border border-border bg-surface-muted/60 px-3.5 py-3">
+                    {c2b.checks.map((item) => (
+                      <li key={item.key} className="grid gap-0.5">
+                        <div className="flex items-center gap-2 text-caption">
+                          {item.ok ? (
+                            <Check className="h-3.5 w-3.5 shrink-0 text-success" aria-hidden="true" />
+                          ) : (
+                            <XCircle className="h-3.5 w-3.5 shrink-0 text-destructive" aria-hidden="true" />
+                          )}
+                          <span className={item.ok ? "text-muted-foreground" : "font-medium"}>{item.label}</span>
+                        </div>
+                        <p className="pl-5 text-[11px] leading-4 text-muted-foreground">{item.detail}</p>
+                      </li>
+                    ))}
+                  </ul>
+                  {c2b.confirmationUrl ? (
+                    <p className="break-all font-mono text-[11px] text-muted-foreground">
+                      Confirmation: {c2b.confirmationUrl}
+                    </p>
+                  ) : null}
+                  <div className="flex flex-wrap items-center gap-3">
+                    <PrimaryButton
+                      type="button"
+                      disabled={
+                        c2bBusy || !c2b.confirmationUrl || c2b.registration.accountType !== "paybill"
+                      }
+                      onClick={registerC2b}
+                    >
+                      {c2bBusy ? "Working…" : c2b.registration.ok ? "Re-register C2B URLs" : "Register C2B URLs"}
+                    </PrimaryButton>
+                    <SecondaryButton type="button" disabled={c2bBusy} onClick={refreshC2b}>
+                      Refresh status
+                    </SecondaryButton>
+                  </div>
+                  <div className="grid gap-2">
+                    <h3 className="text-sm font-semibold">Recent manual payments</h3>
+                    <p className="text-caption text-muted-foreground">
+                      Matched {c2b.counts.matched} · Unmatched {c2b.counts.unmatched}
+                    </p>
+                    {c2b.recent.length === 0 ? (
+                      <p className="text-sm text-muted-foreground">
+                        No C2B receipts yet. After registration, a manual payment with the PPPoE username as account
+                        number should appear here.
+                      </p>
+                    ) : (
+                      <div className="overflow-hidden rounded-lg border border-border">
+                        <table className="w-full text-left text-sm">
+                          <thead className="border-b border-border bg-surface-muted/50 text-caption text-muted-foreground">
+                            <tr>
+                              <th className="px-3 py-2 font-medium">When</th>
+                              <th className="px-3 py-2 font-medium">Receipt</th>
+                              <th className="px-3 py-2 font-medium">Account</th>
+                              <th className="px-3 py-2 font-medium">Result</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {c2b.recent.map((row) => (
+                              <tr key={row.id} className="border-b border-border last:border-0">
+                                <td className="whitespace-nowrap px-3 py-2 text-xs text-muted-foreground">
+                                  {row.createdAt}
+                                </td>
+                                <td className="px-3 py-2 font-mono text-xs">{row.receipt || "—"}</td>
+                                <td className="px-3 py-2 font-mono text-xs">{row.accountReference || "—"}</td>
+                                <td className="px-3 py-2">
+                                  <div className={row.status === "confirmed" ? "text-success" : "text-destructive"}>
+                                    {row.status === "confirmed" ? "Matched" : "Unmatched"}
+                                  </div>
+                                  <div className="text-[11px] leading-4 text-muted-foreground">{row.reason}</div>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                </>
+              ) : null}
+            </>
+          ) : (
+            <p className="text-sm text-muted-foreground">Save your Daraja details first to configure this option.</p>
+          )}
+        </section>
+      </>
       ) : (
         <GatewaySettingsCard
           onModeChange={(mode) => {
@@ -692,7 +866,8 @@ function GatewaySettingsCard({ onModeChange }: { onModeChange?: (mode: GatewayMo
           <div className="grid gap-0.5">
             <h2 className="text-lg font-semibold">Company gateway</h2>
             <p className="text-sm text-muted-foreground">
-              The company collects on its M-Pesa shortcode and pays you out.
+              The company collects on its M-Pesa shortcode and pays you out. Manual Paybill payments with the
+              PPPoE username as account number are recognised by the company gateway automatically.
             </p>
           </div>
         </div>

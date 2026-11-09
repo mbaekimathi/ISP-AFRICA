@@ -3,7 +3,7 @@
 Endpoints (all POST, all acked immediately):
   stk                  M-Pesa Express result for pooled STK pushes
   c2b/validation       C2B pre-check — logged and accepted
-  c2b/confirmation     C2B payment notice — pooled or suspense
+  c2b/confirmation     C2B payment notice — account-matched credit or suspense
   b2c/result, b2c/timeout     payout results for phone destinations
   b2b/result, b2b/timeout     payout results for paybill/till destinations
   account-balance      float answer for the settlement scheduler's checks
@@ -401,7 +401,13 @@ def _notify_unmatched(connect, checkout_id, reason):
 
 
 def process_c2b_confirmation(connect, payload):
-    """Unattributed C2B money goes to suspense — never auto-assigned."""
+    """Credit a manual Paybill payment when BillRefNumber uniquely identifies
+    a pooled PPPoE subscriber; otherwise park it in suspense for review.
+
+    Daraja delivers C2B confirmations after the money has already moved, so
+    there is no stkpushquery step here — the receipt is the proof. Matching
+    is exact (or a unique username prefix) against company_gateway accounts
+    only; ambiguous refs never auto-assign."""
     body = payload or {}
     receipt = body.get("TransID")
     amount = body.get("TransAmount")
@@ -412,6 +418,41 @@ def process_c2b_confirmation(connect, payload):
         return
     with connect() as db:
         with db.cursor() as cursor:
+            matched = gateway_store.resolve_c2b_subscriber(cursor, bill_ref)
+            if matched and _c2b_amount_ok(amount):
+                payment_id = gateway_store.record_c2b_matched(
+                    cursor,
+                    receipt,
+                    amount,
+                    msisdn,
+                    bill_ref,
+                    raw,
+                    matched["client_id"],
+                    matched["subscriber_id"],
+                )
+                if payment_id:
+                    credited = _fulfil_c2b_credit(
+                        cursor,
+                        matched["client_id"],
+                        matched["subscriber_id"],
+                        amount,
+                        receipt,
+                        matched.get("package_id"),
+                    )
+                    db.commit()
+                    print(
+                        f"event=gateway-c2b receipt={str(receipt)[-6:]} "
+                        f"sub={str(matched['subscriber_id'])[:8]} "
+                        f"credit={'ok' if credited else 'failed'}",
+                        flush=True,
+                    )
+                    if not credited:
+                        _notify_c2b_credit_failed(
+                            connect, payment_id, receipt, amount, bill_ref, matched["client_id"]
+                        )
+                    return
+                db.commit()
+                return  # duplicate receipt — already handled
             payment_id = gateway_store.record_c2b_unmatched(
                 cursor, receipt, amount, msisdn, bill_ref, raw
             )
@@ -428,6 +469,65 @@ def process_c2b_confirmation(connect, payload):
                     ),
                 )
             db.commit()
+
+
+def _c2b_amount_ok(amount):
+    try:
+        from decimal import Decimal
+
+        return Decimal(str(amount)) > 0
+    except Exception:
+        return False
+
+
+def _fulfil_c2b_credit(cursor, client_id, subscriber_id, amount, receipt, package_id):
+    """Renew the matched subscriber from a confirmed C2B collection."""
+    import pppoe_store
+
+    try:
+        from decimal import Decimal
+
+        money = format(Decimal(str(amount)), ".2f")
+        pppoe_store.renew(
+            cursor,
+            client_id,
+            subscriber_id,
+            {
+                "amount": money,
+                "mpesaReference": str(receipt or "")[:40],
+                "packageId": package_id,
+            },
+        )
+        return True
+    except Exception as error:
+        print(
+            f"event=gateway-c2b-credit sub={str(subscriber_id)[:8]} "
+            f"error={type(error).__name__}",
+            flush=True,
+        )
+        return False
+
+
+def _notify_c2b_credit_failed(connect, payment_id, receipt, amount, bill_ref, client_id):
+    import gateway_notify
+
+    try:
+        with connect() as db:
+            with db.cursor() as cursor:
+                gateway_notify.send(
+                    cursor,
+                    gateway_notify.notice(
+                        "company",
+                        "unmatched_payment",
+                        "Manual payment needs service credit",
+                        f"Receipt {receipt} KES {amount} ref {bill_ref or '—'} "
+                        f"matched but renew failed; payment {str(payment_id)[:8]}",
+                        client_id=client_id,
+                    ),
+                )
+                db.commit()
+    except Exception:
+        pass
 
 
 # --- Payout results -------------------------------------------------------------

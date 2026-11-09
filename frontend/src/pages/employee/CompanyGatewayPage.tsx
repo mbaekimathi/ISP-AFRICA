@@ -91,6 +91,7 @@ type SuspenseRow = {
   account_reference: string;
   checkout_id: string | null;
   created_at: string;
+  reason?: string;
 };
 
 type PendingRow = {
@@ -607,7 +608,7 @@ export function CompanyGatewayPage() {
             <p className="ml-auto text-xs text-muted-foreground">C2B receipts and amount mismatches waiting for attribution</p>
           </header>
           <DataTable
-            head={["When", "Channel", "From", "Receipt", "Reference", "Amount", "Assign"]}
+            head={["When", "Channel", "From", "Receipt", "Reference", "Why unmatched", "Amount", "Assign"]}
             loading={suspense === null}
             empty={(suspense ?? []).length === 0 && "The suspense queue is empty."}
           >
@@ -618,6 +619,7 @@ export function CompanyGatewayPage() {
                 <td className="px-5 py-3 tabular">{row.msisdn || "—"}</td>
                 <td className="px-5 py-3 font-mono text-xs">{row.mpesa_receipt || "—"}</td>
                 <td className="px-5 py-3 text-xs text-muted-foreground">{row.account_reference || "—"}</td>
+                <td className="max-w-72 px-5 py-3 text-xs leading-5 text-muted-foreground">{row.reason || "—"}</td>
                 <td className="px-5 py-3 text-right font-semibold tabular">{money(row.amount)}</td>
                 <td className="px-5 py-3">
                   {assigning === row.id ? (

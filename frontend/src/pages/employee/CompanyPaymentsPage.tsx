@@ -33,6 +33,35 @@ type DarajaInfo = {
   certificateSource: "" | "saved" | "environment" | "builtin";
 };
 
+type C2bCheck = { key: string; label: string; ok: boolean; detail: string };
+
+type C2bActivity = {
+  id: string;
+  receipt: string | null;
+  accountReference: string;
+  amount: string;
+  msisdn: string;
+  status: string;
+  reason: string;
+  createdAt: string;
+};
+
+type C2bHealth = {
+  ready: boolean;
+  checks: C2bCheck[];
+  confirmationUrl: string;
+  validationUrl: string;
+  registration: {
+    registeredAt: string | null;
+    ok: boolean;
+    detail: string;
+    accountType: string;
+    shortCode: string;
+  };
+  counts: { matched: number; unmatched: number };
+  recent: C2bActivity[];
+};
+
 type CompanyPayments = {
   daraja:
     | (Omit<DarajaDraft, "environment" | "accountType"> & {
@@ -41,6 +70,7 @@ type CompanyPayments = {
       } & Partial<DarajaInfo>)
     | null;
   checklist?: ChecklistItem[];
+  c2b?: C2bHealth;
 };
 
 const CALLBACK_ENDPOINTS: { key: string; label: string; path: string }[] = [
@@ -77,9 +107,11 @@ export function CompanyPaymentsPage() {
   const [certificateSaved, setCertificateSaved] = useState(false);
   const [darajaInfo, setDarajaInfo] = useState<DarajaInfo | null>(null);
   const [checklist, setChecklist] = useState<ChecklistItem[]>([]);
+  const [c2b, setC2b] = useState<C2bHealth | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [pending, setPending] = useState(false);
+  const [c2bBusy, setC2bBusy] = useState(false);
   const [loaded, setLoaded] = useState(false);
   const [check, setCheck] = useState<{ state: "idle" | "checking" | "ok" | "failed"; reason: string }>({
     state: "idle",
@@ -124,6 +156,7 @@ export function CompanyPaymentsPage() {
   const apply = useCallback(
     (body: CompanyPayments) => {
       setChecklist(body.checklist ?? []);
+      setC2b(body.c2b ?? null);
       if (body.daraja) {
         const {
           callbackSecret,
@@ -186,6 +219,30 @@ export function CompanyPaymentsPage() {
 
   function useBuiltinCertificate() {
     postDaraja({ gateway: "daraja", daraja: { ...daraja, certificate: "", certificateReset: true } });
+  }
+
+  function refreshC2b() {
+    apiRequest<{ c2b: C2bHealth }>("/api/employee/company/payments/c2b")
+      .then((body) => setC2b(body.c2b))
+      .catch((cause: unknown) =>
+        setError(cause instanceof Error ? cause.message : "Manual Paybill status could not be loaded."),
+      );
+  }
+
+  function registerC2b() {
+    setError("");
+    setNotice("");
+    setC2bBusy(true);
+    apiRequest<{ c2b: C2bHealth }>("/api/employee/company/payments/c2b/register", { method: "POST", body: "{}" })
+      .then((body) => {
+        setC2b(body.c2b);
+        setNotice("C2B URLs registered with Safaricom — manual Paybill payments can now reach this system.");
+      })
+      .catch((cause: unknown) => {
+        setError(cause instanceof Error ? cause.message : "C2B registration failed.");
+        refreshC2b();
+      })
+      .finally(() => setC2bBusy(false));
   }
 
   function postDaraja(body: { gateway: "daraja"; daraja: Record<string, unknown> }) {
@@ -499,6 +556,104 @@ export function CompanyPaymentsPage() {
           </SecondaryButton>
         </div>
       </form>
+
+      <section className="form-card mt-6 max-w-2xl">
+        <h2 className="text-lg font-semibold">Manual Paybill recognition (C2B)</h2>
+        <p className="text-sm text-muted-foreground">
+          When a customer pays the company Paybill without STK and enters their PPPoE username as the
+          account number, Safaricom posts here. Use this panel to see whether that path is ready and
+          why a payment did or did not credit.
+        </p>
+        {c2b ? (
+          <>
+            <p className="flex items-center gap-2 text-sm text-muted-foreground">
+              <span className={`h-2 w-2 rounded-full ${c2b.ready ? "bg-success" : "bg-destructive"}`} />
+              {c2b.ready
+                ? "Ready — matched payments renew the line automatically."
+                : "Not ready yet — fix the items below, then register the C2B URLs."}
+            </p>
+            <ul className="grid gap-1.5 rounded-lg border border-border bg-surface-muted/60 px-3.5 py-3">
+              {c2b.checks.map((item) => (
+                <li key={item.key} className="grid gap-0.5">
+                  <div className="flex items-center gap-2 text-caption">
+                    {item.ok ? (
+                      <Check className="h-3.5 w-3.5 shrink-0 text-success" aria-hidden="true" />
+                    ) : (
+                      <X className="h-3.5 w-3.5 shrink-0 text-destructive" aria-hidden="true" />
+                    )}
+                    <span className={item.ok ? "text-muted-foreground" : "font-medium"}>{item.label}</span>
+                  </div>
+                  <p className="pl-5 text-[11px] leading-4 text-muted-foreground">{item.detail}</p>
+                </li>
+              ))}
+            </ul>
+            <div className="grid gap-1 text-caption text-muted-foreground">
+              <p>
+                Matched {c2b.counts.matched} · Unmatched {c2b.counts.unmatched}
+                {c2b.registration.registeredAt
+                  ? ` · Last register attempt ${c2b.registration.registeredAt}`
+                  : ""}
+              </p>
+              {c2b.confirmationUrl ? (
+                <p className="break-all font-mono text-[11px]">Confirmation: {c2b.confirmationUrl}</p>
+              ) : null}
+            </div>
+            <div className="flex flex-wrap items-center gap-3">
+              <PrimaryButton
+                type="button"
+                disabled={c2bBusy || !c2b.confirmationUrl || c2b.registration.accountType !== "paybill"}
+                onClick={registerC2b}
+              >
+                {c2bBusy ? "Registering…" : c2b.registration.ok ? "Re-register C2B URLs" : "Register C2B URLs"}
+              </PrimaryButton>
+              <SecondaryButton type="button" disabled={c2bBusy} onClick={refreshC2b}>
+                Refresh status
+              </SecondaryButton>
+            </div>
+            <div className="grid gap-2">
+              <h3 className="text-sm font-semibold">Recent manual payments</h3>
+              {c2b.recent.length === 0 ? (
+                <p className="text-sm text-muted-foreground">
+                  No C2B receipts yet. After registration, a manual Paybill payment with the PPPoE
+                  username as account number should appear here within seconds.
+                </p>
+              ) : (
+                <div className="overflow-hidden rounded-lg border border-border">
+                  <table className="w-full text-left text-sm">
+                    <thead className="border-b border-border bg-surface-muted/50 text-caption text-muted-foreground">
+                      <tr>
+                        <th className="px-3 py-2 font-medium">When</th>
+                        <th className="px-3 py-2 font-medium">Receipt</th>
+                        <th className="px-3 py-2 font-medium">Account</th>
+                        <th className="px-3 py-2 font-medium">Amount</th>
+                        <th className="px-3 py-2 font-medium">Result</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {c2b.recent.map((row) => (
+                        <tr key={row.id} className="border-b border-border last:border-0">
+                          <td className="whitespace-nowrap px-3 py-2 text-xs text-muted-foreground">{row.createdAt}</td>
+                          <td className="px-3 py-2 font-mono text-xs">{row.receipt || "—"}</td>
+                          <td className="px-3 py-2 font-mono text-xs">{row.accountReference || "—"}</td>
+                          <td className="px-3 py-2 tabular">KES {row.amount}</td>
+                          <td className="px-3 py-2">
+                            <div className={row.status === "confirmed" ? "text-success" : "text-destructive"}>
+                              {row.status === "confirmed" ? "Matched" : "Unmatched"}
+                            </div>
+                            <div className="text-[11px] leading-4 text-muted-foreground">{row.reason}</div>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </>
+        ) : (
+          <p className="text-sm text-muted-foreground">Save company Daraja settings first to enable this panel.</p>
+        )}
+      </section>
     </div>
   );
 }

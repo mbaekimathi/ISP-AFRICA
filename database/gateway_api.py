@@ -90,6 +90,53 @@ def suspense(cursor):
     return {"suspense": gateway_store.suspense_payments(cursor)}
 
 
+def c2b_health(cursor):
+    return {"c2b": gateway_store.c2b_health(cursor)}
+
+
+def register_c2b(cursor, actor_id):
+    """Push validation/confirmation URLs to Daraja for the company Paybill."""
+    import gateway_settle
+
+    health = gateway_store.c2b_health(cursor)
+    if not health.get("confirmationUrl") or not health.get("validationUrl"):
+        return None, "Set a public HTTPS callback address before registering C2B URLs."
+    if not str(health["confirmationUrl"]).startswith("https://"):
+        return None, "Daraja only accepts https callback URLs for C2B registration."
+    registration = health.get("registration") or {}
+    if registration.get("accountType") != "paybill":
+        return None, "Switch the company account type to Paybill — Till numbers cannot carry an account reference."
+    company = gateway_settle.company_gateway_settings(cursor)
+    if not company:
+        return None, "Save the company Daraja credentials first."
+    try:
+        client = gateway_settle.company_client(company)
+        result = client.c2b_register(
+            health["confirmationUrl"],
+            health["validationUrl"],
+            response_type="Completed",
+        )
+    except Exception as error:
+        detail = str(error)[:255]
+        gateway_store.mark_c2b_registered(cursor, False, detail)
+        gateway_store.audit(
+            cursor, None, "employee", actor_id, "c2b.register.failed",
+            new={"detail": detail},
+        )
+        return None, detail or "Daraja rejected the C2B registration."
+    detail = (
+        (result or {}).get("ResponseDescription")
+        or (result or {}).get("ConversationID")
+        or "C2B URLs registered"
+    )
+    gateway_store.mark_c2b_registered(cursor, True, str(detail)[:255])
+    gateway_store.audit(
+        cursor, None, "employee", actor_id, "c2b.register.ok",
+        new={"detail": str(detail)[:255]},
+    )
+    return {"c2b": gateway_store.c2b_health(cursor), "result": result}, None
+
+
 def pending_changes(cursor):
     return {"pending": gateway_store.pending_destination_changes(cursor)}
 
