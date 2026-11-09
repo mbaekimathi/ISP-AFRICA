@@ -52,7 +52,7 @@ function loginCodeInUse(loginCode: string, companyEmployees: PublicEmployee[] | 
   return companyEmployees.some((member) => member.loginCode === loginCode);
 }
 
-function validate(draft: Draft, photo: string, companyEmployees: PublicEmployee[] | null): DraftErrors {
+function validate(draft: Draft, companyEmployees: PublicEmployee[] | null): DraftErrors {
   const errors: DraftErrors = {};
   if (draft.firstName.trim().length < 2) errors.firstName = "Enter the employee's first name.";
   if (draft.lastName.trim().length < 2) errors.lastName = "Enter the employee's last name.";
@@ -163,7 +163,7 @@ export function CompanyHrPage() {
 
   async function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    const nextErrors = validate(draft, photo, employees);
+    const nextErrors = validate(draft, employees);
     setErrors(nextErrors);
     if (Object.keys(nextErrors).length > 0) return;
 
