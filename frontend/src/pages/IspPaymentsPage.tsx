@@ -605,7 +605,6 @@ export function IspPaymentsPage() {
           </fieldset>
         </div>
       </form>
-      {view === "own" ? (
         <section className="form-card mt-6 max-w-2xl">
           <h2 className="text-lg font-semibold">Manual Paybill recognition (optional)</h2>
           <p className="text-sm text-muted-foreground">
