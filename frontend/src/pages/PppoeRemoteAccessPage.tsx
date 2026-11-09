@@ -1,8 +1,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { useParams } from "react-router-dom";
-import { ArrowLeft, ChevronDown, ExternalLink, MonitorSmartphone } from "lucide-react";
+import { ArrowLeft, ExternalLink, MonitorSmartphone } from "lucide-react";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
-import { FormField, FormPicker } from "@/components/ui/FormField";
+import { FormField } from "@/components/ui/FormField";
 import { LiveLoad } from "@/components/ui/LiveLoad";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
@@ -11,11 +11,11 @@ import { clientPage } from "@/lib/accounts";
 import { useAuth } from "@/providers/AuthProvider";
 import type { Subscriber } from "@/pages/PppoeCustomerPage";
 
+const DEFAULT_USER = "admin";
+const DEFAULT_PROTOCOL = "http";
+const DEFAULT_PORT = "80";
+
 type SavedAccess = {
-  protocol: string;
-  host: string;
-  port: string;
-  username: string;
   password: string;
 };
 
@@ -23,17 +23,28 @@ function savedAccessKey(subscriberId: string) {
   return `isp.remote-access.${subscriberId}`;
 }
 
-function loadSavedAccess(subscriberId: string): SavedAccess | null {
+function loadSavedPassword(subscriberId: string): string {
   try {
     const raw = window.localStorage.getItem(savedAccessKey(subscriberId));
-    return raw ? (JSON.parse(raw) as SavedAccess) : null;
+    if (!raw) return "";
+    const saved = JSON.parse(raw) as SavedAccess & { password?: string };
+    return typeof saved.password === "string" ? saved.password : "";
   } catch {
-    return null;
+    return "";
   }
 }
 
-function cleanHost(value: string) {
-  return value.trim().replace(/^https?:\/\//i, "").split("/")[0];
+function routerHost(subscriber: Subscriber) {
+  const cpe = (subscriber.devices ?? []).find((device) => device.kind === "router");
+  return (subscriber.live.ip || subscriber.staticIp || cpe?.ip || "").trim();
+}
+
+function buildRouterUrl(host: string, password: string) {
+  const url = new URL(`${DEFAULT_PROTOCOL}://${host}`);
+  url.port = DEFAULT_PORT;
+  url.username = DEFAULT_USER;
+  if (password) url.password = password;
+  return url;
 }
 
 export function PppoeRemoteAccessPage() {
@@ -41,13 +52,7 @@ export function PppoeRemoteAccessPage() {
   const { user } = useAuth();
   const [subscriber, setSubscriber] = useState<Subscriber | null>(null);
   const [message, setMessage] = useState("");
-  const [protocol, setProtocol] = useState("http");
-  const [host, setHost] = useState("");
-  const [port, setPort] = useState("80");
-  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
-  const [remember, setRemember] = useState(true);
-  const [settingsOpen, setSettingsOpen] = useState(true);
   const [opened, setOpened] = useState(false);
   const [error, setError] = useState("");
 
@@ -56,15 +61,8 @@ export function PppoeRemoteAccessPage() {
   useEffect(() => {
     apiRequest<{ subscriber: Subscriber }>(`/api/pppoe/subscribers/${subscriberId}`)
       .then((body) => {
-        const saved = loadSavedAccess(subscriberId);
         setSubscriber(body.subscriber);
-        const cpe = (body.subscriber.devices ?? []).find((device) => device.kind === "router");
-        setHost(body.subscriber.live.ip || body.subscriber.staticIp || cpe?.ip || saved?.host || "");
-        setProtocol(saved?.protocol ?? "http");
-        setPort(saved?.port ?? "80");
-        setUsername(saved?.username ?? "");
-        setPassword(saved?.password ?? "");
-        setSettingsOpen(!saved);
+        setPassword(loadSavedPassword(subscriberId));
         setMessage("");
       })
       .catch((error: unknown) => setMessage(error instanceof Error ? error.message : "That client could not be loaded."));
@@ -74,38 +72,32 @@ export function PppoeRemoteAccessPage() {
     event.preventDefault();
     setError("");
     setOpened(false);
-    const cleaned = cleanHost(host);
-    if (!cleaned) {
-      setError("Enter the router address, for example 192.168.1.1.");
+    if (!subscriber) return;
+
+    const host = routerHost(subscriber);
+    if (!host) {
+      setError("This client has no router address yet. Wait until their session is online.");
       return;
     }
-    const portNumber = port.trim();
-    if (portNumber && (!/^\d+$/.test(portNumber) || Number(portNumber) < 1 || Number(portNumber) > 65535)) {
-      setError("Enter a port between 1 and 65535.");
+    if (!password.trim()) {
+      setError("Enter the router password.");
       return;
     }
+
     let url: URL;
     try {
-      url = new URL(`${protocol}://${cleaned}`);
+      url = buildRouterUrl(host, password);
     } catch {
-      setError("Enter the router address, for example 192.168.1.1.");
+      setError("The router address on this account is not valid.");
       return;
     }
-    if (portNumber) url.port = portNumber;
-    if (username.trim()) url.username = username.trim();
-    if (password) url.password = password;
-    if (remember) {
-      try {
-        window.localStorage.setItem(
-          savedAccessKey(subscriberId),
-          JSON.stringify({ protocol, host: cleaned, port: portNumber, username: username.trim(), password } satisfies SavedAccess),
-        );
-      } catch {
-        // Storage unavailable — connecting still works.
-      }
-    } else {
-      window.localStorage.removeItem(savedAccessKey(subscriberId));
+
+    try {
+      window.localStorage.setItem(savedAccessKey(subscriberId), JSON.stringify({ password } satisfies SavedAccess));
+    } catch {
+      // Storage unavailable — connecting still works.
     }
+
     const tab = window.open(url.href, "_blank", "noopener,noreferrer");
     if (tab) {
       setOpened(true);
@@ -123,9 +115,8 @@ export function PppoeRemoteAccessPage() {
 
   const home = (path: string) => (user ? clientPage(user, path) : path);
   const online = subscriber.connection === "online";
-  const cleaned = cleanHost(host);
-  const defaultPort = protocol === "https" ? "443" : "80";
-  const target = cleaned ? `${protocol}://${cleaned}${port.trim() && port.trim() !== defaultPort ? `:${port.trim()}` : ""}` : "";
+  const host = routerHost(subscriber);
+  const target = host ? `${DEFAULT_PROTOCOL}://${host}` : "";
 
   return (
     <div className="page-shell py-8">
@@ -153,104 +144,43 @@ export function PppoeRemoteAccessPage() {
           <span className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
             <MonitorSmartphone className="h-4 w-4" />
           </span>
-          <h2 className="text-sm font-semibold">Quick connect</h2>
+          <h2 className="text-sm font-semibold">Open router</h2>
         </div>
         <p className="mt-3 text-sm text-muted-foreground">
-          Opens the client's router page in a new tab, already signed in. Sign-in details are remembered on this
-          device so the next visit is a single click.
+          Opens this client's router page in a new tab. The address is taken from their session — enter the router password to sign in.
         </p>
         {!online ? (
           <p className="notice mt-3">The client is offline right now — the router page may not answer until their session is up.</p>
         ) : null}
+        {!host ? (
+          <p className="notice mt-3">No router address is available for this client yet.</p>
+        ) : (
+          <p className="mt-3 text-sm text-muted-foreground">
+            Target: <span className="font-medium text-foreground">{target}</span> · user <span className="font-medium text-foreground">{DEFAULT_USER}</span>
+          </p>
+        )}
         <form className="mt-4 grid gap-3" onSubmit={connect}>
-          <FormField
-            id="remote-host"
-            label="Router address"
-            hint={subscriber.live.ip ? `Online now at ${subscriber.live.ip}` : "The router's web address, for example 192.168.1.1."}
-          >
+          <FormField id="remote-password" label="Router password" hint="Remembered on this device. Only sent to the router page itself.">
             <input
-              id="remote-host"
+              id="remote-password"
+              type="password"
               className="field"
-              value={host}
-              onChange={(event) => setHost(event.target.value)}
-              placeholder="192.168.1.1"
-              autoComplete="off"
+              value={password}
+              onChange={(event) => setPassword(event.target.value)}
+              autoComplete="new-password"
+              autoFocus
             />
           </FormField>
-          <details
-            className="group rounded-xl border border-border"
-            open={settingsOpen}
-            onToggle={(event) => setSettingsOpen(event.currentTarget.open)}
-          >
-            <summary className="flex cursor-pointer list-none items-center justify-between px-4 py-3 text-sm font-semibold hover:bg-surface-muted [&::-webkit-details-marker]:hidden">
-              <span>Connection settings{username ? ` · ${username}` : ""}</span>
-              <ChevronDown className="h-4 w-4 text-muted-foreground transition-transform group-open:rotate-180" aria-hidden="true" />
-            </summary>
-            <div className="grid gap-3 border-t border-border px-4 pb-4 pt-3">
-              <div className="grid gap-3 sm:grid-cols-2">
-                <FormField id="remote-username" label="User name">
-                  <input
-                    id="remote-username"
-                    className="field"
-                    value={username}
-                    onChange={(event) => setUsername(event.target.value)}
-                    autoComplete="off"
-                  />
-                </FormField>
-                <FormField id="remote-password" label="Password" hint="Only sent to the router page itself.">
-                  <input
-                    id="remote-password"
-                    type="password"
-                    className="field"
-                    value={password}
-                    onChange={(event) => setPassword(event.target.value)}
-                    autoComplete="new-password"
-                  />
-                </FormField>
-              </div>
-              <label className="flex items-center gap-2 text-sm text-muted-foreground">
-                <input type="checkbox" checked={remember} onChange={(event) => setRemember(event.target.checked)} />
-                Remember sign-in on this device
-              </label>
-              <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_7rem]">
-                <FormPicker
-                  label="Protocol"
-                  options={[
-                    { id: "http", label: "http" },
-                    { id: "https", label: "https" },
-                  ]}
-                  value={protocol}
-                  onChange={(next) => {
-                    setProtocol(next);
-                    setPort((current) => (next === "https" && current === "80" ? "443" : next === "http" && current === "443" ? "80" : current));
-                  }}
-                />
-                <FormField id="remote-port" label="Port">
-                  <input
-                    id="remote-port"
-                    className="field"
-                    value={port}
-                    onChange={(event) => setPort(event.target.value)}
-                    inputMode="numeric"
-                    autoComplete="off"
-                  />
-                </FormField>
-              </div>
-            </div>
-          </details>
           {error ? (
             <p className="text-sm font-medium text-destructive" role="alert">
               {error}
             </p>
           ) : null}
           <div>
-            <PrimaryButton type="submit" disabled={!cleaned}>
+            <PrimaryButton type="submit" disabled={!host || !password.trim()}>
               <ExternalLink className="h-4 w-4" aria-hidden="true" />
               Open router page
             </PrimaryButton>
-            <p className="mt-2 text-caption text-muted-foreground">
-              {target ? `Opens ${target} in a new tab.` : "Enter the router address to connect."}
-            </p>
           </div>
         </form>
       </section>
