@@ -1,3 +1,16 @@
+import {
+  Building2,
+  Cable,
+  Check,
+  Globe2,
+  Loader2,
+  Network,
+  PlugZap,
+  RefreshCw,
+  Router,
+  Users,
+  Wifi,
+} from "lucide-react";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
@@ -6,6 +19,7 @@ import { FormField } from "@/components/ui/FormField";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { buildMikrotikSetupScript, buildRecoveryScripts, ensureCustomerServices, isPhysicalPort, loadPortUses, portUseLabels, type PortUse, type SetupWifi } from "@/lib/routerScripts";
 import { backupName } from "@/lib/winboxScript";
 import { WanUplinkPanel } from "@/components/mikrotik/WanUplinkPanel";
@@ -34,14 +48,14 @@ type LivePort = {
   slave?: boolean;
 };
 
-function useRouterRecord(deviceId: string) {
+function useRouterRecord(deviceId: string, liveMode: false | "ports" = false) {
   const [device, setDevice] = useState<RouterRecord | null>(null);
   const [interfaces, setInterfaces] = useState<string[]>([]);
   const [liveInterfaces, setLiveInterfaces] = useState<LivePort[]>([]);
   const [liveMessage, setLiveMessage] = useState("");
   const [sample, setSample] = useState(false);
-  const [reading, setReading] = useState(true);
-  const [loaded, setLoaded] = useState(false);
+  const [reading, setReading] = useState(Boolean(liveMode));
+  const [loaded, setLoaded] = useState(!liveMode);
   const [error, setError] = useState("");
   const [reloadToken, setReloadToken] = useState(0);
 
@@ -49,7 +63,7 @@ function useRouterRecord(deviceId: string) {
     if (!deviceId) return;
     let stopped = false;
     const controller = new AbortController();
-    setReading(true);
+    setError("");
     apiRequest<{ device: RouterRecord }>(`/api/mikrotiks/${deviceId}`, { signal: controller.signal })
       .then((body) => {
         if (!stopped) setDevice(body.device);
@@ -58,7 +72,17 @@ function useRouterRecord(deviceId: string) {
         if (stopped || (cause instanceof DOMException && cause.name === "AbortError")) return;
         setError(cause instanceof Error ? cause.message : "That router could not be opened.");
       });
-    apiRequest<{ live: { message?: string; sample?: boolean; interfaces?: LivePort[] } }>(`/api/mikrotiks/${deviceId}/live`, { signal: controller.signal })
+    if (!liveMode) {
+      setReading(false);
+      setLoaded(true);
+      return () => {
+        stopped = true;
+        controller.abort();
+      };
+    }
+    setReading(true);
+    const livePath = liveMode === "ports" ? `/api/mikrotiks/${deviceId}/live?view=ports` : `/api/mikrotiks/${deviceId}/live`;
+    apiRequest<{ live: { message?: string; sample?: boolean; interfaces?: LivePort[] } }>(livePath, { signal: controller.signal })
       .then((body) => {
         if (stopped) return;
         const found = (body.live.interfaces ?? []).filter((item) => item.name);
@@ -84,7 +108,7 @@ function useRouterRecord(deviceId: string) {
       stopped = true;
       controller.abort();
     };
-  }, [deviceId, reloadToken]);
+  }, [deviceId, liveMode, reloadToken]);
 
   return { device, interfaces, liveInterfaces, liveMessage, sample, reading, loaded, error, reload: () => setReloadToken((value) => value + 1) };
 }
@@ -139,6 +163,93 @@ function purposeText(uses: PortUse[]) {
     .join(", ");
 }
 
+type PortRoleKind = "wan" | "customer" | "dhcp";
+
+function roleOf(uses: PortUse[]): PortRoleKind | null {
+  if (uses.includes("wan")) return "wan";
+  if (uses.some((use) => use === "hotspot" || use === "pppoe" || use === "static")) return "customer";
+  if (uses.includes("dhcp") || uses.includes("lan")) return "dhcp";
+  return null;
+}
+
+const portRoles: {
+  value: PortRoleKind | "customer";
+  label: string;
+  hint: string;
+  icon: typeof Globe2;
+  selected: string;
+  iconWrap: string;
+}[] = [
+  {
+    value: "wan",
+    label: "Uplink",
+    hint: "Internet from the provider",
+    icon: Globe2,
+    selected: "border-info bg-info-soft/50 ring-2 ring-info/25 shadow-sm",
+    iconWrap: "bg-info text-info-foreground",
+  },
+  {
+    value: "customer",
+    label: "Customer",
+    hint: "Hotspot and PPPoE stay on; static is optional",
+    icon: Users,
+    selected: "border-primary bg-primary/10 ring-2 ring-primary/25 shadow-sm",
+    iconWrap: "bg-primary text-primary-foreground",
+  },
+  {
+    value: "dhcp",
+    label: "Local network",
+    hint: "DHCP for office devices",
+    icon: Building2,
+    selected: "border-success bg-success-soft/60 ring-2 ring-success/25 shadow-sm",
+    iconWrap: "bg-success text-success-foreground",
+  },
+];
+
+function roleAccent(role: PortRoleKind | null) {
+  if (role === "wan") return "from-info via-info/70 to-accent";
+  if (role === "customer") return "from-primary via-primary/75 to-brand-400";
+  if (role === "dhcp") return "from-success via-success/70 to-accent";
+  return "from-border via-muted to-border";
+}
+
+function roleIconWrap(role: PortRoleKind | null) {
+  if (role === "wan") return "bg-info-soft text-info";
+  if (role === "customer") return "bg-primary/15 text-primary";
+  if (role === "dhcp") return "bg-success-soft text-success";
+  return "bg-surface-muted text-muted-foreground";
+}
+
+function PortHeroStat({
+  label,
+  value,
+  icon,
+  tone = "default",
+}: {
+  label: string;
+  value: string;
+  icon: ReactNode;
+  tone?: "default" | "ok" | "down";
+}) {
+  const wrap =
+    tone === "ok"
+      ? "bg-success/20 text-success-foreground"
+      : tone === "down"
+        ? "bg-destructive/20 text-destructive-foreground"
+        : "bg-primary-foreground/15";
+  return (
+    <div className="flex items-center gap-3">
+      <span className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-xl", wrap)} aria-hidden="true">
+        {icon}
+      </span>
+      <div className="min-w-0">
+        <p className="truncate text-xl font-semibold tracking-tight tabular-nums">{value}</p>
+        <p className="text-xs text-primary-foreground/70">{label}</p>
+      </div>
+    </div>
+  );
+}
+
 function ScriptBox({ script, reason }: { script: string; reason: string }) {
   const [copied, setCopied] = useState(false);
   const [copyFailed, setCopyFailed] = useState(false);
@@ -183,7 +294,7 @@ function portLink(port: LivePort) {
 
 export function MikrotikPortPage() {
   const { deviceId = "" } = useParams();
-  const { device, error, liveInterfaces, liveMessage, sample, reading, loaded, reload } = useRouterRecord(deviceId);
+  const { device, error, liveInterfaces, liveMessage, sample, reading, loaded, reload } = useRouterRecord(deviceId, "ports");
   const [choices, setChoices] = useState<Record<string, PortChoice>>({});
   const [savedPlan, setSavedPlan] = useState<Record<string, PortUse[]>>({});
   const [touched, setTouched] = useState<Record<string, boolean>>({});
@@ -192,6 +303,8 @@ export function MikrotikPortPage() {
   const [accessError, setAccessError] = useState("");
   const [applyNote, setApplyNote] = useState("");
   const [applying, setApplying] = useState(false);
+  const [wanOpen, setWanOpen] = useState(false);
+  usePageMeta("Port setup — ISP CENTRIC", "Each port is the internet uplink, a customer connection, or the local network.");
   const ports = useMemo(
     () => liveInterfaces.filter(isPhysicalPort).sort((left, right) => left.name.localeCompare(right.name, undefined, { numeric: true })),
     [liveInterfaces],
@@ -227,17 +340,22 @@ export function MikrotikPortPage() {
       iface: port.name,
       uses: ensureCustomerServices(choices[port.name]?.uses ?? []),
     }));
+    const key = `${deviceId}|${recorded.map((item) => `${item.iface}:${item.uses.join("+")}`).join("|")}`;
+    // Seed the baseline from the saved plan — do not push until the user changes a role.
+    if (!Object.keys(touched).length) {
+      appliedKey.current = key;
+      return;
+    }
     if (!recorded.some((item) => item.uses.length > 0)) {
       setApplying(false);
       setApplyNote("Choose what at least one port will do.");
       return;
     }
-    const key = `${deviceId}|${recorded.map((item) => `${item.iface}:${item.uses.join("+")}`).join("|")}`;
     if (key === appliedKey.current) return;
     let stopped = false;
     const timer = window.setTimeout(() => {
       setApplying(true);
-      setApplyNote("Updating the router…");
+      setApplyNote("Saving your choice…");
       apiRequest<{ applied: boolean; message: string; portPlan?: Record<string, PortUse[]> }>(`/api/mikrotiks/${deviceId}/ports`, {
         method: "POST",
         body: JSON.stringify({ ports: recorded }),
@@ -246,7 +364,7 @@ export function MikrotikPortPage() {
           if (stopped) return;
           appliedKey.current = key;
           if (result.portPlan) setSavedPlan(result.portPlan);
-          setApplyNote(result.applied ? "Updated on the router." : result.message);
+          setApplyNote(result.applied ? "Saved on the router." : result.message);
         })
         .catch((cause: unknown) => {
           if (!stopped) setApplyNote(cause instanceof Error ? cause.message : "That choice could not be updated.");
@@ -254,12 +372,12 @@ export function MikrotikPortPage() {
         .finally(() => {
           if (!stopped) setApplying(false);
         });
-    }, 400);
+    }, 280);
     return () => {
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [canPush, selection, deviceId, ports, choices]);
+  }, [canPush, selection, deviceId, ports, choices, touched]);
 
   const customerOrder = ["hotspot", "pppoe", "static"] as const;
 
@@ -302,17 +420,115 @@ export function MikrotikPortPage() {
     }
   }
 
+  const upPorts = ports.filter((port) => !port.disabled && port.running);
+  const downPorts = ports.filter((port) => port.disabled || !port.running);
+  const assignedPorts = ports.filter((port) => (choices[port.name]?.uses ?? []).length > 0);
+  const title = device?.name ? `${device.name} ports` : "Port setup";
+  const applyOk = /saved on the router|updated on the router/i.test(applyNote);
+  const showPortSkeleton = !loaded || (reading && ports.length === 0);
+
   return (
-    <SetupFrame wide title="Port setup" description="Each port is the internet uplink, a customer connection, or the local network.">
-      {error ? <p className="mb-4 notice" role="alert">{error}</p> : null}
+    <div className="page-shell py-8">
+      <section className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-primary via-primary/85 to-accent text-primary-foreground shadow-card">
+        <div className="network-grid absolute inset-0 opacity-30" aria-hidden="true" />
+        <div className="pointer-events-none absolute -right-10 top-6 h-40 w-40 rounded-full bg-primary-foreground/10 blur-2xl" aria-hidden="true" />
+        <div className="pointer-events-none absolute -left-8 bottom-0 h-32 w-32 rounded-full bg-accent/40 blur-2xl" aria-hidden="true" />
+        <div className="relative flex flex-wrap items-center justify-between gap-4 px-5 pb-5 pt-6 sm:px-7">
+          <div className="min-w-0">
+            <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-[0.14em] text-primary-foreground/70">
+              <Cable className="h-3.5 w-3.5" aria-hidden="true" />
+              Port setup
+            </p>
+            <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight sm:text-3xl">{title}</h1>
+            <p className="mt-1 max-w-xl text-sm text-primary-foreground/75">
+              {device?.site
+                ? `${device.site} — assign each port as uplink, customer, or local network.`
+                : "Assign each port as the internet uplink, a customer connection, or the local network."}
+            </p>
+          </div>
+          <div className="flex flex-wrap items-center gap-2">
+            {applying ? (
+              <span className="inline-flex items-center gap-2 rounded-full bg-primary-foreground/15 px-3.5 py-2 text-sm font-semibold backdrop-blur-sm">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                Updating…
+              </span>
+            ) : applyOk ? (
+              <span className="inline-flex items-center gap-2 rounded-full bg-success/25 px-3.5 py-2 text-sm font-semibold backdrop-blur-sm">
+                <Check className="h-3.5 w-3.5" aria-hidden="true" />
+                On router
+              </span>
+            ) : reading || !loaded ? (
+              <span className="inline-flex items-center gap-2 rounded-full bg-primary-foreground/15 px-3.5 py-2 text-sm font-semibold backdrop-blur-sm">
+                <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" />
+                Reading ports…
+              </span>
+            ) : (
+              <span className="inline-flex items-center gap-2 rounded-full bg-primary-foreground/15 px-3.5 py-2 text-sm font-semibold backdrop-blur-sm">
+                <span className="live-dot" aria-hidden="true" />
+                {device?.apiReady ? "Ready" : "Waiting for API"}
+              </span>
+            )}
+            <button
+              type="button"
+              className="inline-flex min-h-10 items-center justify-center gap-2 rounded-lg border border-primary-foreground/25 bg-primary-foreground/10 px-4 text-sm font-semibold text-primary-foreground backdrop-blur-sm transition hover:bg-primary-foreground/20 disabled:pointer-events-none disabled:opacity-60"
+              disabled={reading || !device?.apiReady}
+              onClick={() => {
+                setTouched({});
+                setApplyNote("");
+                setApplying(false);
+                reload();
+              }}
+            >
+              <RefreshCw className={cn("h-4 w-4", reading && "animate-spin")} aria-hidden="true" />
+              {reading ? "Reading…" : "Detect again"}
+            </button>
+          </div>
+        </div>
+        <div className="relative grid grid-cols-2 gap-x-6 gap-y-4 border-t border-primary-foreground/15 px-5 py-4 sm:grid-cols-4 sm:px-7">
+          <PortHeroStat label="Ports found" value={loaded ? String(ports.length) : "—"} icon={<Network className="h-4 w-4" />} />
+          <PortHeroStat
+            label="Link up"
+            value={loaded ? String(upPorts.length) : "—"}
+            icon={<PlugZap className="h-4 w-4" />}
+            tone="ok"
+          />
+          <PortHeroStat
+            label="Link down"
+            value={loaded ? String(downPorts.length) : "—"}
+            icon={<Cable className="h-4 w-4" />}
+            tone="down"
+          />
+          <PortHeroStat
+            label="Roles set"
+            value={loaded ? String(assignedPorts.length) : "—"}
+            icon={<Router className="h-4 w-4" />}
+          />
+        </div>
+      </section>
+
+      {error ? (
+        <p className="mt-4 notice" role="alert">
+          {error}
+        </p>
+      ) : null}
+
       {device && !device.apiReady ? (
         <form
-          className="mb-4 max-w-md rounded-xl border border-border bg-surface p-5"
+          className="mt-6 max-w-md rounded-2xl border border-border bg-surface p-5 shadow-sm"
           onSubmit={(event) => {
             event.preventDefault();
             void saveAccess();
           }}
         >
+          <div className="mb-4 flex items-center gap-3">
+            <span className="flex h-10 w-10 items-center justify-center rounded-xl bg-primary/10 text-primary" aria-hidden="true">
+              <Router className="h-5 w-5" />
+            </span>
+            <div>
+              <p className="font-semibold">Connect the router API</p>
+              <p className="text-sm text-muted-foreground">Save the isp-centric password to read and update ports.</p>
+            </div>
+          </div>
           <FormField
             id="port-api-password"
             label="API password"
@@ -332,120 +548,245 @@ export function MikrotikPortPage() {
           </div>
         </form>
       ) : null}
-      <div className="rounded-xl border border-border bg-surface p-5">
-        <div className="flex flex-wrap items-center justify-between gap-3">
+
+      <section className="mt-6 overflow-hidden rounded-2xl border border-border bg-surface shadow-sm">
+        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-border px-5 py-4">
           <div>
-            <h2 className="font-semibold">Detected ports</h2>
+            <h2 className="flex items-center gap-2 font-semibold">
+              <span className="live-dot" aria-hidden="true" />
+              Detected ports
+            </h2>
             <p className="mt-1 text-sm text-muted-foreground">
-              Choose what each port does. Addresses and services are filled in and sent to the router.
+              Tap a role to assign it. Changes save automatically — nothing is pushed until you choose.
             </p>
           </div>
-          <SecondaryButton type="button" disabled={reading || !device?.apiReady} onClick={reload}>
-            {reading ? "Reading ports…" : "Detect again"}
-          </SecondaryButton>
+          {liveMessage ? <p className="max-w-sm text-sm text-muted-foreground">{liveMessage}</p> : null}
         </div>
-        {liveMessage ? <p className="mt-3 text-sm text-muted-foreground">{liveMessage}</p> : null}
-        {!loaded || (reading && ports.length === 0) ? (
-          <p className="mt-4 text-sm text-muted-foreground">Reading ports from this router.</p>
+
+        {showPortSkeleton ? (
+          <div className="grid gap-4 p-4 sm:p-5 lg:grid-cols-2" aria-busy="true" aria-live="polite">
+            <p className="sr-only">Reading ports from this router…</p>
+            {[0, 1, 2, 3].map((slot) => (
+              <div key={slot} className="overflow-hidden rounded-2xl border border-border bg-surface-muted/30 p-4">
+                <div className="flex items-center gap-3">
+                  <div className="skeleton h-12 w-12 rounded-2xl" />
+                  <div className="min-w-0 flex-1 space-y-2">
+                    <div className="skeleton h-4 w-24 rounded" />
+                    <div className="skeleton h-3 w-40 rounded" />
+                  </div>
+                </div>
+                <div className="mt-4 space-y-2">
+                  <div className="skeleton h-11 w-full rounded-xl" />
+                  <div className="skeleton h-11 w-full rounded-xl" />
+                  <div className="skeleton h-11 w-full rounded-xl" />
+                </div>
+              </div>
+            ))}
+            <p className="col-span-full flex items-center gap-2 text-sm text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin text-primary" aria-hidden="true" />
+              Reading ports from the router…
+            </p>
+          </div>
         ) : ports.length === 0 ? (
-          <p className="mt-4 text-sm text-muted-foreground">No ethernet or SFP ports were returned.</p>
+          <p className="px-5 py-10 text-sm text-muted-foreground">No ethernet or SFP ports were returned.</p>
         ) : (
           <>
-            <div className="mt-4 grid gap-2 sm:grid-cols-2">
-              <div className="rounded-xl border border-border px-4 py-3">
-                <p className="text-xs font-medium text-muted-foreground">Up</p>
-                <p className="mt-1 text-sm">{ports.filter((port) => !port.disabled && port.running).map((port) => port.name).join(", ") || "None"}</p>
+            <div className="grid gap-3 border-b border-border bg-surface-muted/40 px-5 py-4 sm:grid-cols-2">
+              <div className="relative overflow-hidden rounded-xl border border-success-border/50 bg-success-soft/40 px-4 py-3">
+                {upPorts.length > 0 ? <div className="port-link-flow absolute inset-x-0 bottom-0 h-1" aria-hidden="true" /> : null}
+                <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-success">
+                  <PlugZap className="h-3.5 w-3.5" aria-hidden="true" />
+                  Up
+                </p>
+                <p className="mt-1 text-sm font-medium">{upPorts.map((port) => port.name).join(", ") || "None"}</p>
               </div>
-              <div className="rounded-xl border border-border px-4 py-3">
-                <p className="text-xs font-medium text-muted-foreground">Down</p>
-                <p className="mt-1 text-sm">{ports.filter((port) => port.disabled || !port.running).map((port) => port.name).join(", ") || "None"}</p>
+              <div className="rounded-xl border border-destructive-border/40 bg-destructive-soft/35 px-4 py-3">
+                <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-destructive">
+                  <Cable className="h-3.5 w-3.5" aria-hidden="true" />
+                  Down
+                </p>
+                <p className="mt-1 text-sm font-medium">{downPorts.map((port) => port.name).join(", ") || "None"}</p>
               </div>
             </div>
-            <ul className="mt-4 grid gap-3">
-            {ports.map((port) => {
-              const choice = choices[port.name] ?? choiceFor(port);
-              const link = portLink(port);
-              const remembered = resolved.saved[port.name];
-              const purpose = purposeText(choice.uses);
-              return (
-                <li key={port.name} className="rounded-xl border border-border px-4 py-4">
-                  <div className="flex flex-wrap items-center justify-between gap-2">
-                    <div>
-                      <p className="font-medium">{port.name}</p>
-                      <p className="mt-1 text-sm">{purpose || "Not set"}</p>
-                      <p className="mt-0.5 text-xs text-muted-foreground">
-                        {remembered && purpose ? "Saved use" : "Not saved yet"}
-                        {port.slave ? " · In a bridge" : ""}
-                      </p>
+
+            <ul className="grid gap-4 p-4 sm:p-5 lg:grid-cols-2">
+              {ports.map((port, index) => {
+                const choice = choices[port.name] ?? choiceFor(port);
+                const link = portLink(port);
+                const remembered = resolved.saved[port.name];
+                const purpose = purposeText(choice.uses);
+                const activeRole = roleOf(choice.uses);
+                const RoleGlyph = activeRole === "wan" ? Globe2 : activeRole === "customer" ? Users : activeRole === "dhcp" ? Building2 : Cable;
+                return (
+                  <li
+                    key={port.name}
+                    className="port-rise relative overflow-hidden rounded-2xl border border-border bg-gradient-to-br from-surface to-surface-muted/40 shadow-sm transition duration-300 hover:-translate-y-0.5 hover:shadow-md"
+                    style={{ animationDelay: `${Math.min(index, 10) * 55}ms` }}
+                  >
+                    <div className={cn("absolute inset-y-0 left-0 w-1.5 bg-gradient-to-b", roleAccent(activeRole))} aria-hidden="true" />
+                    {link === "Up" ? <div className="port-link-flow absolute inset-x-0 top-0 h-0.5" aria-hidden="true" /> : null}
+                    <div className="flex flex-wrap items-start justify-between gap-3 px-4 pb-3 pt-4 sm:px-5">
+                      <div className="flex min-w-0 items-start gap-3">
+                        <span
+                          className={cn(
+                            "relative flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl transition",
+                            roleIconWrap(activeRole),
+                          )}
+                          aria-hidden="true"
+                        >
+                          <RoleGlyph className="h-5 w-5" />
+                          {link === "Up" ? (
+                            <span className="absolute -bottom-0.5 -right-0.5 flex h-3.5 w-3.5 items-center justify-center rounded-full bg-surface">
+                              <span className="live-dot" />
+                            </span>
+                          ) : null}
+                        </span>
+                        <div className="min-w-0">
+                          <p className="font-semibold tracking-tight">{port.name}</p>
+                          <p className="mt-0.5 text-sm text-foreground/90">{purpose || "Not set"}</p>
+                          <p className="mt-0.5 text-xs text-muted-foreground">
+                            {remembered && purpose ? "Saved use" : "Not saved yet"}
+                            {port.slave ? " · In a bridge" : ""}
+                            {port.type ? ` · ${port.type}` : ""}
+                          </p>
+                        </div>
+                      </div>
+                      <StatusBadge tone={link === "Up" ? "active" : link === "Down" ? "due" : "paused"}>{link}</StatusBadge>
                     </div>
-                    <StatusBadge tone={link === "Up" ? "active" : link === "Down" ? "due" : "paused"}>{link}</StatusBadge>
-                  </div>
-                  <fieldset className="mt-3" disabled={applying}>
-                    <legend className="text-xs font-medium text-muted-foreground">What this port does</legend>
-                    <div className="mt-2 grid gap-2">
-                      {(
-                        [
-                          ["wan", "Uplink", "Internet"],
-                          ["customer", "Customer", "Hotspot and PPPoE stay on together; static is optional"],
-                          ["dhcp", "Local network", "DHCP for office devices"],
-                        ] as const
-                      ).map(([value, label, hint]) => {
-                        const customerUse = choice.uses.find((use) => use === "hotspot" || use === "pppoe" || use === "static");
-                        const selected = value === "customer" ? Boolean(customerUse) : choice.uses.includes(value);
-                        return (
-                          <div key={value} className="rounded-lg border border-border px-3 py-2">
-                            <label className="flex min-h-11 items-center gap-2 text-sm">
-                              <input
-                                type="radio"
-                                name={`port-role-${port.name}`}
-                                checked={selected}
-                                onChange={() => chooseRole(port.name, value === "customer" ? "customer" : value)}
-                              />
-                              <span>
-                                <span className="font-medium">{label}</span>
-                                <span className="mt-0.5 block text-xs text-muted-foreground">{hint}</span>
-                              </span>
-                            </label>
-                            {value === "customer" && selected ? (
-                              <div className="mb-2 ml-6 flex flex-wrap gap-2">
-                                {customerOrder.map((use) => {
-                                  const locked = use === "hotspot" || use === "pppoe";
-                                  return (
-                                    <label key={use} className="flex min-h-11 items-center gap-2 rounded-lg border border-border px-3 text-sm">
-                                      <input
-                                        type="checkbox"
-                                        checked={choice.uses.includes(use) || locked}
-                                        disabled={locked}
-                                        onChange={(event) => toggleCustomer(port.name, use, event.target.checked)}
-                                      />
-                                      {portUseLabels[use]}
-                                      {locked ? <span className="text-xs text-muted-foreground">always on</span> : null}
-                                    </label>
-                                  );
-                                })}
-                              </div>
-                            ) : null}
-                          </div>
-                        );
-                      })}
-                    </div>
-                  </fieldset>
-                </li>
-              );
-            })}
+
+                    <fieldset className="border-t border-border/80 px-4 py-4 sm:px-5" disabled={applying}>
+                      <legend className="sr-only">What {port.name} does</legend>
+                      <div className="grid gap-2">
+                        {portRoles.map((role) => {
+                          const customerUse = choice.uses.find((use) => use === "hotspot" || use === "pppoe" || use === "static");
+                          const selected = role.value === "customer" ? Boolean(customerUse) : choice.uses.includes(role.value);
+                          const Icon = role.icon;
+                          return (
+                            <div key={role.value}>
+                              <label
+                                className={cn(
+                                  "flex min-h-12 cursor-pointer items-center gap-3 rounded-xl border px-3 py-2.5 text-sm transition duration-200",
+                                  selected ? role.selected : "border-border bg-surface hover:border-primary/30 hover:bg-primary/5",
+                                )}
+                              >
+                                <input
+                                  type="radio"
+                                  className="sr-only"
+                                  name={`port-role-${port.name}`}
+                                  checked={selected}
+                                  onChange={() => chooseRole(port.name, role.value === "customer" ? "customer" : role.value)}
+                                />
+                                <span
+                                  className={cn(
+                                    "flex h-9 w-9 shrink-0 items-center justify-center rounded-xl transition",
+                                    selected ? role.iconWrap : "bg-surface-muted text-muted-foreground",
+                                  )}
+                                  aria-hidden="true"
+                                >
+                                  <Icon className="h-4 w-4" />
+                                </span>
+                                <span className="min-w-0 flex-1">
+                                  <span className="font-medium">{role.label}</span>
+                                  <span className="mt-0.5 block text-xs text-muted-foreground">{role.hint}</span>
+                                </span>
+                                {selected ? (
+                                  <span className="flex h-6 w-6 items-center justify-center rounded-full bg-surface text-primary shadow-sm" aria-hidden="true">
+                                    <Check className="h-3.5 w-3.5" />
+                                  </span>
+                                ) : null}
+                              </label>
+                              {role.value === "customer" && selected ? (
+                                <div className="mt-2 ml-1 flex flex-wrap gap-2">
+                                  {customerOrder.map((use) => {
+                                    const locked = use === "hotspot" || use === "pppoe";
+                                    const ServiceIcon = use === "hotspot" ? Wifi : use === "pppoe" ? PlugZap : Network;
+                                    return (
+                                      <label
+                                        key={use}
+                                        className={cn(
+                                          "flex min-h-10 items-center gap-2 rounded-xl border px-3 text-sm transition",
+                                          choice.uses.includes(use) || locked
+                                            ? "border-primary/40 bg-primary/5 text-foreground"
+                                            : "border-border bg-surface text-muted-foreground",
+                                          locked ? "cursor-default opacity-90" : "cursor-pointer hover:border-primary/30",
+                                        )}
+                                      >
+                                        <input
+                                          type="checkbox"
+                                          className="sr-only"
+                                          checked={choice.uses.includes(use) || locked}
+                                          disabled={locked}
+                                          onChange={(event) => toggleCustomer(port.name, use, event.target.checked)}
+                                        />
+                                        <ServiceIcon className="h-3.5 w-3.5 text-primary" aria-hidden="true" />
+                                        {portUseLabels[use]}
+                                        {locked ? <span className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground">on</span> : null}
+                                      </label>
+                                    );
+                                  })}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </fieldset>
+                  </li>
+                );
+              })}
             </ul>
           </>
         )}
-        {applyNote ? <p className="mt-4 text-sm text-muted-foreground">{applying ? "Updating the router…" : applyNote}</p> : null}
-        {applyNote && !applying ? <RouterWriteNotice note={applyNote} /> : null}
+
+        {applyNote ? (
+          <div className="flex items-center gap-2 border-t border-border px-5 py-3 text-sm text-muted-foreground">
+            {applying ? (
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" aria-hidden="true" />
+            ) : applyOk ? (
+              <Check className="h-3.5 w-3.5 text-success" aria-hidden="true" />
+            ) : (
+              <Cable className="h-3.5 w-3.5 text-warning" aria-hidden="true" />
+            )}
+            {applying ? "Updating the router…" : applyNote}
+          </div>
+        ) : null}
+        {applyNote && !applying ? (
+          <div className="border-t border-border px-5 py-4">
+            <RouterWriteNotice note={applyNote} />
+          </div>
+        ) : null}
+      </section>
+
+      <div className="mt-6">
+        {wanOpen ? (
+          <WanUplinkPanel
+            deviceId={deviceId}
+            version={device?.routerosVersion || ""}
+            ports={ports.map((port) => ({ name: port.name, running: port.running, disabled: port.disabled }))}
+            sample={sample}
+            deferReachability
+          />
+        ) : (
+          <button
+            type="button"
+            className="flex w-full items-center justify-between gap-3 rounded-2xl border border-border bg-surface px-5 py-4 text-left shadow-sm transition hover:border-primary/30 hover:bg-primary/5"
+            onClick={() => setWanOpen(true)}
+            disabled={!loaded || !device?.apiReady}
+          >
+            <span>
+              <span className="flex items-center gap-2 font-semibold">
+                <Globe2 className="h-4 w-4 text-info" aria-hidden="true" />
+                WAN uplink settings
+              </span>
+              <span className="mt-1 block text-sm text-muted-foreground">
+                Open when you need provider details, failover, or to switch the active uplink.
+              </span>
+            </span>
+            <span className="text-sm font-semibold text-primary">Open</span>
+          </button>
+        )}
       </div>
-      <WanUplinkPanel
-        deviceId={deviceId}
-        version={device?.routerosVersion || ""}
-        ports={ports.map((port) => ({ name: port.name, running: port.running, disabled: port.disabled }))}
-        sample={sample}
-      />
-    </SetupFrame>
+    </div>
   );
 }
 

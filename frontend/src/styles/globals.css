@@ -2150,6 +2150,43 @@
   }
 }
 
+/* Port setup: staggered card entrance + link activity */
+@keyframes port-rise {
+  from {
+    opacity: 0;
+    transform: translateY(14px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes port-link-flow {
+  0% {
+    background-position: 0% 50%;
+  }
+  100% {
+    background-position: 200% 50%;
+  }
+}
+
+.port-rise {
+  animation: port-rise 0.48s var(--ease-out) both;
+}
+
+.port-link-flow {
+  background-image: linear-gradient(
+    90deg,
+    rgb(var(--success-rgb) / 0.15),
+    rgb(var(--success-rgb) / 0.55),
+    rgb(var(--accent-rgb) / 0.45),
+    rgb(var(--success-rgb) / 0.15)
+  );
+  background-size: 200% 100%;
+  animation: port-link-flow 2.4s linear infinite;
+}
+
 @media (max-width: 767px) {
   .network-mesh {
     display: none;
@@ -2192,6 +2229,11 @@
   }
 
   .live-meter > span {
+    animation: none !important;
+  }
+
+  .port-rise,
+  .port-link-flow {
     animation: none !important;
   }
 

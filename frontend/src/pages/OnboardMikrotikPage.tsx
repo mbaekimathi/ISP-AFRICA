@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
+import { Check, Loader2, Radio, X } from "lucide-react";
 import { Link } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { PageHeader } from "@/components/ui/DetailGrid";
@@ -37,12 +38,34 @@ type DeviceRecord = {
   };
 };
 
+type CheckKey = "handshake" | "privateIp" | "apiLogin" | "identity";
+type StepState = "waiting" | "passed" | "failed";
+type LinkState = "listening" | "online" | "failed";
+
 const observed = [
-  { key: "handshake", label: "Handshake" },
-  { key: "privateIp", label: "Tunnel address" },
-  { key: "apiLogin", label: "API login" },
-  { key: "identity", label: "Identity" },
+  { key: "handshake", label: "Handshake", waiting: "Waiting for peer handshake" },
+  { key: "privateIp", label: "Tunnel address", waiting: "Waiting for tunnel address" },
+  { key: "apiLogin", label: "API login", waiting: "Waiting for API login" },
+  { key: "identity", label: "Identity", waiting: "Waiting for router identity" },
 ] as const;
+
+function stepState(device: DeviceRecord, key: CheckKey): StepState {
+  if (device.checks[key]) return "passed";
+  if (device.tunnelStatus === "down") return "failed";
+  return "waiting";
+}
+
+function linkState(device: DeviceRecord): LinkState {
+  if (device.checks.ready) return "online";
+  if (device.tunnelStatus === "down") return "failed";
+  return "listening";
+}
+
+function tunnelLabel(status: DeviceRecord["tunnelStatus"]) {
+  if (status === "up") return "Up";
+  if (status === "down") return "Down";
+  return "Unknown";
+}
 
 function localPassword() {
   const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
@@ -77,6 +100,7 @@ export function OnboardMikrotikPage() {
     if (!device || !finished) return;
     let stopped = false;
     let controller = new AbortController();
+    const ready = device.checks.ready;
     const refresh = () => {
       controller.abort();
       controller = new AbortController();
@@ -87,13 +111,13 @@ export function OnboardMikrotikPage() {
         .catch(() => undefined);
     };
     refresh();
-    const timer = window.setInterval(refresh, 15000);
+    const timer = window.setInterval(refresh, ready ? 15000 : 4000);
     return () => {
       stopped = true;
       controller.abort();
       window.clearInterval(timer);
     };
-  }, [device?.id, finished]);
+  }, [device?.id, device?.checks.ready, finished]);
 
   useEffect(() => {
     const query = site.trim();
@@ -231,6 +255,8 @@ export function OnboardMikrotikPage() {
   const built = device && apiPassword ? buildWinboxScript(device, apiPassword) : null;
   const readyToFinish = Boolean(built?.applicable) && authorized && copied && backupSaved && winboxConnects;
   const localOnly = Boolean(device && !device.endpoint.trim() && !device.serverPublicKey.trim());
+  const connection = device && finished && !localOnly ? linkState(device) : null;
+  const passedCount = device ? observed.filter((item) => device.checks[item.key]).length : 0;
 
   return (
     <div className="page-shell py-8">
@@ -382,8 +408,28 @@ export function OnboardMikrotikPage() {
                     <input type="checkbox" className="mt-1" checked={winboxConnects} onChange={(event) => setWinboxConnects(event.target.checked)} />
                     <span>WinBox still connects to the router after the paste.</span>
                   </label>
-                  <SecondaryButton type="button" onClick={() => void finish()} disabled={!readyToFinish || pending || finished}>
-                    {finished ? "Waiting for the router" : pending ? "Saving…" : "Finish"}
+                  <SecondaryButton type="button" onClick={() => void finish()} disabled={!readyToFinish || pending || finished} className="gap-2">
+                    {finished && localOnly ? "Saved for local testing" : null}
+                    {finished && !localOnly && device?.checks.ready ? (
+                      <>
+                        <Check className="h-4 w-4 text-success" aria-hidden="true" />
+                        Router connected
+                      </>
+                    ) : null}
+                    {finished && !localOnly && !device?.checks.ready && device?.tunnelStatus === "down" ? (
+                      <>
+                        <X className="h-4 w-4 text-destructive" aria-hidden="true" />
+                        Connection failed
+                      </>
+                    ) : null}
+                    {finished && !localOnly && !device?.checks.ready && device?.tunnelStatus !== "down" ? (
+                      <>
+                        <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                        Listening for the router…
+                      </>
+                    ) : null}
+                    {!finished && pending ? "Saving…" : null}
+                    {!finished && !pending ? "Finish" : null}
                   </SecondaryButton>
                 </div>
               ) : null}
@@ -395,35 +441,171 @@ export function OnboardMikrotikPage() {
                   <PrimaryButton to={`/mikrotiks/${device.id}`}>Open router</PrimaryButton>
                 </div>
               ) : null}
-              {finished && !localOnly ? (
-                <div className="grid gap-3">
+              {finished && !localOnly && connection ? (
+                <div className="grid gap-3" aria-live="polite">
+                  <div
+                    className={cn(
+                      "relative overflow-hidden rounded-xl border px-4 py-4",
+                      connection === "online" && "border-success-border/60 bg-success-soft/40",
+                      connection === "failed" && "border-destructive-border/60 bg-destructive-soft/40",
+                      connection === "listening" && "border-info-border/60 bg-info-soft/30",
+                    )}
+                  >
+                    {connection === "listening" ? (
+                      <div className="pointer-events-none absolute inset-0 animate-pulse bg-gradient-to-r from-transparent via-primary/5 to-transparent" aria-hidden="true" />
+                    ) : null}
+                    <div className="relative flex items-center gap-3">
+                      <span
+                        className={cn(
+                          "flex h-10 w-10 shrink-0 items-center justify-center rounded-full",
+                          connection === "online" && "bg-success-soft text-success",
+                          connection === "failed" && "bg-destructive-soft text-destructive",
+                          connection === "listening" && "bg-info-soft text-info",
+                        )}
+                      >
+                        {connection === "online" ? <Check className="h-5 w-5" aria-hidden="true" /> : null}
+                        {connection === "failed" ? <X className="h-5 w-5" aria-hidden="true" /> : null}
+                        {connection === "listening" ? <Loader2 className="h-5 w-5 animate-spin" aria-hidden="true" /> : null}
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold text-foreground">
+                          {connection === "online" ? "Router connected" : null}
+                          {connection === "failed" ? "Router connection failed" : null}
+                          {connection === "listening" ? "Listening for the router" : null}
+                        </p>
+                        <p className="mt-0.5 text-sm text-muted-foreground">
+                          {connection === "online" ? "All checks passed. The tunnel and API are live." : null}
+                          {connection === "failed"
+                            ? "The tunnel is down. Confirm the WinBox paste and that the VPS peer is online."
+                            : null}
+                          {connection === "listening"
+                            ? `Checking every few seconds · ${passedCount} of ${observed.length} steps ready`
+                            : null}
+                        </p>
+                      </div>
+                      {connection === "listening" ? (
+                        <span className="hidden items-center gap-1.5 rounded-full border border-info-border/50 bg-surface/80 px-2.5 py-1 text-xs font-semibold text-info sm:inline-flex">
+                          <Radio className="h-3 w-3 animate-pulse" aria-hidden="true" />
+                          Live
+                        </span>
+                      ) : null}
+                    </div>
+                    {connection !== "online" ? (
+                      <div className="relative mt-3 h-1.5 overflow-hidden rounded-full bg-surface/70">
+                        <div
+                          className={cn(
+                            "h-full rounded-full transition-all duration-500 ease-out",
+                            connection === "failed" ? "bg-destructive" : "bg-primary",
+                          )}
+                          style={{ width: `${Math.max(8, (passedCount / observed.length) * 100)}%` }}
+                        />
+                        {connection === "listening" ? (
+                          <div className="absolute inset-0 animate-pulse bg-gradient-to-r from-transparent via-primary/20 to-transparent" aria-hidden="true" />
+                        ) : null}
+                      </div>
+                    ) : null}
+                  </div>
+
                   <dl className="grid gap-2 text-sm sm:grid-cols-3">
-                    <div className="rounded-xl border border-border px-4 py-3">
+                    <div className="rounded-xl border border-border bg-surface px-4 py-3">
                       <dt className="text-muted-foreground">Last seen</dt>
-                      <dd>{device.lastSeen ?? "Not seen"}</dd>
+                      <dd className="mt-1 font-medium">{device.lastSeen ?? "Not seen"}</dd>
                     </div>
-                    <div className="rounded-xl border border-border px-4 py-3">
+                    <div className="rounded-xl border border-border bg-surface px-4 py-3">
                       <dt className="text-muted-foreground">Last API connection</dt>
-                      <dd>{device.lastApi ?? "None"}</dd>
+                      <dd className="mt-1 font-medium">{device.lastApi ?? "None"}</dd>
                     </div>
-                    <div className="rounded-xl border border-border px-4 py-3">
+                    <div
+                      className={cn(
+                        "rounded-xl border px-4 py-3",
+                        device.tunnelStatus === "up" && "border-success-border/60 bg-success-soft/30",
+                        device.tunnelStatus === "down" && "border-destructive-border/60 bg-destructive-soft/30",
+                        device.tunnelStatus === "unknown" && "border-border bg-surface",
+                      )}
+                    >
                       <dt className="text-muted-foreground">Tunnel</dt>
-                      <dd>{device.tunnelStatus}</dd>
+                      <dd className="mt-1 flex items-center gap-2 font-medium">
+                        <span
+                          className={cn(
+                            "h-2 w-2 rounded-full",
+                            device.tunnelStatus === "up" && "bg-success",
+                            device.tunnelStatus === "down" && "bg-destructive",
+                            device.tunnelStatus === "unknown" && "animate-pulse bg-warning",
+                          )}
+                          aria-hidden="true"
+                        />
+                        {tunnelLabel(device.tunnelStatus)}
+                      </dd>
                     </div>
                   </dl>
+
                   <ul className="grid gap-2 text-sm">
-                    {observed.map((item) => (
-                      <li key={item.key} className="flex items-center justify-between rounded-xl border border-border px-4 py-3">
-                        <span>{item.label}</span>
-                        <span className="text-muted-foreground">{device.checks[item.key] ? "Passed" : "Waiting"}</span>
-                      </li>
-                    ))}
+                    {observed.map((item) => {
+                      const state = stepState(device, item.key);
+                      return (
+                        <li
+                          key={item.key}
+                          className={cn(
+                            "flex items-center justify-between gap-3 rounded-xl border px-4 py-3 transition-colors duration-300",
+                            state === "passed" && "border-success-border/50 bg-success-soft/25",
+                            state === "failed" && "border-destructive-border/50 bg-destructive-soft/25",
+                            state === "waiting" && "border-border bg-surface",
+                          )}
+                        >
+                          <div className="flex min-w-0 items-center gap-3">
+                            <span
+                              className={cn(
+                                "flex h-7 w-7 shrink-0 items-center justify-center rounded-full",
+                                state === "passed" && "bg-success text-success-foreground",
+                                state === "failed" && "bg-destructive text-destructive-foreground",
+                                state === "waiting" && "bg-surface-muted text-muted-foreground",
+                              )}
+                            >
+                              {state === "passed" ? <Check className="h-3.5 w-3.5" aria-hidden="true" /> : null}
+                              {state === "failed" ? <X className="h-3.5 w-3.5" aria-hidden="true" /> : null}
+                              {state === "waiting" ? <Loader2 className="h-3.5 w-3.5 animate-spin" aria-hidden="true" /> : null}
+                            </span>
+                            <div className="min-w-0">
+                              <p className="font-medium text-foreground">{item.label}</p>
+                              {state === "waiting" ? (
+                                <p className="truncate text-xs text-muted-foreground">{item.waiting}</p>
+                              ) : null}
+                              {state === "failed" ? (
+                                <p className="truncate text-xs text-destructive">Could not confirm this step</p>
+                              ) : null}
+                            </div>
+                          </div>
+                          <span
+                            className={cn(
+                              "shrink-0 text-xs font-semibold uppercase tracking-wide",
+                              state === "passed" && "text-success",
+                              state === "failed" && "text-destructive",
+                              state === "waiting" && "text-muted-foreground",
+                            )}
+                          >
+                            {state === "passed" ? "Passed" : null}
+                            {state === "failed" ? "Failed" : null}
+                            {state === "waiting" ? "Checking" : null}
+                          </span>
+                        </li>
+                      );
+                    })}
                   </ul>
+
                   {device.checks.ready ? (
-                    <PrimaryButton to={`/mikrotiks/${device.id}`}>Router active</PrimaryButton>
+                    <PrimaryButton to={`/mikrotiks/${device.id}`} className="gap-2">
+                      <Check className="h-4 w-4" aria-hidden="true" />
+                      Router active
+                    </PrimaryButton>
+                  ) : connection === "failed" ? (
+                    <SecondaryButton type="button" disabled className="gap-2 border-destructive-border/60 text-destructive">
+                      <X className="h-4 w-4" aria-hidden="true" />
+                      Connection failed
+                    </SecondaryButton>
                   ) : (
-                    <PrimaryButton type="button" disabled>
-                      Not active yet
+                    <PrimaryButton type="button" disabled className="gap-2">
+                      <Loader2 className="h-4 w-4 animate-spin" aria-hidden="true" />
+                      Waiting for router…
                     </PrimaryButton>
                   )}
                 </div>

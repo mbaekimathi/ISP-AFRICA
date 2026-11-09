@@ -1505,6 +1505,37 @@ def load_offer_names(value):
     return [str(item) for item in parsed]
 
 
+def link_active_packages_to_router(cursor, client_id, device_id):
+    """Attach every active ISP package to a newly onboarded MikroTik.
+
+    Packages → Routers (isp-package) is what makes a plan sellable on a router.
+    Onboarding should pick those active packages automatically so the new
+    MikroTik is ready without a manual 'Select site' pass.
+    """
+    cursor.execute(
+        """
+        SELECT id, availability_routers
+        FROM isp_packages
+        WHERE client_id = %s AND status = 'active'
+        """,
+        (client_id,),
+    )
+    linked = 0
+    for row in cursor.fetchall():
+        routers = load_offer_names(row.get("availability_routers"))
+        if device_id in routers:
+            continue
+        routers.append(device_id)
+        cursor.execute(
+            "UPDATE isp_packages SET availability_routers = %s WHERE id = %s AND client_id = %s",
+            (json.dumps(routers), row["id"], client_id),
+        )
+        linked += 1
+    if linked:
+        print(f"event=onboard-packages device={device_id} linked={linked}", flush=True)
+    return linked
+
+
 def clean_company_package(payload, allowed_client_ids):
     fields = clean_package_fields(payload)
     clients = clean_router_ids(
@@ -3972,7 +4003,8 @@ class Handler(BaseHTTPRequestHandler):
             return {"trend": self.router_health_trend(cursor, device_id, token.get("isp_client_session"), selected)}, None
         if method == "GET" and path.startswith("/api/mikrotiks/") and path.endswith("/live"):
             device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/live").strip("/")
-            return {"live": self.live_mikrotik(cursor, device_id, token.get("isp_client_session"))}, None
+            view = str((query.get("view") or [""])[0]).strip().lower()
+            return {"live": self.live_mikrotik(cursor, device_id, token.get("isp_client_session"), view)}, None
         if method == "GET" and path.startswith("/api/mikrotiks/") and path.endswith("/setup"):
             device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/setup").strip("/")
             return {"setup": self.setup_mikrotik(cursor, device_id, token.get("isp_client_session"))}, None
@@ -5809,8 +5841,9 @@ class Handler(BaseHTTPRequestHandler):
         cursor.execute(
             """
             INSERT INTO isp_mikrotik_devices (
-              id, client_id, name, site, role, routeros_version, tunnel_ip, public_key, status, latitude, longitude
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'identity', %s, %s)
+              id, client_id, name, site, role, routeros_version, tunnel_ip, public_key, status, latitude, longitude,
+              pppoe_enforced, hotspot_enabled, hotspot_block_sharing
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'identity', %s, %s, 1, 1, 1)
             """,
             (device_id, client_id, name, site, role, version or None, tunnel_ip, public_key, latitude, longitude),
         )
@@ -5818,6 +5851,7 @@ class Handler(BaseHTTPRequestHandler):
             "UPDATE isp_mikrotik_devices SET wg_private = %s WHERE id = %s",
             (routeros_api.seal_password(private_key), device_id),
         )
+        link_active_packages_to_router(cursor, client_id, device_id)
         publish_tunnel_peers(cursor)
         notify_push_now()
         device = self.mikrotik_row(cursor, device_id, client_id)
@@ -5851,6 +5885,7 @@ class Handler(BaseHTTPRequestHandler):
                 "UPDATE isp_mikrotik_devices SET site = %s, role = %s, latitude = %s, longitude = %s WHERE id = %s",
                 (site, role, latitude, longitude, existing["id"]),
             )
+        link_active_packages_to_router(cursor, existing["client_id"], existing["id"])
         publish_tunnel_peers(cursor)
         device = self.mikrotik_row(cursor, existing["id"], existing["client_id"])
         device["privateKey"] = private_key
@@ -5969,6 +6004,7 @@ class Handler(BaseHTTPRequestHandler):
         first_up = previous_status in {"identity", "waiting"}
         if not first_up and not never_seeded:
             return
+        link_active_packages_to_router(cursor, client_id, device_id)
         cursor.execute(
             """
             UPDATE isp_mikrotik_devices
@@ -6624,7 +6660,8 @@ class Handler(BaseHTTPRequestHandler):
         )
         return self.mikrotik_row(cursor, device_id, client_id)
 
-    def live_mikrotik(self, cursor, device_id, token):
+    def live_mikrotik(self, cursor, device_id, token, view=""):
+        ports_only = view == "ports"
         client_id = self.require_client(cursor, token)
         cursor.execute(
             "SELECT * FROM isp_mikrotik_devices WHERE id = %s AND client_id = %s",
@@ -6648,7 +6685,11 @@ class Handler(BaseHTTPRequestHandler):
         password = None
         try:
             password = routeros_api.open_password(row["api_secret"])
-            live = routeros_api.read_router(row["tunnel_ip"], password)
+            live = (
+                routeros_api.read_router_ports(row["tunnel_ip"], password)
+                if ports_only
+                else routeros_api.read_router(row["tunnel_ip"], password)
+            )
         except routeros_api.RouterError as error:
             message = str(error)
             if message == "The management tunnel did not answer.":
@@ -6662,8 +6703,20 @@ class Handler(BaseHTTPRequestHandler):
                     live["name"] = row["name"]
                     live["checkedAt"] = checked_at
                     live["message"] = "No router is connected. Showing a development sample."
-                    live["health"] = routeros_api.sample_health()
+                    if ports_only:
+                        live.pop("health", None)
+                    else:
+                        live["health"] = routeros_api.sample_health()
                     return live
+                if ports_only:
+                    return {
+                        "reachable": False,
+                        "apiReady": True,
+                        "name": row["name"],
+                        "message": message,
+                        "checkedAt": checked_at,
+                        "interfaces": [],
+                    }
                 health = self.sync_router_health(
                     cursor,
                     client_id,
@@ -6688,25 +6741,36 @@ class Handler(BaseHTTPRequestHandler):
                 "interfaces": [],
             }
         version = (live.get("version") or "")[:20] or None
-        cursor.execute(
-            """
-            UPDATE isp_mikrotik_devices
-            SET tunnel_status = 'up', last_seen_at = CURRENT_TIMESTAMP, last_api_at = CURRENT_TIMESTAMP,
-                routeros_version = COALESCE(%s, routeros_version)
-            WHERE id = %s AND client_id = %s
-            """,
-            (version, device_id, client_id),
-        )
-        observations = [("Management tunnel", None)]
-        for item in live.get("interfaces") or []:
-            observations.append((item.get("name") or "interface", routeros_api.interface_outage(item)))
+        if ports_only:
+            cursor.execute(
+                """
+                UPDATE isp_mikrotik_devices
+                SET tunnel_status = 'up', last_seen_at = CURRENT_TIMESTAMP, last_api_at = CURRENT_TIMESTAMP
+                WHERE id = %s AND client_id = %s
+                """,
+                (device_id, client_id),
+            )
+        else:
+            cursor.execute(
+                """
+                UPDATE isp_mikrotik_devices
+                SET tunnel_status = 'up', last_seen_at = CURRENT_TIMESTAMP, last_api_at = CURRENT_TIMESTAMP,
+                    routeros_version = COALESCE(%s, routeros_version)
+                WHERE id = %s AND client_id = %s
+                """,
+                (version, device_id, client_id),
+            )
         routeros_api.label_port_roles(live.get("interfaces"), self.read_port_plan(row))
         live["apiReady"] = True
         live["name"] = row["name"]
         live["site"] = row.get("site") or ""
         live["checkedAt"] = checked_at
         live["message"] = "This router answered over the management tunnel."
-        live["health"] = self.sync_router_health(cursor, client_id, device_id, observations)
+        if not ports_only:
+            observations = [("Management tunnel", None)]
+            for item in live.get("interfaces") or []:
+                observations.append((item.get("name") or "interface", routeros_api.interface_outage(item)))
+            live["health"] = self.sync_router_health(cursor, client_id, device_id, observations)
         return live
 
     def setup_mikrotik(self, cursor, device_id, token):

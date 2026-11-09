@@ -490,6 +490,51 @@ def label_port_roles(interfaces, plan):
     return interfaces
 
 
+def _interface_rows(interfaces):
+    running = []
+    for row in interfaces:
+        name = row.get("name") or ""
+        if row.get("dynamic") == "true" or (name.startswith("<") and name.endswith(">")):
+            continue
+        running.append(
+            {
+                "name": name,
+                "type": row.get("type") or "",
+                "running": row.get("running") == "true",
+                "disabled": row.get("disabled") == "true",
+                "comment": row.get("comment") or "",
+                "slave": row.get("slave") == "true",
+                "rxByte": row.get("rx-byte") or "0",
+                "txByte": row.get("tx-byte") or "0",
+            }
+        )
+    return running[:40]
+
+
+def read_router_ports(host, password, timeout=4, port=API_PORT, opener=None):
+    """Fast port list for setup pages — login + interfaces only."""
+    connect = opener or socket.create_connection
+    try:
+        sock = connect((host, port), timeout)
+    except OSError as error:
+        raise RouterError("The management tunnel did not answer.") from error
+    try:
+        sock.settimeout(timeout)
+        reader = ByteReader(sock)
+        login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
+        if any(row.get("ret") for row in login):
+            raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
+        interfaces = talk(sock, reader, ["/interface/print"])
+    finally:
+        sock.close()
+    running = _interface_rows(interfaces)
+    return {
+        "reachable": True,
+        "interfaces": running,
+        "interfaceCount": len(running),
+    }
+
+
 def read_router(host, password, timeout=4, port=API_PORT, opener=None):
     connect = opener or socket.create_connection
     try:
@@ -511,23 +556,7 @@ def read_router(host, password, timeout=4, port=API_PORT, opener=None):
         sock.close()
     info = resource[0] if resource else {}
     names = identity[0] if identity else {}
-    running = []
-    for row in interfaces:
-        name = row.get("name") or ""
-        if row.get("dynamic") == "true" or (name.startswith("<") and name.endswith(">")):
-            continue
-        running.append(
-            {
-                "name": name,
-                "type": row.get("type") or "",
-                "running": row.get("running") == "true",
-                "disabled": row.get("disabled") == "true",
-                "comment": row.get("comment") or "",
-                "slave": row.get("slave") == "true",
-                "rxByte": row.get("rx-byte") or "0",
-                "txByte": row.get("tx-byte") or "0",
-            }
-        )
+    running = _interface_rows(interfaces)
     return {
         "reachable": True,
         "identity": names.get("name") or "",
@@ -540,7 +569,7 @@ def read_router(host, password, timeout=4, port=API_PORT, opener=None):
         "platform": info.get("platform") or "",
         "freeMemory": memory_label(info.get("free-memory")),
         "totalMemory": memory_label(info.get("total-memory")),
-        "interfaces": running[:40],
+        "interfaces": running,
         "interfaceCount": len(running),
         "hotspotActive": hotspot,
         "pppoeActive": pppoe,

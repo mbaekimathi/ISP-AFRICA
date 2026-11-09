@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from datetime import datetime, timedelta
@@ -938,11 +939,10 @@ class BlockSharingApiTests(unittest.TestCase):
             handler.apply_onboard_access_defaults(cursor, "router-1", "client-1", "waiting", row)
         pppoe.assert_called_once_with(cursor, "router-1", "client-1", True)
         hotspot.assert_called_once_with(cursor, "router-1", "client-1", True, True, False)
-        self.assertEqual(len(cursor.queries), 1)
-        self.assertIn("pppoe_enforced = 1", cursor.queries[0][0])
-        self.assertIn("hotspot_enabled = 1", cursor.queries[0][0])
-        self.assertIn("hotspot_block_sharing = 1", cursor.queries[0][0])
-        self.assertEqual(cursor.queries[0][1], ("router-1", "client-1"))
+        updates = [sql for sql, _args in cursor.queries if "pppoe_enforced = 1" in sql]
+        self.assertEqual(len(updates), 1)
+        self.assertIn("hotspot_enabled = 1", updates[0])
+        self.assertIn("hotspot_block_sharing = 1", updates[0])
 
     def test_onboard_defaults_skip_when_already_configured(self):
         handler = api.Handler.__new__(api.Handler)
@@ -955,6 +955,21 @@ class BlockSharingApiTests(unittest.TestCase):
         pppoe.assert_not_called()
         hotspot.assert_not_called()
         self.assertEqual(cursor.queries, [])
+
+    def test_link_active_packages_to_router(self):
+        cursor = FakeCursor(
+            [
+                {"id": "pkg-1", "availability_routers": '["old-router"]'},
+                {"id": "pkg-2", "availability_routers": '["router-1"]'},
+                {"id": "pkg-3", "availability_routers": None},
+            ]
+        )
+        linked = api.link_active_packages_to_router(cursor, "client-1", "router-1")
+        self.assertEqual(linked, 2)
+        updates = [(sql, args) for sql, args in cursor.queries if sql.startswith("UPDATE isp_packages")]
+        self.assertEqual(len(updates), 2)
+        self.assertEqual(json.loads(updates[0][1][0]), ["old-router", "router-1"])
+        self.assertEqual(json.loads(updates[1][1][0]), ["router-1"])
 
     def test_save_rejects_non_boolean_sharing(self):
         handler = api.Handler.__new__(api.Handler)

@@ -128,6 +128,34 @@ class RouterOsApiTests(unittest.TestCase):
         self.assertNotIn(b"secret-password", b"".join(sock.sent[1:]))
         self.assertIn(b"/system/resource/print", sock.sent[2])
 
+    def test_read_router_ports_skips_resource_and_sessions(self):
+        sock = ScriptedSocket(
+            [
+                sentence("!done"),
+                sentence(
+                    "!re",
+                    "=name=ether1",
+                    "=type=ether",
+                    "=running=true",
+                    "=disabled=false",
+                    "=comment=WAN",
+                    "=rx-byte=10",
+                    "=tx-byte=20",
+                )
+                + sentence("!done"),
+            ]
+        )
+        live = routeros_api.read_router_ports("10.88.0.2", "secret-password", opener=lambda _address, _timeout: sock)
+        self.assertTrue(live["reachable"])
+        self.assertEqual(live["interfaces"][0]["name"], "ether1")
+        self.assertEqual(live["interfaceCount"], 1)
+        self.assertNotIn("identity", live)
+        self.assertNotIn("cpuLoad", live)
+        sent = b"".join(sock.sent)
+        self.assertIn(b"/interface/print", sent)
+        self.assertNotIn(b"/system/resource/print", sent)
+        self.assertNotIn(b"/ip/hotspot/active/print", sent)
+
     def test_empty_reply_counts_as_zero_sessions(self):
         sock = ScriptedSocket(
             [

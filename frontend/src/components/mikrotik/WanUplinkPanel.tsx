@@ -63,7 +63,19 @@ function blank(name: string): Uplink {
   return { interface: name, provider: "", method: "dhcp", gateway: "", downloadMbps: 100, uploadMbps: 100, active: false, accountNumber: "" };
 }
 
-export function WanUplinkPanel({ deviceId, version, ports, sample = false }: { deviceId: string; version: string; ports: WanPort[]; sample?: boolean }) {
+export function WanUplinkPanel({
+  deviceId,
+  version,
+  ports,
+  sample = false,
+  deferReachability = false,
+}: {
+  deviceId: string;
+  version: string;
+  ports: WanPort[];
+  sample?: boolean;
+  deferReachability?: boolean;
+}) {
   const [state, setState] = useState<WanState | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState("");
@@ -88,15 +100,20 @@ export function WanUplinkPanel({ deviceId, version, ports, sample = false }: { d
   useEffect(() => {
     if (!deviceId) return;
     let stopped = false;
-    apiRequest<{ health: Record<string, string> }>(`/api/mikrotiks/${deviceId}/wan/reachability`)
-      .then((body) => {
-        if (!stopped) setReach(body.health || {});
-      })
-      .catch(() => undefined);
+    const run = () => {
+      apiRequest<{ health: Record<string, string> }>(`/api/mikrotiks/${deviceId}/wan/reachability`)
+        .then((body) => {
+          if (!stopped) setReach(body.health || {});
+        })
+        .catch(() => undefined);
+    };
+    // Reachability probes the router — wait until idle so port setup can finish first.
+    const timer = window.setTimeout(run, deferReachability ? 1800 : 0);
     return () => {
       stopped = true;
+      window.clearTimeout(timer);
     };
-  }, [deviceId]);
+  }, [deviceId, deferReachability]);
 
   useEffect(() => {
     if (!deviceId || !job || job.status === "queued" || job.status === "running") return;
