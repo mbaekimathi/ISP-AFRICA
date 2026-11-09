@@ -491,6 +491,103 @@ class RouterOsApiTests(unittest.TestCase):
         self.assertEqual(sessions[0]["bytesIn"], 0)
         self.assertEqual(routeros_api.norm_mac("8c-44-bb-2f-aa-e8"), routeros_api.norm_mac("8C:44:BB:2F:AA:E8"))
 
+    def test_subscriber_access_port_prefers_cpe_bridge_port(self):
+        hosts = [
+            {"mac-address": "AA:BB:CC:DD:EE:01", "on-interface": "ether5"},
+            {"mac-address": "CC:2D:21:B9:A2:BF", "on-interface": "ether2"},
+        ]
+        self.assertEqual(
+            routeros_api.subscriber_access_port(hosts, "CC:2D:21:B9:A2:BF", "bridge"),
+            "ether2",
+        )
+        self.assertEqual(routeros_api.subscriber_access_port(hosts, "", "bridge"), "")
+        self.assertEqual(routeros_api.subscriber_access_port(hosts, "", "ether3"), "ether3")
+        self.assertTrue(routeros_api.is_bridge_interface("bridge1"))
+        self.assertFalse(routeros_api.is_bridge_interface("ether2"))
+
+    def test_lan_gadgets_does_not_attribute_whole_bridge_to_one_session(self):
+        done = sentence("!done")
+        sock = ScriptedSocket(
+            [
+                done,
+                # ARP: CPE + hotspot guest both appear on the bridge
+                sentence(
+                    "!re",
+                    "=mac-address=CC:2D:21:B9:A2:BF",
+                    "=address=10.10.0.240",
+                    "=interface=bridge",
+                    "=complete=true",
+                )
+                + sentence(
+                    "!re",
+                    "=mac-address=18:60:24:F4:68:F6",
+                    "=address=192.168.88.249",
+                    "=interface=bridge",
+                    "=complete=true",
+                )
+                + done,
+                done,  # dhcp leases
+                # Bridge hosts: CPE on ether2, hotspot guest on ether3
+                sentence(
+                    "!re",
+                    "=mac-address=CC:2D:21:B9:A2:BF",
+                    "=on-interface=ether2",
+                )
+                + sentence(
+                    "!re",
+                    "=mac-address=18:60:24:F4:68:F6",
+                    "=on-interface=ether3",
+                )
+                + sentence(
+                    "!re",
+                    "=mac-address=50:0F:F5:F8:7C:A8",
+                    "=on-interface=ether2",
+                )
+                + done,
+                done,  # hotspot hosts
+                done,  # hotspot active
+            ]
+        )
+        gadgets = routeros_api.lan_gadgets(
+            "10.88.0.2",
+            "secret-password",
+            "bridge",
+            peer_mac="CC:2D:21:B9:A2:BF",
+            opener=lambda _address, _timeout: sock,
+        )
+        macs = {routeros_api.norm_mac(item["mac"]) for item in gadgets}
+        self.assertIn(routeros_api.norm_mac("CC:2D:21:B9:A2:BF"), macs)
+        self.assertIn(routeros_api.norm_mac("50:0F:F5:F8:7C:A8"), macs)
+        self.assertNotIn(routeros_api.norm_mac("18:60:24:F4:68:F6"), macs)
+
+    def test_lan_gadgets_refuses_unresolved_bridge_scope(self):
+        done = sentence("!done")
+        sock = ScriptedSocket(
+            [
+                done,
+                sentence(
+                    "!re",
+                    "=mac-address=18:60:24:F4:68:F6",
+                    "=address=192.168.88.249",
+                    "=interface=bridge",
+                    "=complete=true",
+                )
+                + done,
+                done,
+                done,  # no bridge host for the dialing CPE
+                done,
+                done,
+            ]
+        )
+        gadgets = routeros_api.lan_gadgets(
+            "10.88.0.2",
+            "secret-password",
+            "bridge",
+            peer_mac="CC:2D:21:B9:A2:BF",
+            opener=lambda _address, _timeout: sock,
+        )
+        self.assertEqual(gadgets, [])
+
     def test_hotspot_hosts_lists_connected_unpaid_devices(self):
         sock = ScriptedSocket(
             [

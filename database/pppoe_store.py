@@ -1307,9 +1307,10 @@ def device_rows(cursor, row):
     Gadgets behind the subscriber's router are merged in from the LAN side
     (DHCP leases, ARP, bridge and hotspot hosts). With an access interface
     saved on the subscriber only gadgets learned on that port count; without
-    one, LAN reads just enrich devices we already know about, so one client
-    never absorbs another's gadgets. The MAC holding the open session is
-    flagged kind=router — it is the dialing CPE, not an end device.
+    one, a live session narrows to the dialing CPE's bridge port so gadgets
+    on that port still show while the session is up — never the whole bridge
+    LAN. The MAC holding the open session is flagged kind=router — it is the
+    dialing CPE, not an end device.
     """
     username = row.get("pppoe_username") or ""
     devices = []
@@ -1340,8 +1341,12 @@ def device_rows(cursor, row):
     live = {}
     lan = {}
     # Prefer the saved VLAN/port; otherwise learn it from the live PPPoE
-    # session so gadgets behind this client's CPE still show up.
-    access = str(row.get("access_interface") or "").strip()
+    # session so gadgets behind this client's CPE still show up. A bridge
+    # service interface is narrowed to the dialing CPE's bridge port so
+    # hotspot guests on the same bridge are not listed as this customer.
+    saved_access = str(row.get("access_interface") or "").strip()
+    access_hint = saved_access
+    peer_mac = ""
     router_seen = False
     host, secret = session_device(cursor, row)
     if host and secret:
@@ -1349,15 +1354,27 @@ def device_rows(cursor, row):
             password = routeros_api.open_password(secret)
             for session in routeros_api.live_sessions(host, password, username):
                 live[routeros_api.norm_mac(session["mac"])] = session
-                if not access and session.get("interface"):
-                    access = str(session["interface"]).strip()
-            for gadget in routeros_api.lan_gadgets(host, password, access):
-                lan[routeros_api.norm_mac(gadget["mac"])] = gadget
+                if not peer_mac and session.get("mac"):
+                    peer_mac = session["mac"]
+                if not access_hint and session.get("interface"):
+                    access_hint = str(session["interface"]).strip()
+            # Only read LAN hosts when we have a port hint or a live CPE MAC
+            # to resolve against — an unscoped read would pull the whole NAS.
+            if saved_access or access_hint or peer_mac:
+                for gadget in routeros_api.lan_gadgets(
+                    host,
+                    password,
+                    access_hint,
+                    peer_mac="" if saved_access else peer_mac,
+                ):
+                    lan[routeros_api.norm_mac(gadget["mac"])] = gadget
             router_seen = True
         except Exception:
             live = {}
             lan = {}
-    lan_scoped = bool(access)
+    # List unknown LAN neighbors only when the port was explicitly saved, or
+    # when a live session yielded a safely scoped (non-empty) LAN read.
+    lan_scoped = bool(saved_access) or (bool(peer_mac) and bool(lan))
     current = current_session(cursor, username) or {}
     router_key = routeros_api.norm_mac(current.get("mac"))
     now = datetime.now()
@@ -2255,7 +2272,15 @@ def renew(cursor, client_id, subscriber_id, payload):
     begin(cursor)
     try:
         invoice_id = create_invoice(cursor, client_id, subscriber_id, format(amount, ".2f"), "renewal", "paid", reference)
-        create_payment(cursor, client_id, subscriber_id, invoice_id, format(amount, ".2f"), "manual", reference)
+        create_payment(
+            cursor,
+            client_id,
+            subscriber_id,
+            invoice_id,
+            format(amount, ".2f"),
+            "mpesa" if reference else "manual",
+            reference,
+        )
         if sub_missing:
             cursor.execute(
                 """
@@ -2893,6 +2918,22 @@ def sessions_export(cursor, client_id, subscriber_id, query):
     return page
 
 
+def is_daraja_checkout_id(value):
+    """Daraja CheckoutRequestID values are not customer-facing M-Pesa receipts."""
+    text = str(value or "").strip()
+    return text.startswith("ws_CO_") or text.startswith("ws_")
+
+
+def mpesa_display_reference(*candidates):
+    """First real M-Pesa receipt among candidates; never a checkout id."""
+    for value in candidates:
+        text = str(value or "").strip()
+        if not text or is_daraja_checkout_id(text):
+            continue
+        return text
+    return ""
+
+
 def list_transactions(cursor, client_id, query):
     """Merged billing ledger for one client.
 
@@ -2938,14 +2979,35 @@ def list_transactions(cursor, client_id, query):
         }
 
     clause, args = window("p.created_at")
+    # Payments often store the Daraja checkout id until the callback lands.
+    # Resolve the real receipt from the STK row and/or gateway ledger first.
     cursor.execute(
         f"""
         SELECT p.id, p.amount, p.method, p.mpesa_reference, p.created_at,
                s.first_name, s.last_name, s.phone, s.pppoe_username, s.service,
                pkg.name AS package_name,
                (SELECT st.mpesa_code FROM pppoe_stk_requests st
-                WHERE st.checkout_id LIKE CONCAT(p.mpesa_reference, '%%') AND st.mpesa_code <> ''
-                LIMIT 1) AS mpesa_code
+                WHERE st.mpesa_code <> ''
+                  AND (
+                    st.mpesa_code = p.mpesa_reference
+                    OR LEFT(st.checkout_id, 40) = p.mpesa_reference
+                    OR st.checkout_id = p.mpesa_reference
+                  )
+                LIMIT 1) AS mpesa_code,
+               (SELECT g.mpesa_receipt FROM gateway_payments g
+                WHERE g.mpesa_receipt IS NOT NULL AND g.mpesa_receipt <> ''
+                  AND (
+                    g.mpesa_receipt = p.mpesa_reference
+                    OR LEFT(g.checkout_id, 40) = p.mpesa_reference
+                    OR g.checkout_id = p.mpesa_reference
+                    OR g.checkout_id IN (
+                      SELECT st.checkout_id FROM pppoe_stk_requests st
+                      WHERE LEFT(st.checkout_id, 40) = p.mpesa_reference
+                         OR st.checkout_id = p.mpesa_reference
+                         OR st.mpesa_code = p.mpesa_reference
+                    )
+                  )
+                LIMIT 1) AS gateway_receipt
         FROM pppoe_payments p
         JOIN pppoe_subscribers s ON s.id = p.subscriber_id
         LEFT JOIN isp_packages pkg ON pkg.id = s.package_id
@@ -2955,13 +3017,21 @@ def list_transactions(cursor, client_id, query):
     )
     for item in cursor.fetchall():
         collected += Decimal(item["amount"])
+        reference = mpesa_display_reference(
+            item.get("mpesa_code"),
+            item.get("gateway_receipt"),
+            item.get("mpesa_reference"),
+        )
+        method = item["method"] or ""
+        if reference or is_daraja_checkout_id(item.get("mpesa_reference")) or item.get("mpesa_code") or item.get("gateway_receipt"):
+            method = "mpesa"
         rows.append(
             {
                 "id": f"pay-{item['id']}",
                 "kind": "payment",
-                "method": item["method"],
-                "detail": item.get("package_name") or item["method"],
-                "reference": item.get("mpesa_code") or item["mpesa_reference"] or "",
+                "method": method,
+                "detail": item.get("package_name") or method,
+                "reference": reference,
                 "amount": format(Decimal(item["amount"]), ".2f"),
                 "status": "paid",
                 "createdAt": stamp(item["created_at"]),
@@ -2994,7 +3064,7 @@ def list_transactions(cursor, client_id, query):
                 "id": f"inv-{item['id']}",
                 "kind": "invoice",
                 "detail": detail,
-                "reference": item["mpesa_reference"] or "",
+                "reference": mpesa_display_reference(item.get("mpesa_reference")),
                 "amount": format(Decimal(item["amount"]), ".2f"),
                 "status": item["status"],
                 "createdAt": stamp(item["created_at"]),
@@ -3007,7 +3077,11 @@ def list_transactions(cursor, client_id, query):
         f"""
         SELECT r.id, r.amount, r.phone, r.checkout_id, r.mpesa_code, r.status, r.created_at,
                s.first_name, s.last_name, s.pppoe_username, s.service,
-               pkg.name AS package_name
+               pkg.name AS package_name,
+               (SELECT g.mpesa_receipt FROM gateway_payments g
+                WHERE g.checkout_id = r.checkout_id
+                  AND g.mpesa_receipt IS NOT NULL AND g.mpesa_receipt <> ''
+                LIMIT 1) AS gateway_receipt
         FROM pppoe_stk_requests r
         JOIN pppoe_subscribers s ON s.id = r.subscriber_id
         LEFT JOIN isp_packages pkg ON pkg.id = r.package_id
@@ -3027,7 +3101,7 @@ def list_transactions(cursor, client_id, query):
                 "contact": item["phone"] or item["pppoe_username"],
                 "service": item["service"],
                 "detail": detail,
-                "reference": item.get("mpesa_code") or item["checkout_id"],
+                "reference": mpesa_display_reference(item.get("mpesa_code"), item.get("gateway_receipt")),
                 "amount": format(Decimal(item["amount"]), ".2f"),
                 "status": item["status"],
                 "createdAt": stamp(item["created_at"]),
@@ -3039,7 +3113,11 @@ def list_transactions(cursor, client_id, query):
         cursor.execute(
             f"""
             SELECT h.id, h.amount, h.phone, h.checkout_id, h.mpesa_code, h.mac, h.status, h.devices, h.periods, h.created_at,
-                   d.name AS router_name, pkg.name AS package_name
+                   d.name AS router_name, pkg.name AS package_name,
+                   (SELECT g.mpesa_receipt FROM gateway_payments g
+                    WHERE g.checkout_id = h.checkout_id
+                      AND g.mpesa_receipt IS NOT NULL AND g.mpesa_receipt <> ''
+                    LIMIT 1) AS gateway_receipt
             FROM hotspot_purchases h
             LEFT JOIN isp_mikrotik_devices d ON d.id = h.device_id
             LEFT JOIN isp_packages pkg ON pkg.id = h.package_id
@@ -3065,7 +3143,7 @@ def list_transactions(cursor, client_id, query):
                     "contact": item["phone"] or item["mac"],
                     "service": "hotspot",
                     "detail": " · ".join(detail_parts),
-                    "reference": item.get("mpesa_code") or item["checkout_id"],
+                    "reference": mpesa_display_reference(item.get("mpesa_code"), item.get("gateway_receipt")),
                     "amount": format(Decimal(item["amount"]), ".2f"),
                     "status": item["status"],
                     "createdAt": stamp(item["created_at"]),
@@ -3113,7 +3191,7 @@ def list_transactions(cursor, client_id, query):
                 "contact": item.get("phone") or item.get("pppoe_username") or "",
                 "service": item.get("service") or ("hotspot" if item["source"] == "hotspot" else "pppoe"),
                 "detail": detail,
-                "reference": item.get("mpesa_receipt") or item.get("checkout_id") or "",
+                "reference": mpesa_display_reference(item.get("mpesa_receipt")),
                 "amount": format(Decimal(item["amount"]), ".2f"),
                 "status": "paid",
                 "createdAt": stamp(item["created_at"]),
@@ -3278,19 +3356,26 @@ def list_hotspot_clients(cursor, client_id, query):
             m for m in item_macs if owners.get((str(item["device_id"] or ""), m)) in (None, guest_key)
         }
         group["macs"] |= item_macs
-        # One /ip/hotspot/host scan per reachable router — it lists every
-        # device associated to the hotspot, so a registered device shows
-        # "connected" even before its voucher is redeemed.
+        # One live scan per reachable router — /ip/hotspot/active is who is
+        # surfing right now; /ip/hotspot/host adds devices on Wi‑Fi that have
+        # not logged in yet (connected, not surfing).
         if item_macs and item.get("tunnel_ip") and item.get("api_secret"):
             router_macs.setdefault(str(item["device_id"]), set()).update(item_macs)
+    live_active = {}
     live_hosts = {}
     for device_id, macs in router_macs.items():
         source = next((item for item in items if str(item["device_id"]) == device_id), None)
         if not source:
             continue
         try:
+            secret = routeros_api.open_password(source["api_secret"])
+            for active_row in routeros_api.hotspot_active_sessions(
+                source["tunnel_ip"], secret, macs=list(macs), timeout=3
+            ):
+                if active_row.get("mac"):
+                    live_active[active_row["mac"]] = active_row
             for host_row in routeros_api.hotspot_hosts(
-                source["tunnel_ip"], routeros_api.open_password(source["api_secret"]), macs=list(macs), timeout=3
+                source["tunnel_ip"], secret, macs=list(macs), timeout=3
             ):
                 live_hosts[host_row["mac"]] = host_row
         except (routeros_api.RouterError, OSError):
@@ -3299,8 +3384,8 @@ def list_hotspot_clients(cursor, client_id, query):
     now = datetime.now()
     for group in groups:
         item = group["lead"]
+        active = [live_active[mac] for mac in group["macs"] if mac in live_active]
         hosts = [live_hosts[mac] for mac in group["macs"] if mac in live_hosts]
-        granted = any(host["authorized"] or host.get("bypassed") for host in hosts)
         used = sum(int(entry["used_vouchers"] or 0) for entry in group["items"])
         surf_until = max(
             (entry["surf_until"] for entry in group["items"] if isinstance(entry["surf_until"], datetime)),
@@ -3311,18 +3396,22 @@ def list_hotspot_clients(cursor, client_id, query):
             default=None,
         )
         has_time = bool(surf_until and surf_until > now)
-        if granted:
+        # Live router state only — voucher time left is billing, not surfing.
+        if active:
             router_status = "surfing"
+            connection = "online"
         elif hosts:
             router_status = "connected"
+            connection = "connected"
         elif item["status"] == "paid" or has_time:
-            # A still-valid voucher on an earlier purchase keeps the device
-            # surfing even when its newest prompt is pending or failed.
-            router_status = "surfing" if used and (not surf_until or has_time) else "expired" if used else "not_surfing"
+            router_status = "expired" if used and surf_until and not has_time else "not_surfing"
+            connection = "offline"
         elif item["status"] == "pending":
             router_status = "pending_activation"
+            connection = "offline"
         else:
             router_status = "disconnected"
+            connection = "offline"
         codes = ", ".join(entry["codes"] for entry in group["items"] if entry.get("codes")) or item["mac"]
         rows.append(
             {
@@ -3335,7 +3424,7 @@ def list_hotspot_clients(cursor, client_id, query):
                 "routerTunnelStatus": item.get("tunnel_status") or "unknown",
                 "packageName": item.get("package_name") or "",
                 "status": "active" if item["status"] == "paid" else item["status"],
-                "connection": "online" if (router_status in {"surfing", "connected"}) else "offline",
+                "connection": connection,
                 "routerStatus": router_status,
                 "billingStatus": item["status"],
                 "expiry": stamp(surf_until) if surf_until else stamp(item["paid_at"] or item["created_at"]),
@@ -3824,7 +3913,7 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
             timeline.append({"at": stamp(voucher["used_at"] or voucher["issued_at"]), "event": "Voucher voided", "detail": voucher["code"]})
     session_rows_out = []
     for session in sessions:
-        live = session["acctstoptime"] is None
+        is_live = session["acctstoptime"] is None
         session_rows_out.append(
             {
                 "username": session["username"],
@@ -3837,7 +3926,7 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
                 "ip": session.get("framedipaddress") or "",
                 "mac": session.get("callingstationid") or "",
                 "cause": session.get("acctterminatecause") or "",
-                "live": live,
+                "live": is_live,
             }
         )
         timeline.append(
@@ -3863,12 +3952,13 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
     # is on the router right now, and how much paid time is left. 'claimed'
     # marks a device that has since changed hands to another guest.
     live_by_username = {entry["username"]: entry for entry in live}
+    live_by_mac = {entry["mac"]: entry for entry in live if entry.get("mac")}
     host_by_mac = {host["mac"]: host for host in all_hosts}
     now = datetime.now()
     devices = []
     for voucher in vouchers:
         mac = str(voucher.get("redeemed_mac") or "").strip().upper()
-        live_entry = live_by_username.get(voucher["username"])
+        live_entry = live_by_username.get(voucher["username"]) or (live_by_mac.get(mac) if mac else None)
         seconds_left = None
         if voucher["status"] == "used" and voucher.get("used_at"):
             paused = int(voucher.get("paused_seconds") or 0)
@@ -3888,7 +3978,7 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
                 "payer": bool(mac and mac == payer_mac),
                 "claimed": bool(mac and not mac_kept(mac)),
                 "online": live_entry is not None,
-                "connected": live_entry is not None or mac in host_by_mac,
+                "connected": live_entry is not None or bool(mac and mac in host_by_mac),
                 "sessionTimeLeft": str((live_entry or {}).get("sessionTimeLeft") or ""),
                 "issuedAt": stamp(voucher["issued_at"]),
                 "usedAt": stamp(voucher["used_at"]),
@@ -3896,7 +3986,7 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
         )
     if payer_mac and not any(device["payer"] for device in devices):
         # The paying device's voucher was never stamped — still show the slot.
-        live_entry = live_by_username.get(row.get("username"))
+        live_entry = live_by_username.get(row.get("username")) or live_by_mac.get(payer_mac)
         devices.insert(
             0,
             {
@@ -3919,6 +4009,16 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
             }
         )
 
+    if live:
+        connection = "online"
+    elif all_hosts:
+        connection = "connected"
+    elif not router_reachable and open_sessions:
+        # Router did not answer — fall back to open RADIUS accounting only.
+        connection = "online"
+    else:
+        connection = "offline"
+
     return {
         "client": {
             "id": row["id"],
@@ -3939,7 +4039,7 @@ def hotspot_client_detail(cursor, client_id, purchase_id):
             "authorized": bool(row["authorized"]),
             "endedAt": stamp(row.get("ended_at")),
             "deleted": bool(row.get("deleted")),
-            "connection": "online" if (open_sessions or live) else "connected" if hosts else "offline",
+            "connection": connection,
         },
         "live": live,
         "hosts": hosts,

@@ -745,16 +745,17 @@ export function PppoeCustomerPage() {
               Recharge
             </Link>
             <div>
-              <SecondaryButton
+              <button
+                type="button"
                 ref={menuButtonRef}
                 aria-haspopup="menu"
                 aria-expanded={menuOpen}
-                className="min-h-10 border-primary-foreground/25 bg-primary-foreground/10 text-primary-foreground hover:bg-primary-foreground/15"
+                className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-lg bg-white px-4 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-white/90 sm:flex-none"
                 onClick={() => setMenuOpen((open) => !open)}
               >
                 More
                 <ChevronDown className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
-              </SecondaryButton>
+              </button>
               {menuOpen && menuPos
                 ? createPortal(
                     <div
@@ -871,8 +872,8 @@ export function PppoeCustomerPage() {
               )}
               {!subscriber.accessInterface ? (
                 <p className="border-t border-border py-3 text-xs text-muted-foreground">
-                  Online sessions show gadgets on this client&apos;s port automatically. Save a VLAN / access interface on the
-                  customer to keep listing them when they are offline.
+                  Online sessions list gadgets on this client&apos;s access port (not the whole bridge). Save a VLAN / access
+                  interface on the customer to keep listing them when they are offline.
                 </p>
               ) : null}
             </div>

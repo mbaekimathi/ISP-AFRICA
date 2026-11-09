@@ -680,7 +680,35 @@ def live_sessions(host, password, username, timeout=4, port=API_PORT, opener=Non
     return sessions
 
 
-def lan_gadgets(host, password, interface="", timeout=4, port=API_PORT, opener=None):
+def is_bridge_interface(name):
+    """True for bridge / bridge1-style names that cover the whole LAN."""
+    text = str(name or "").strip().lower()
+    return text == "bridge" or text.startswith("bridge")
+
+
+def subscriber_access_port(bridge_hosts, peer_mac="", hint=""):
+    """Narrow a PPPoE access hint to the port the dialing CPE is learned on.
+
+    PPPoE servers often listen on a bridge, so the live session's interface is
+    the bridge itself. Using that as a LAN scope would attribute every host on
+    the bridge (hotspot guests, other customers) to one subscriber. Prefer the
+    bridge-host on-interface for the dialing MAC; refuse a bare bridge hint.
+    """
+    hint = str(hint or "").strip()
+    peer = norm_mac(peer_mac)
+    if peer:
+        for row in bridge_hosts or []:
+            if norm_mac(row.get("mac-address")) != peer:
+                continue
+            port_name = str(row.get("on-interface") or "").strip()
+            if port_name:
+                return port_name
+    if hint and not is_bridge_interface(hint):
+        return hint
+    return ""
+
+
+def lan_gadgets(host, password, interface="", peer_mac="", timeout=4, port=API_PORT, opener=None):
     """End devices the router can see on its LAN.
 
     Sources: ARP, DHCP leases, bridge hosts, and hotspot hosts/actives.
@@ -688,6 +716,9 @@ def lan_gadgets(host, password, interface="", timeout=4, port=API_PORT, opener=N
     gadgets learned on that interface are kept — they sit behind that
     subscriber's router. A router doing its own NAT hides its LAN, so
     only bridged devices ever appear here.
+
+    peer_mac (the dialing CPE) narrows a bridge-wide PPPoE service interface
+    down to that CPE's bridge port so one session never absorbs the LAN.
     """
     connect = opener or socket.create_connection
     try:
@@ -707,6 +738,12 @@ def lan_gadgets(host, password, interface="", timeout=4, port=API_PORT, opener=N
         hotspot_active = optional_rows(sock, reader, "/ip/hotspot/active/print")
     finally:
         sock.close()
+
+    interface = str(interface or "").strip()
+    if peer_mac or is_bridge_interface(interface):
+        interface = subscriber_access_port(bridge_hosts, peer_mac, interface)
+        if not interface:
+            return []
 
     scoped = set()
     if interface:

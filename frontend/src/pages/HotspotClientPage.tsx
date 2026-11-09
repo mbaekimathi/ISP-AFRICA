@@ -204,12 +204,12 @@ function duration(seconds: number) {
 
 function deviceState(device: GuestDevice): { label: string; tone: "active" | "due" | "critical" | "paused" | "neutral" } {
   if (device.online) return { label: "Online", tone: "active" };
+  if (device.connected) return { label: "On network", tone: "due" };
   if (device.claimed) return { label: "New owner", tone: "neutral" };
   if (device.status === "issued") return { label: "Not redeemed", tone: "neutral" };
   if (device.status === "void") return { label: "Void", tone: "paused" };
   if (device.status === "pending") return { label: "Pending", tone: "due" };
   if (device.status === "failed") return { label: "Failed", tone: "critical" };
-  if (device.connected) return { label: "On network", tone: "due" };
   if (device.secondsLeft != null && device.secondsLeft > 0) return { label: "Time left", tone: "due" };
   return { label: "Used up", tone: "neutral" };
 }
@@ -567,20 +567,20 @@ export function HotspotClientPage() {
   const online = client.connection === "online";
   const connected = client.connection === "connected";
   const ended = client.deleted || client.endedAt != null;
-  const connectionDot = online ? "bg-success" : connected ? "bg-warning" : client.status === "failed" || ended ? "bg-destructive" : "bg-warning";
+  const connectionDot = online ? "bg-success" : connected ? "bg-warning" : "bg-destructive";
   const firstLive = detail.live[0] ?? null;
   const timeLeft = firstLive?.sessionTimeLeft || "—";
   const statusLabel = client.deleted ? "Deleted" : ended ? "Ended" : online ? "Online" : connected ? "Connected" : "Offline";
   const statusHint = online
     ? `Surfing for ${firstLive?.uptime || "a moment"}`
     : connected
-      ? "On the router — waiting for payment or a voucher"
+      ? "On Wi‑Fi — not logged in yet"
       : ended
         ? `Access ended ${client.endedAt ?? ""}`.trim()
         : detail.usage.lastSeen
           ? `Last seen ${detail.usage.lastSeen}`
           : "Never connected";
-  const statusColor = client.deleted || ended ? "text-destructive" : online ? "text-success" : "text-warning";
+  const statusColor = client.deleted || ended || (!online && !connected) ? "text-destructive" : online ? "text-success" : "text-warning";
   const journeyCount = (detail.connectionLog ?? []).length;
 
   const menuItems: { label: string; icon?: ReactNode; danger?: boolean; onClick: () => void }[] = [
@@ -617,7 +617,7 @@ export function HotspotClientPage() {
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="truncate text-xl font-semibold tracking-tight sm:text-2xl">{client.phone || "Hotspot guest"}</h1>
-                <StatusBadge tone={client.deleted || ended ? "paused" : online ? "active" : connected ? "due" : "neutral"}>
+                <StatusBadge tone={client.deleted || ended ? "paused" : online ? "active" : connected ? "due" : "critical"}>
                   {statusLabel}
                 </StatusBadge>
               </div>
@@ -762,7 +762,11 @@ export function HotspotClientPage() {
                         <span
                           className={cn(
                             "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
-                            device.online ? "bg-emerald-500/10 text-emerald-600" : "bg-primary/10 text-primary",
+                            device.online
+                              ? "bg-emerald-500/10 text-emerald-600"
+                              : device.connected
+                                ? "bg-amber-500/10 text-amber-600"
+                                : "bg-primary/10 text-primary",
                           )}
                           aria-hidden="true"
                         >

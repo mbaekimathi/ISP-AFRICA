@@ -18,7 +18,7 @@ type Subscriber = {
   routerTunnelStatus: "up" | "down" | "unknown";
   packageName: string;
   status: string;
-  connection: "online" | "offline" | "unknown";
+  connection: "online" | "connected" | "offline" | "unknown";
   routerStatus: "surfing" | "connected" | "not_surfing" | "expired" | "expired_online" | "suspended" | "suspended_online" | "disconnecting" | "disconnected" | "pending_activation";
   billingStatus: string;
   expiry: string | null;
@@ -79,7 +79,10 @@ function RouterCell({ client }: { client: Subscriber }) {
 }
 
 function connectionDot(connection: Subscriber["connection"]) {
-  return connection === "online" ? "bg-success" : connection === "offline" ? "bg-destructive" : "bg-warning";
+  if (connection === "online") return "bg-success";
+  if (connection === "connected") return "bg-warning";
+  if (connection === "offline") return "bg-destructive";
+  return "bg-warning";
 }
 
 function initials(client: Subscriber) {

@@ -496,6 +496,23 @@ class DarajaCallbackTests(unittest.TestCase):
         self.assertEqual(receipt, "")
         self.assertIn("cancelled", desc)
 
+    def test_billings_reference_prefers_receipt_over_checkout_id(self):
+        checkout = "ws_CO_09112026094817347727624201"
+        self.assertEqual(
+            pppoe_store.mpesa_display_reference(checkout, "", None),
+            "",
+        )
+        self.assertEqual(
+            pppoe_store.mpesa_display_reference(checkout, "TJK4H2ABCD"),
+            "TJK4H2ABCD",
+        )
+        self.assertEqual(
+            pppoe_store.mpesa_display_reference("", "QAB123XYZ0", checkout),
+            "QAB123XYZ0",
+        )
+        self.assertTrue(pppoe_store.is_daraja_checkout_id(checkout))
+        self.assertFalse(pppoe_store.is_daraja_checkout_id("TJK4H2ABCD"))
+
 
 class RenewConn:
     def __init__(self):
