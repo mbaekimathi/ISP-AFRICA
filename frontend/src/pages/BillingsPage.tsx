@@ -48,17 +48,17 @@ const serviceFilters: Array<{ value: ServiceFilter; label: string }> = [
   { value: "hotspot", label: "Hotspot" },
 ];
 
-function paymentMode(item: Transaction): { label: string; isMpesa: boolean } {
+function paymentMode(item: Transaction): string {
   const method = String(item.method || "").trim().toLowerCase();
   if (item.kind === "stk" || item.kind === "purchase" || item.kind === "gateway" || method === "stk" || method === "mpesa") {
-    return { label: "M-Pesa", isMpesa: true };
+    return "M-Pesa";
   }
-  if (item.kind === "invoice") return { label: "Invoice", isMpesa: false };
-  if (method === "manual") return { label: "Manual", isMpesa: false };
-  if (method === "cash") return { label: "Cash", isMpesa: false };
-  if (method === "bank") return { label: "Bank", isMpesa: false };
-  if (method) return { label: method.charAt(0).toUpperCase() + method.slice(1), isMpesa: false };
-  return { label: "Payment", isMpesa: false };
+  if (item.kind === "invoice") return "Invoice";
+  if (method === "manual") return "Manual";
+  if (method === "cash") return "Cash";
+  if (method === "bank") return "Bank";
+  if (method) return method.charAt(0).toUpperCase() + method.slice(1);
+  return "Payment";
 }
 
 function money(value: string) {
@@ -178,22 +178,28 @@ function amountClass(status: string) {
   return "text-warning";
 }
 
+const transactionGrid =
+  "grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 px-3 py-3 sm:grid-cols-[8.5rem_minmax(0,1.1fr)_minmax(0,0.7fr)_minmax(0,1fr)_auto] sm:items-center sm:gap-x-4 sm:px-5";
+
 function TransactionRow({ item }: { item: Transaction }) {
-  const mode = paymentMode(item);
   return (
-    <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 px-3 py-3 sm:grid-cols-[8.5rem_minmax(0,1.2fr)_minmax(0,1fr)_auto] sm:items-center sm:gap-x-4 sm:px-5">
+    <li className={transactionGrid}>
       <p className="order-1 truncate text-[11px] tabular text-muted-foreground sm:order-none sm:text-sm">
         {item.createdAt}
       </p>
       <p className="order-3 col-span-2 truncate text-sm font-medium sm:order-none sm:col-span-1">
         {item.customer || "—"}
       </p>
-      <div className="order-4 col-span-2 min-w-0 sm:order-none sm:col-span-1">
-        <p className="truncate text-sm">{mode.label}</p>
-        {mode.isMpesa && item.reference ? (
-          <p className="truncate font-mono text-[11px] text-muted-foreground sm:text-xs">{item.reference}</p>
-        ) : null}
-      </div>
+      <p className="order-4 truncate text-sm sm:order-none">{paymentMode(item)}</p>
+      <p
+        className={cn(
+          "order-5 truncate font-mono text-[11px] sm:order-none sm:text-xs",
+          item.reference ? "text-foreground" : "text-muted-foreground",
+        )}
+        title={item.reference || undefined}
+      >
+        {item.reference || "—"}
+      </p>
       <p className={cn("order-2 text-sm font-semibold tabular sm:order-none sm:text-right", amountClass(item.status))}>
         {money(item.amount)}
       </p>
@@ -205,15 +211,12 @@ function TransactionSkeletonRows() {
   return (
     <>
       {Array.from({ length: 6 }, (_, index) => (
-        <li
-          key={index}
-          className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1.5 px-3 py-3 sm:grid-cols-[8.5rem_minmax(0,1.2fr)_minmax(0,1fr)_auto] sm:gap-x-4 sm:px-5"
-          aria-hidden="true"
-        >
+        <li key={index} className={`${transactionGrid} gap-y-1.5`} aria-hidden="true">
           <div className="skeleton h-3 w-24" />
           <div className="skeleton h-3.5 w-14 justify-self-end" />
           <div className="skeleton col-span-2 h-3 w-2/5 sm:col-span-1 sm:w-28" />
-          <div className="skeleton col-span-2 h-3 w-1/3 sm:col-span-1 sm:w-20" />
+          <div className="skeleton h-3 w-16 sm:w-14" />
+          <div className="skeleton h-3 w-24 sm:w-28" />
         </li>
       ))}
     </>
@@ -439,10 +442,11 @@ export function BillingsPage() {
           </div>
         ) : (
           <div className="panel mt-3 overflow-hidden">
-            <div className="hidden border-b border-border px-5 py-2.5 text-xs font-medium uppercase tracking-wide text-muted-foreground sm:grid sm:grid-cols-[8.5rem_minmax(0,1.2fr)_minmax(0,1fr)_auto] sm:gap-x-4">
+            <div className="hidden border-b border-border px-5 py-2.5 text-xs font-medium uppercase tracking-wide text-muted-foreground sm:grid sm:grid-cols-[8.5rem_minmax(0,1.1fr)_minmax(0,0.7fr)_minmax(0,1fr)_auto] sm:gap-x-4">
               <span>When</span>
               <span>Customer</span>
               <span>Payment</span>
+              <span>M-Pesa ref</span>
               <span className="text-right">Amount</span>
             </div>
             <ul className="divide-y divide-border">
