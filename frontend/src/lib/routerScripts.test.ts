@@ -26,13 +26,13 @@ const picked = assignPortRoles(
   "hotspot,pppoe,static,dhcp",
 );
 assert.deepEqual(picked.ether1, ["wan"]);
-assert.deepEqual(picked.ether2, ["hotspot"]);
-assert.deepEqual(picked.ether3, ["pppoe"]);
-assert.deepEqual(picked.ether4, ["static"]);
+assert.deepEqual(picked.ether2, ["hotspot", "pppoe", "static"]);
+assert.deepEqual(picked.ether3, ["hotspot", "pppoe", "static"]);
+assert.deepEqual(picked.ether4, ["hotspot", "pppoe", "static"]);
 assert.deepEqual(picked.ether5, ["dhcp"]);
 assert.deepEqual(
   assignPortRoles([{ name: "ether1", comment: "PPPoE", running: true, disabled: false }], "hotspot").ether1,
-  ["pppoe"],
+  ["hotspot", "pppoe"],
 );
 const unroled = assignPortRoles(
   ["ether1", "ether2", "ether3"].map((name) => ({

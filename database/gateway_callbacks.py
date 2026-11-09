@@ -182,6 +182,8 @@ def _verify_stk(settings, checkout_id):
 
 
 def _credit_stk(connect, checkout_id, receipt, amount, msisdn, raw):
+    pending = None
+    vouchers = []
     with connect() as db:
         with db.cursor() as cursor:
             outcome = gateway_store.confirm_collection(
@@ -201,12 +203,25 @@ def _credit_stk(connect, checkout_id, receipt, amount, msisdn, raw):
                 db.commit()
                 _notify_unmatched(connect, checkout_id, "amount-mismatch")
                 return
-            fulfil_stk_credit(cursor, checkout_id)
+            pending, vouchers = fulfil_stk_credit(cursor, checkout_id)
             db.commit()
     # The buying device stays captive until its Done click calls
     # /hotspot/connect — authorizing on credit would close the captive
     # window before the voucher screen is even seen. sweep() connects
     # anyone whose window died first.
+    if pending and vouchers:
+        try:
+            import portal_server
+
+            with connect() as db:
+                with db.cursor() as cursor:
+                    portal_server.notify_hotspot_payment_received(cursor, pending, vouchers)
+                    db.commit()
+        except Exception as error:
+            print(
+                f"event=hotspot-payment-sms purchase={str(pending.get('purchase_id'))[-6:]} error={type(error).__name__}",
+                flush=True,
+            )
     print(f"event=gateway-collection checkout={checkout_id[-6:]} state=confirmed", flush=True)
 
 
@@ -247,20 +262,13 @@ def fulfil_stk_credit(cursor, checkout_id):
         )
         request = cursor.fetchone()
         if request:
-            cursor.execute(
-                "SELECT package_id FROM pppoe_subscribers WHERE id = %s",
-                (request["subscriber_id"],),
+            cycle_days = pppoe_store.sync_paid_package(
+                cursor,
+                request["client_id"],
+                request["subscriber_id"],
+                request.get("package_id"),
+                request.get("package_price"),
             )
-            current = cursor.fetchone()
-            if request.get("package_id") and current and str(request["package_id"]) != str(current["package_id"]):
-                cursor.execute(
-                    "UPDATE pppoe_subscribers SET package_id = %s WHERE id = %s",
-                    (request["package_id"], request["subscriber_id"]),
-                )
-                cursor.execute(
-                    "UPDATE pppoe_subscriptions SET package_id = %s, price = %s WHERE subscriber_id = %s",
-                    (request["package_id"], request["package_price"], request["subscriber_id"]),
-                )
             pppoe_store.renew(
                 cursor,
                 request["client_id"],
@@ -270,6 +278,7 @@ def fulfil_stk_credit(cursor, checkout_id):
                     "mpesaReference": (receipt or request.get("mpesa_code") or checkout_id)[:40],
                     "packageId": request.get("package_id"),
                     "packagePrice": format(request["package_price"], ".2f") if request.get("package_price") is not None else None,
+                    "cycleDays": cycle_days,
                 },
             )
             cursor.execute(
@@ -662,10 +671,25 @@ def _fulfil_direct(connect, checkout_id):
     guards make a repeat call a no-op, so the poll and this sweep can never
     double-credit. The device connects on its Done click or the sweep's
     hotspot_unauthorized pass."""
+    pending = None
+    vouchers = []
     with connect() as db:
         with db.cursor() as cursor:
-            fulfil_stk_credit(cursor, checkout_id)
+            pending, vouchers = fulfil_stk_credit(cursor, checkout_id)
             db.commit()
+    if pending and vouchers:
+        try:
+            import portal_server
+
+            with connect() as db:
+                with db.cursor() as cursor:
+                    portal_server.notify_hotspot_payment_received(cursor, pending, vouchers)
+                    db.commit()
+        except Exception as error:
+            print(
+                f"event=hotspot-payment-sms purchase={str(pending.get('purchase_id'))[-6:]} error={type(error).__name__}",
+                flush=True,
+            )
 
 
 def _fail_direct(connect, source, checkout_id, reason):

@@ -567,6 +567,11 @@ class PortalHelperTests(unittest.TestCase):
         ]
         html = portal_server.pay_page(row, offers, {"account_type": "paybill", "short_code": "123456"}).decode()
         self.assertIn("/thank-you?code=", html)
+        self.assertIn("id=amount", html)
+        self.assertIn("Math.ceil", html)
+        self.assertIn("Buys ", html)
+        self.assertIn('"cents": 50000', html)
+        self.assertIn("Pay any amount", html)
 
     def test_thankyou_page_shows_voucher_receipt(self):
         body = portal_server.thankyou_page(
@@ -578,6 +583,8 @@ class PortalHelperTests(unittest.TestCase):
                 "first_name": "Amina",
                 "last_name": "Wanjiku",
                 "pppoe_username": "0712345678",
+                "days_purchased": 15,
+                "next_due_date": "2026-11-24",
             }
         ).decode()
         self.assertIn("4821K", body)
@@ -585,6 +592,37 @@ class PortalHelperTests(unittest.TestCase):
         self.assertIn("0712345678", body)
         self.assertIn("Thank you, Amina Wanjiku!", body)
         self.assertIn("cannot be used again", body)
+        self.assertIn("15 days", body)
+        self.assertIn("2026-11-24", body)
+
+    def test_pay_page_live_days_use_package_cycle(self):
+        row = {
+            "first_name": "Amina",
+            "last_name": "Wanjiku",
+            "phone": "0712345678",
+            "package_id": "pkg-1",
+            "package_name": "Home 10",
+            "pppoe_username": "0712345678",
+            "price": "1000.00",
+            "cycle_days": 30,
+        }
+        offers = [
+            {
+                "id": "pkg-1",
+                "name": "SIMBA",
+                "price": "1000.00",
+                "download_mbps": 10,
+                "upload_mbps": 15,
+                "simultaneous_devices": 1,
+                "image_data_url": None,
+                "validity_amount": 1,
+                "validity_unit": "months",
+                "period": "1 month",
+            }
+        ]
+        html = portal_server.pay_page(row, offers, {"account_type": "paybill", "short_code": "123456"}).decode()
+        self.assertIn('"days": 30', html)
+        self.assertIn('"cents": 100000', html)
 
     def test_thankyou_page_marks_spent_voucher(self):
         body = portal_server.thankyou_page(
@@ -889,7 +927,34 @@ class BlockSharingApiTests(unittest.TestCase):
             body = handler.save_hotspot_access(cursor, "router-1", "token", {"enabled": True, "blockSharing": True, "push": True})
         self.assertTrue(body["applied"])
         push.assert_called_once_with(cursor, "router-1", "client-1", True, True, True)
-        self.assertEqual(cursor.queries[0][1], (1, 1, "router-1", "client-1"))
+
+    def test_onboard_defaults_enable_pppoe_hotspot_and_block_sharing(self):
+        handler = api.Handler.__new__(api.Handler)
+        cursor = FakeCursor([])
+        row = {"pppoe_enforced": 0, "hotspot_enabled": 0, "hotspot_block_sharing": 0}
+        with mock.patch.object(handler, "push_pppoe_enforcement", create=True) as pppoe, mock.patch.object(
+            handler, "push_hotspot_access", create=True
+        ) as hotspot:
+            handler.apply_onboard_access_defaults(cursor, "router-1", "client-1", "waiting", row)
+        pppoe.assert_called_once_with(cursor, "router-1", "client-1", True)
+        hotspot.assert_called_once_with(cursor, "router-1", "client-1", True, True, False)
+        self.assertEqual(len(cursor.queries), 1)
+        self.assertIn("pppoe_enforced = 1", cursor.queries[0][0])
+        self.assertIn("hotspot_enabled = 1", cursor.queries[0][0])
+        self.assertIn("hotspot_block_sharing = 1", cursor.queries[0][0])
+        self.assertEqual(cursor.queries[0][1], ("router-1", "client-1"))
+
+    def test_onboard_defaults_skip_when_already_configured(self):
+        handler = api.Handler.__new__(api.Handler)
+        cursor = FakeCursor([])
+        row = {"pppoe_enforced": 1, "hotspot_enabled": 0, "hotspot_block_sharing": 0}
+        with mock.patch.object(handler, "push_pppoe_enforcement", create=True) as pppoe, mock.patch.object(
+            handler, "push_hotspot_access", create=True
+        ) as hotspot:
+            handler.apply_onboard_access_defaults(cursor, "router-1", "client-1", "active", row)
+        pppoe.assert_not_called()
+        hotspot.assert_not_called()
+        self.assertEqual(cursor.queries, [])
 
     def test_save_rejects_non_boolean_sharing(self):
         handler = api.Handler.__new__(api.Handler)

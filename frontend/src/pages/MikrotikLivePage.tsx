@@ -3,9 +3,9 @@ import { useEffect, useState, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { FormField } from "@/components/ui/FormField";
-import { TunnelNotification } from "@/components/ui/TunnelNotification";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
+import { useTunnelAlert } from "@/providers/TunnelAlertProvider";
 
 type LiveInterface = {
   name: string;
@@ -201,7 +201,7 @@ export function MikrotikLivePage() {
   const [apiReady, setApiReady] = useState<boolean | null>(null);
   const [healthRange, setHealthRange] = useState<HealthRange>("live");
   const [healthTrends, setHealthTrends] = useState<Partial<Record<HealthRange, TrendPoint[]>>>({});
-  const [tunnelStatus, setTunnelStatus] = useState<"up" | "down" | "unknown">("unknown");
+  const tunnelAlert = useTunnelAlert();
   const [confirmRestart, setConfirmRestart] = useState(false);
   const [restarting, setRestarting] = useState(false);
   const [restartNote, setRestartNote] = useState("");
@@ -262,13 +262,17 @@ export function MikrotikLivePage() {
           if (stopped) return;
           setLive(body.live);
           setError("");
-          setTunnelStatus(body.live.reachable ? "up" : "down");
+          if (body.live.reachable) {
+            if (deviceId) tunnelAlert?.reportUp(deviceId);
+          } else if (deviceId) {
+            tunnelAlert?.reportDown(deviceId, body.live.name || body.live.identity || "Router");
+          }
           timer = window.setTimeout(load, 4000);
         })
         .catch((cause: unknown) => {
           if (stopped || (cause instanceof DOMException && cause.name === "AbortError")) return;
           setError(cause instanceof Error ? cause.message : "The live router read failed.");
-          setTunnelStatus("down");
+          if (deviceId) tunnelAlert?.reportDown(deviceId, "Router");
           timer = window.setTimeout(load, 8000);
         });
     };
@@ -279,7 +283,7 @@ export function MikrotikLivePage() {
       controller.abort();
       window.clearTimeout(timer);
     };
-  }, [deviceId, apiReady]);
+  }, [deviceId, apiReady, tunnelAlert]);
 
   useEffect(() => {
     if (!deviceId || apiReady !== true || healthRange === "live" || live?.health?.trends?.[healthRange] || healthTrends[healthRange]) return;
@@ -332,7 +336,7 @@ export function MikrotikLivePage() {
         body: "{}",
       });
       setRestartNote(body.message || "The router is restarting.");
-      setTunnelStatus("down");
+      if (deviceId) tunnelAlert?.reportDown(deviceId, live?.name || live?.identity || "Router");
     } catch (cause) {
       setRestartNote(cause instanceof Error ? cause.message : "The router could not be restarted.");
     } finally {
@@ -366,21 +370,6 @@ export function MikrotikLivePage() {
     }
   }
 
-  async function retryConnection() {
-    setSaving(true);
-    setError("");
-    try {
-      const body = await apiRequest<{ live: LiveState }>(`/api/mikrotiks/${deviceId}/live`);
-      setLive(body.live);
-      setTunnelStatus(body.live.reachable ? "up" : "down");
-    } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "The router could not be reached.");
-      setTunnelStatus("down");
-    } finally {
-      setSaving(false);
-    }
-  }
-
   const title = live?.name || live?.identity || "MikroTik";
   const needsPassword = apiReady === false || /could not be read|Save the API password/i.test(live?.message || "");
   const cpu = Math.max(0, Math.min(100, Number(live?.cpuLoad) || 0));
@@ -402,7 +391,12 @@ export function MikrotikLivePage() {
         ? "bg-destructive"
         : "bg-primary-foreground/50";
 
-  const notice = live?.message && !/development sample/i.test(live.message) ? live.message : "";
+  const notice =
+    live?.message &&
+    !/development sample/i.test(live.message) &&
+    live.message !== "The management tunnel did not answer."
+      ? live.message
+      : "";
   const sourceUplink = wan?.uplinks.find((item) => item.active) ?? wan?.uplinks[0];
 
   return (
@@ -442,14 +436,6 @@ export function MikrotikLivePage() {
           />
         </div>
       </section>
-      {tunnelStatus !== "unknown" ? (
-        <TunnelNotification
-          tunnelStatus={tunnelStatus}
-          routerName={live?.name || live?.identity || "Router"}
-          onRetry={() => void retryConnection()}
-          polling={true}
-        />
-      ) : null}
       {error ? (
         <p className="mt-4 notice" role="alert">
           {error}

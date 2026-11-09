@@ -1,12 +1,12 @@
 import { useEffect, useState } from "react";
 import { Navigate, useNavigate } from "react-router-dom";
-import { PrimaryButton } from "@/components/ui/Buttons";
+import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { LiveLoad } from "@/components/ui/LiveLoad";
 import { DetailGrid, PageHeader } from "@/components/ui/DetailGrid";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { clientHomePath, listAccountsForReview, type PublicAccount } from "@/lib/accounts";
-import { employeeHomePath } from "@/lib/employees";
+import { employeeHomePath, employeePage } from "@/lib/employees";
 import { useAuth } from "@/providers/AuthProvider";
 import { useEmployeeAuth } from "@/providers/EmployeeAuthProvider";
 
@@ -44,10 +44,13 @@ export function IspClientsPage() {
 
   return (
     <div className="page-shell py-8">
-      <PageHeader
-        title="ISP clients"
-        description="Every ISP client in this system. Access opens their portal in this browser as that client."
-      />
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <PageHeader
+          title="ISP clients"
+          description="Every ISP client in this system. Access opens their portal in this browser as that client."
+        />
+        <SecondaryButton to={employeePage(employee, "/hr")}>Company HR</SecondaryButton>
+      </div>
       {message ? (
         <p className="notice mt-4" role="alert">
           {message}

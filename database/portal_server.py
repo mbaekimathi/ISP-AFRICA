@@ -518,6 +518,7 @@ def pppoe_offers(cursor, row):
     offers = pppoe_packages(cursor, row["client_id"], str(row.get("router_id") or ""))
     own = next((offer for offer in offers if str(offer["id"]) == str(row["package_id"])), None)
     if own is None and row.get("package_id"):
+        cycle = max(1, int(row.get("cycle_days") or 30))
         offers.insert(
             0,
             {
@@ -528,7 +529,9 @@ def pppoe_offers(cursor, row):
                 "upload_mbps": row["upload_mbps"],
                 "simultaneous_devices": row.get("package_devices"),
                 "image_data_url": None,
-                "period": f"{int(row['cycle_days'] or 30)} days",
+                "validity_amount": cycle,
+                "validity_unit": "days",
+                "period": f"{cycle} days",
             },
         )
     return offers
@@ -582,6 +585,17 @@ def paused_page(row):
     )
 
 
+def offer_cycle_days(offer, fallback=30):
+    """Days one full package payment covers — used by the live pay calculator."""
+    if offer.get("validity_amount") is not None and offer.get("validity_unit"):
+        return pppoe_service.validity_cycle_days(offer["validity_amount"], offer["validity_unit"], fallback)
+    period = str(offer.get("period") or "")
+    match = re.match(r"^(\d+)\s*day", period, re.I)
+    if match:
+        return max(1, int(match.group(1)))
+    return max(1, int(fallback or 30))
+
+
 def pay_page(row, offers, payment):
     name = esc(f"{row['first_name']} {row['last_name']}".strip()) or "Customer"
     phone = esc(row["phone"])
@@ -593,8 +607,14 @@ def pay_page(row, offers, payment):
     )
     if not picks:
         picks = "<p class=note>No packages are on sale right now. Contact the provider to recharge your line.</p>"
-    pkg_js = {str(offer["id"]): cents(offer["price"]) for offer in offers}
     cycle = int(row["cycle_days"] or 30)
+    pkg_js = {
+        str(offer["id"]): {
+            "cents": cents(offer["price"]),
+            "days": offer_cycle_days(offer, cycle),
+        }
+        for offer in offers
+    }
     chosen_offer = next(
         (offer for offer in offers if str(offer["id"]) == own or not own_listed), offers[0] if offers else None
     )
@@ -610,7 +630,7 @@ def pay_page(row, offers, payment):
 <p class=hint id=days></p>
 <button id=paybtn type=button onclick="pay()">Pay with M-Pesa</button>
 <div id=msg aria-live=polite></div>
-<p class=hint>You'll get a prompt on the phone to approve. This page updates itself when the payment lands.</p>
+<p class=hint>Pay any amount — surfing days update as you type. You'll get a prompt on the phone to approve.</p>
 <script>
 const BRAND={json.dumps(BRAND)};
 const PKG={json.dumps(pkg_js)};
@@ -626,18 +646,21 @@ function money(cents){{return 'KSh '+(cents%100?(cents/100).toFixed(2):String(ce
 function sel(){{const p=document.querySelector('input[name=pkg]:checked');return p?p.value:'';}}
 function refresh(){{
  document.querySelectorAll('.pick').forEach(function(x){{const r=x.querySelector('input[name=pkg]');x.classList.toggle('on',!!(r&&r.checked));}});
- const p=PKG[sel()];
+ const pkg=PKG[sel()];
+ const p=pkg?pkg.cents:0;
+ const cycle=pkg&&pkg.days?pkg.days:CYCLE;
  const amt=document.getElementById('amount');
- const c=Math.round(parseFloat(amt.value||'0')*100)||0;
- const d=p&&c>0?Math.max(1,Math.floor(c*CYCLE/p)):0;
+ const c=Math.round(parseFloat(String(amt.value||'0').replace(/,/g,''))*100)||0;
+ const d=p&&c>0?Math.max(1,Math.ceil(c*cycle/p)):0;
  const dd=document.getElementById('days');
  if(dd)dd.textContent=p?(d>0?'Buys '+d+' day'+(d===1?'':'s')+' of internet.':''):'';
  const b=document.getElementById('paybtn');
  if(b&&!b.disabled)b.textContent=c>0?'Pay '+money(c)+' with M-Pesa':'Pay with M-Pesa';
 }}
 function pickpkg(){{
- const p=PKG[sel()];const amt=document.getElementById('amount');
- if(p&&amt)amt.value=String(p/100);
+ const pkg=PKG[sel()];const amt=document.getElementById('amount');
+ if(pkg&&amt)amt.value=String(pkg.cents/100);
+ dirty=false;
  refresh();
 }}
 function stage(html){{document.querySelector('.card').innerHTML=BRAND+html;}}
@@ -845,6 +868,23 @@ def thankyou_page(voucher, adverts=None):
         else "Single use — the voucher is spent as soon as you start surfing and cannot be used again."
     )
     badge = '<span class="badge warn">Voucher used</span>' if used else '<span class="badge ok">Payment successful</span>'
+    days = int(voucher.get("days_purchased") or 0)
+    due = voucher.get("next_due_date")
+    due_text = ""
+    if hasattr(due, "isoformat"):
+        due_text = due.isoformat()[:10]
+    elif due:
+        due_text = str(due)[:10]
+    days_row = (
+        f'<div class=row><span>Surfing days</span><span>{days} day{"s" if days != 1 else ""}</span></div>'
+        if days > 0
+        else ""
+    )
+    until_row = (
+        f'<div class=row><span>Paid through</span><span>{esc(due_text)}</span></div>'
+        if due_text
+        else ""
+    )
     return page(
         "Thank you",
         f"""<div class=okpage>{DONE_ICON}
@@ -855,7 +895,7 @@ def thankyou_page(voucher, adverts=None):
 <p class=sect>Receipt</p>
 <div class=row><span>Package</span><span>{esc(voucher['package_name'])}</span></div>
 <div class=row><span>Amount paid</span><span>KSh {esc(ksh(voucher['amount']))}</span></div>
-<div class=row><span>Account</span><span>{esc(voucher['pppoe_username'])}</span></div>
+{days_row}{until_row}<div class=row><span>Account</span><span>{esc(voucher['pppoe_username'])}</span></div>
 <p class=note>{state} Keep it as your receipt.</p>
 {adverts_html(adverts)}
 <p class=hint style="text-align:center">You can close this window and start browsing.</p>""",
@@ -1474,12 +1514,13 @@ def _hotspot_pending_rows(cursor, where, params):
         f"""
         SELECT pu.id AS purchase_id, pu.client_id, pu.device_id, pu.mac, pu.ip, pu.devices, pu.periods,
                pu.status, pu.username, pu.password, pu.authorized, pu.login_url, pu.orig_url,
-               pu.paid_at, pu.created_at, pu.mpesa_code, pu.ended_at, pu.deleted,
+               pu.paid_at, pu.created_at, pu.mpesa_code, pu.phone, pu.amount, pu.ended_at, pu.deleted,
                d.tunnel_ip, d.api_secret,
                COALESCE(p.download_mbps, c.download_mbps, 0) AS download_mbps,
                COALESCE(p.upload_mbps, c.upload_mbps, 0) AS upload_mbps,
                COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
                COALESCE(p.validity_unit, c.validity_unit, 'days') AS validity_unit,
+               COALESCE(p.name, c.name, '') AS package_name,
                {pppoe_store.HOTSPOT_LIMIT_COLUMNS},
                pu.package_id
         FROM hotspot_purchases pu
@@ -1526,6 +1567,9 @@ def hotspot_pending_from_row(row):
         "tunnel_ip": row.get("tunnel_ip") or "",
         "api_secret": row.get("api_secret") or "",
         "package_id": row["package_id"],
+        "package_name": row.get("package_name") or "",
+        "phone": row.get("phone") or "",
+        "amount": row.get("amount"),
         "download": int(row["download_mbps"] or 0),
         "upload": int(row["upload_mbps"] or 0),
         "seconds": int(row["periods"] or 1) * validity_seconds(row["validity_amount"], row["validity_unit"]),
@@ -1537,6 +1581,72 @@ def hotspot_pending_from_row(row):
         "orig": row.get("orig_url") or "",
         "at": row.get("created_at") or datetime.now(),
     }
+
+
+def hotspot_payment_sms_text(pending, vouchers):
+    """Payment-received SMS body — always includes every issued voucher code."""
+    codes = [str(voucher.get("code") or "").strip() for voucher in (vouchers or []) if str(voucher.get("code") or "").strip()]
+    package = str(pending.get("package_name") or "").strip() or "hotspot package"
+    try:
+        amount = format(Decimal(pending.get("amount") or 0), ".2f")
+    except (InvalidOperation, TypeError, ValueError):
+        amount = str(pending.get("amount") or "").strip() or "0.00"
+    if len(codes) == 1:
+        voucher_line = f"Voucher: {codes[0]}"
+    elif codes:
+        voucher_line = "Vouchers: " + ", ".join(codes)
+    else:
+        voucher_line = "Your hotspot access is ready."
+    return (
+        f"Payment received for {package} (KSh {amount}). {voucher_line}. "
+        "Enter a voucher under Have a voucher? to connect."
+    )
+
+
+def notify_hotspot_payment_received(cursor, pending, vouchers):
+    """SMS the payer when paymentReceived is enabled — includes voucher codes.
+
+    Claims sms_payment_notified so the portal poll and gateway callback can
+    never text the same purchase twice.
+    """
+    client_id = str((pending or {}).get("client_id") or "")
+    purchase_id = str((pending or {}).get("purchase_id") or "")
+    phone = str((pending or {}).get("phone") or "").strip()
+    if not client_id or not purchase_id or not phone or not vouchers:
+        return False
+    cursor.execute(
+        "SELECT payment_received FROM isp_hotspot_notification_settings WHERE client_id = %s",
+        (client_id,),
+    )
+    pref = cursor.fetchone()
+    if pref is not None and not int(pref.get("payment_received") or 0):
+        cursor.execute(
+            "UPDATE hotspot_purchases SET sms_payment_notified = 1 WHERE id = %s",
+            (purchase_id,),
+        )
+        return False
+    cursor.execute(
+        """
+        UPDATE hotspot_purchases
+        SET sms_payment_notified = 1
+        WHERE id = %s AND client_id = %s AND sms_payment_notified = 0
+        """,
+        (purchase_id, client_id),
+    )
+    if cursor.rowcount == 0:
+        return False
+    try:
+        import api as api_mod
+    except Exception:
+        return False
+    _mode, sms = api_mod.load_active_sms(cursor, client_id)
+    if not sms:
+        return False
+    details = api_mod.communication_details(sms.get("details"))
+    if details.get("enabled") is False:
+        return False
+    result = api_mod.send_sms(sms, phone, hotspot_payment_sms_text(pending, vouchers))
+    return bool(result.get("ok"))
 
 
 def _limit_target(row, started):
@@ -2555,20 +2665,13 @@ class PortalHandler(BaseHTTPRequestHandler):
                         return self._send(self.paid_body(cursor, db, request), 200, "application/json")
                     return self._send(b'{"state":"pending"}', 200, "application/json")
                 try:
-                    cursor.execute(
-                        "SELECT package_id FROM pppoe_subscribers WHERE id = %s",
-                        (request["subscriber_id"],),
+                    cycle_days = pppoe_store.sync_paid_package(
+                        cursor,
+                        request["client_id"],
+                        request["subscriber_id"],
+                        request.get("package_id"),
+                        request.get("package_price"),
                     )
-                    current = cursor.fetchone()
-                    if request.get("package_id") and current and str(request["package_id"]) != str(current["package_id"]):
-                        cursor.execute(
-                            "UPDATE pppoe_subscribers SET package_id = %s WHERE id = %s",
-                            (request["package_id"], request["subscriber_id"]),
-                        )
-                        cursor.execute(
-                            "UPDATE pppoe_subscriptions SET package_id = %s, price = %s WHERE subscriber_id = %s",
-                            (request["package_id"], request["package_price"], request["subscriber_id"]),
-                        )
                     # Pooled collection: the ledger entry and the renewal live
                     # in this one transaction — whoever confirms first (poll,
                     # callback, sweep) wins, and the unique keys make a second
@@ -2591,6 +2694,7 @@ class PortalHandler(BaseHTTPRequestHandler):
                             "mpesaReference": (receipt or checkout_id)[:40],
                             "packageId": request.get("package_id"),
                             "packagePrice": format(request["package_price"], ".2f") if request.get("package_price") is not None else None,
+                            "cycleDays": cycle_days,
                         },
                     )
                     cursor.execute(
@@ -2770,6 +2874,9 @@ class PortalHandler(BaseHTTPRequestHandler):
                 "tunnel_ip": device["tunnel_ip"],
                 "api_secret": device["api_secret"],
                 "package_id": package["id"],
+                "package_name": str(package.get("name") or ""),
+                "phone": phone,
+                "amount": format(Decimal(charged), ".2f"),
                 "download": int(package["download_mbps"]),
                 "upload": int(package["upload_mbps"]),
                 "seconds": quote_result["seconds"],
@@ -2811,7 +2918,10 @@ class PortalHandler(BaseHTTPRequestHandler):
                     return self._send(b'{"state":"failed","reason":"Unknown or expired payment request."}', 200, "application/json")
                 if row["status"] == "paid":
                     try:
-                        late = issue_hotspot_vouchers(cursor, hotspot_pending_from_row(row))
+                        paid_pending = hotspot_pending_from_row(row)
+                        late = issue_hotspot_vouchers(cursor, paid_pending)
+                        if late:
+                            notify_hotspot_payment_received(cursor, paid_pending, late)
                         if late and row["username"]:
                             cursor.execute(
                                 "UPDATE hotspot_vouchers SET status = 'used', used_at = NOW() WHERE id = %s AND status = 'issued'",
@@ -2887,6 +2997,8 @@ class PortalHandler(BaseHTTPRequestHandler):
                 try:
                     vouchers = issue_hotspot_vouchers(cursor, pending)
                     gateway_store.confirm_collection(cursor, checkout_id)
+                    if vouchers:
+                        notify_hotspot_payment_received(cursor, pending, vouchers)
                     db.commit()
                 except Exception:
                     db.rollback()

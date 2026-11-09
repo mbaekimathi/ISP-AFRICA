@@ -14,12 +14,28 @@ type NotificationKey =
   | "mikrotikUnreachable"
   | "mikrotikAdded"
   | "ispRegistered"
+  | "systemPerformance"
   | "communicationsFailed"
   | "paymentsFailed";
 
 type NotificationSettings = Record<NotificationKey, boolean>;
 
 const events: { key: NotificationKey; label: string; detail: string }[] = [
+  {
+    key: "systemPerformance",
+    label: "System performance needs attention",
+    detail: "Alert when host CPU, memory, disk, or uplink crosses a high threshold.",
+  },
+  {
+    key: "ispRegistered",
+    label: "A new ISP client is registered",
+    detail: "Alert when a new ISP signs up and is waiting for review.",
+  },
+  {
+    key: "mikrotikAdded",
+    label: "A MikroTik is onboarded",
+    detail: "Alert when an ISP client onboards a new router.",
+  },
   {
     key: "serverUnreachable",
     label: "The app cannot communicate with the servers",
@@ -29,16 +45,6 @@ const events: { key: NotificationKey; label: string; detail: string }[] = [
     key: "mikrotikUnreachable",
     label: "The app cannot communicate with MikroTiks",
     detail: "Alert when a managed router stops answering health checks.",
-  },
-  {
-    key: "mikrotikAdded",
-    label: "A new MikroTik is added",
-    detail: "Alert when an ISP client onboards a new router.",
-  },
-  {
-    key: "ispRegistered",
-    label: "A new ISP is registered",
-    detail: "Alert when a new ISP client signs up and is waiting for review.",
   },
   {
     key: "communicationsFailed",
@@ -57,6 +63,7 @@ const defaults: NotificationSettings = {
   mikrotikUnreachable: true,
   mikrotikAdded: true,
   ispRegistered: true,
+  systemPerformance: true,
   communicationsFailed: true,
   paymentsFailed: true,
 };
@@ -71,7 +78,7 @@ export function CompanyNotificationSettingsPage() {
   const [loaded, setLoaded] = useState(false);
 
   const apply = useCallback((body: { notifications: NotificationSettings }) => {
-    setToggles(body.notifications);
+    setToggles({ ...defaults, ...body.notifications });
     setLoaded(true);
   }, []);
 
@@ -109,7 +116,7 @@ export function CompanyNotificationSettingsPage() {
     <div className="page-shell py-8">
       <PageHeader
         title="Notification settings"
-        description="Choose which events should notify the company. Alerts go through the communication APIs set up in company settings."
+        description="Choose which events should notify the company — system performance, new ISP registrations, MikroTik onboarding, and gateway health. Alerts go through the communication APIs set up in company settings."
       />
       <div className="mt-6">
         <SoundAlertsCard apiBase="/api/employee/company/notifications" scope="company" />

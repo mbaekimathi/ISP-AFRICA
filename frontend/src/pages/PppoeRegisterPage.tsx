@@ -4,7 +4,6 @@ import { FormField } from "@/components/ui/FormField";
 import { PageHeader } from "@/components/ui/DetailGrid";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { TunnelNotification } from "@/components/ui/TunnelNotification";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { ApiRequestError, apiRequest } from "@/lib/api";
 import { clientPage } from "@/lib/accounts";
@@ -62,7 +61,6 @@ export function PppoeRegisterPage() {
   const [notice, setNotice] = useState("");
   const [saving, setSaving] = useState(false);
   const [usernameNote, setUsernameNote] = useState("");
-  const [tunnelStatus, setTunnelStatus] = useState<"up" | "down" | "unknown">("unknown");
 
   useEffect(() => {
     apiRequest<{ routers: RouterOption[] }>("/api/routers")
@@ -73,15 +71,12 @@ export function PppoeRegisterPage() {
   useEffect(() => {
     if (!form.routerId) {
       setPackages([]);
-      setTunnelStatus("unknown");
       return;
     }
-    const selectedRouter = routers.find((item) => item.id === form.routerId);
-    setTunnelStatus(selectedRouter?.tunnelStatus === "up" ? "up" : selectedRouter?.tunnelStatus === "down" ? "down" : "unknown");
     apiRequest<{ packages: PackageOption[] }>(`/api/routers/${form.routerId}/packages`)
       .then((body) => setPackages(body.packages))
       .catch((error: unknown) => setNotice(error instanceof Error ? error.message : "Packages could not be loaded."));
-  }, [form.routerId, routers]);
+  }, [form.routerId]);
 
   useEffect(() => {
     const digits = form.phone.replace(/\D/g, "");
@@ -160,13 +155,6 @@ export function PppoeRegisterPage() {
 
   return (
     <div className="page-shell py-8">
-      {form.routerId && routers.some((item) => item.id === form.routerId) ? (
-        <TunnelNotification
-          tunnelStatus={tunnelStatus}
-          routerName={routers.find((item) => item.id === form.routerId)?.name || "Router"}
-          polling={false}
-        />
-      ) : null}
       <PageHeader title="Register PPPoE client" description="Saving checks the username, package, router, and address, then writes the RADIUS login." />
       {notice ? <p className="mt-4 notice" role="status">{notice}</p> : null}
       {warnings.map((item) => (
@@ -225,8 +213,7 @@ export function PppoeRegisterPage() {
               Use phone number
             </SecondaryButton>
           </FormField>
-          <FormField id="password" label="PPPoE password" error={errors.password} hint="Use 4 to 64 characters with no spaces at the start or end. A phone number like 0723864156 works.">
-            <div className="flex flex-wrap gap-2">
+          <FormField id="password" label="PPPoE password" error={errors.password} hint="Use 4 to 64 characters with no spaces at the start or end. A phone number like 0723864156 works.">            <div className="flex flex-wrap gap-2">
               <input id="password" className="field" type={showPassword ? "text" : "password"} value={form.password} onChange={(event) => setField("password", event.target.value)} required />
               <SecondaryButton type="button" onClick={() => setShowPassword((current) => !current)}>{showPassword ? "Hide" : "Show"}</SecondaryButton>
               <SecondaryButton

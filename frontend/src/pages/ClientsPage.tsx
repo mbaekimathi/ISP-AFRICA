@@ -189,7 +189,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
     const refreshIfVisible = () => {
       if (document.visibilityState === "visible") load(applied);
     };
-    const timer = window.setInterval(refreshIfVisible, 10000);
+    const timer = window.setInterval(refreshIfVisible, 8000);
     document.addEventListener("visibilitychange", refreshIfVisible);
     return () => {
       window.clearInterval(timer);

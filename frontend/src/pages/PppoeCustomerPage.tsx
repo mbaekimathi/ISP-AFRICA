@@ -533,8 +533,8 @@ export function PppoeCustomerPage() {
   const today = new Date();
   const todayKey = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, "0")}-${String(today.getDate()).padStart(2, "0")}`;
   const expiryDay = (subscriber.expiry || "").slice(0, 10);
-  // status='expired' only lands once reconcile() runs on a list view; the
-  // expiry date itself is checked here so the detail page can't lag behind.
+  // API status polls return effective status (expiry included) without waiting
+  // for the background enforce sweep; keep the local date check as a fallback.
   const expiredService = ended || subscriber.status === "expired" || (expiryDay !== "" && expiryDay < todayKey);
   let statusLabel: string;
   let statusHint: string;

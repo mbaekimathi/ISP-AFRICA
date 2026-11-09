@@ -55,6 +55,9 @@ const notificationLinks = [
 ];
 
 const communicationsLinks = [
+  { label: "SMS", to: "/account/settings/isp-communications/sms" },
+  { label: "WhatsApp", to: "/account/settings/isp-communications/whatsapp" },
+  { label: "Email", to: "/account/settings/isp-communications/email" },
   { label: "Notifications", to: "/account/settings/isp-notifications/settings" },
 ];
 
@@ -201,7 +204,7 @@ function linksForPage(pathname: string, advertsEnabled: boolean) {
     ];
   }
   if (pathname.startsWith("/account/settings/isp-notifications")) return notificationLinks;
-  if (pathname.endsWith("/account/settings/isp-communications")) return communicationsLinks;
+  if (pathname.startsWith("/account/settings/isp-communications")) return communicationsLinks;
   if (pathname.endsWith("/account/settings/isp-adverts")) return advertLinks;
   if (pathname === "/account/settings" || pathname.endsWith("/account/settings"))
     return advertsEnabled ? [...settingsLinks, advertsLink] : settingsLinks;

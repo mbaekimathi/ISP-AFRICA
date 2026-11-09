@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
-import { Navigate } from "react-router-dom";
+import { Navigate, useParams } from "react-router-dom";
 import {
   CommunicationChannelFields,
+  SMS_PROVIDER_LABELS,
   draftFrom,
   emptyDraft,
+  inferSmsProvider,
   type Channel,
   type CommunicationDraft,
   type CommunicationRecord,
@@ -11,10 +13,10 @@ import {
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { LiveLoad } from "@/components/ui/LiveLoad";
 import { PageHeader } from "@/components/ui/DetailGrid";
-import { FormPicker } from "@/components/ui/FormField";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { ApiRequestError, apiRequest } from "@/lib/api";
 import { cn } from "@/lib/cn";
+import { employeePage } from "@/lib/employees";
 import { useEmployeeAuth } from "@/providers/EmployeeAuthProvider";
 
 type CommunicationSettings = Record<Channel, CommunicationRecord | null>;
@@ -30,8 +32,8 @@ const channels: {
 }[] = [
   {
     channel: "sms",
-    title: "Company SMS gateway",
-    action: "Save SMS gateway",
+    title: "SMS settings",
+    action: "Save SMS",
   },
   {
     channel: "whatsapp",
@@ -45,8 +47,14 @@ const channels: {
   },
 ];
 
+function isChannel(value: string | undefined): value is Channel {
+  return value === "sms" || value === "whatsapp" || value === "email";
+}
+
 export function CompanyCommunicationsPage() {
   const { employee, ready } = useEmployeeAuth();
+  const { channel: channelParam } = useParams<{ channel: string }>();
+  const channel = isChannel(channelParam) ? channelParam : null;
   usePageMeta(
     "COMPANY COMMUNICATIONS — ISP CENTRIC",
     "Set up the company SMS, WhatsApp, and email gateways.",
@@ -62,7 +70,6 @@ export function CompanyCommunicationsPage() {
     whatsapp: idleCheck,
     email: idleCheck,
   });
-  const [channel, setChannel] = useState<Channel>("sms");
   const [error, setError] = useState("");
   const [pending, setPending] = useState<Channel | null>(null);
   const [loaded, setLoaded] = useState(false);
@@ -146,69 +153,79 @@ export function CompanyCommunicationsPage() {
     return <Navigate to="/employee/account" replace />;
   }
 
+  if (!channel) {
+    return <Navigate to={employeePage(employee, "/company-settings/communications/sms")} replace />;
+  }
+
+  const item = channels.find((entry) => entry.channel === channel)!;
+  const draft = drafts[channel];
+  const check = checks[channel];
+  const smsProvider = channel === "sms" ? inferSmsProvider(draft.endpoint, draft.provider) : null;
+  const statusDot =
+    check.state === "ok" ? "bg-success" : check.state === "failed" ? "bg-destructive" : "bg-muted-foreground";
+  const statusText =
+    check.state === "checking"
+      ? "Checking the connection…"
+      : check.state === "ok"
+        ? check.reason || "Connected — the API endpoint answered."
+        : check.state === "failed"
+          ? `Not connected — ${check.reason}`
+          : saved[channel]
+            ? "Connection not tested yet."
+            : "Save the details, then test the connection.";
+
   return (
     <div className="page-shell py-8">
-      <PageHeader
-        title="Company communications"
-        description="Set up the company SMS, WhatsApp, and email gateways. Saved keys and tokens stay hidden and are kept when those fields are left unchanged."
-      />
+      <PageHeader title={item.title} />
+      {channel === "sms" ? (
+        <div className="mb-6">
+          <p className="text-[0.7rem] font-semibold uppercase tracking-[0.16em] text-muted-foreground">
+            Settings · Communication settings
+          </p>
+          <h2 className="mt-2 text-2xl font-semibold tracking-tight text-foreground">SMS settings</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Credentials are saved for the company. Leave secret fields blank to keep the current values.
+          </p>
+        </div>
+      ) : (
+        <div className="mb-6">
+          <h2 className="text-2xl font-semibold tracking-tight text-foreground">{item.title}</h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            Saved keys and tokens stay hidden and are kept when those fields are left unchanged.
+          </p>
+        </div>
+      )}
       {error ? (
         <p className="mt-4 notice" role="alert">
           {error}
         </p>
       ) : null}
-      <div className="form-stack mt-6">
-        <FormPicker
-          label="Company communication API"
-          value={channel}
-          onChange={(id) => setChannel(id as Channel)}
-          options={[
-            { id: "sms", label: "SMS" },
-            { id: "whatsapp", label: "WhatsApp" },
-            { id: "email", label: "Email" },
-          ]}
-        />
-        {channels.map((item) => {
-          const draft = drafts[item.channel];
-          const check = checks[item.channel];
-          const statusDot =
-            check.state === "ok" ? "bg-success" : check.state === "failed" ? "bg-destructive" : "bg-muted-foreground";
-          const statusText =
-            check.state === "checking"
-              ? "Checking the connection…"
-              : check.state === "ok"
-                ? `Connected — ${check.reason || "the API endpoint answered."}`
-                : check.state === "failed"
-                  ? `Not connected — ${check.reason}`
-                  : saved[item.channel]
-                    ? "Connection not tested yet."
-                    : "Save the details, then test the connection.";
-          return (
-            <form
-              key={item.channel}
-              hidden={channel !== item.channel}
-              className="form-card"
-              onSubmit={(event) => {
-                event.preventDefault();
+      <div className="form-stack mt-2">
+        <form
+          className="form-card"
+          onSubmit={(event) => {
+            event.preventDefault();
+            setError("");
+            setPending(channel);
+            apiRequest<CommunicationSettings>("/api/employee/company/communications", {
+              method: "POST",
+              body: JSON.stringify({ channel, ...draft }),
+            })
+              .then((body) => {
+                apply(body);
                 setError("");
-                setPending(item.channel);
-                apiRequest<CommunicationSettings>("/api/employee/company/communications", {
-                  method: "POST",
-                  body: JSON.stringify({ channel: item.channel, ...draft }),
-                })
-                  .then((body) => {
-                    apply(body);
-                    setError("");
-                  })
-                  .catch((cause: unknown) => {
-                    setError(cause instanceof Error ? cause.message : "That company gateway could not be saved.");
-                  })
-                  .finally(() => setPending(null));
-              }}
-            >
+              })
+              .catch((cause: unknown) => {
+                setError(cause instanceof Error ? cause.message : "That company gateway could not be saved.");
+              })
+              .finally(() => setPending(null));
+          }}
+        >
+          {channel !== "sms" ? (
+            <>
               <div className="flex items-center gap-3">
-                <h2 className="text-lg font-semibold">{item.title}</h2>
-                {saved[item.channel] ? (
+                <h3 className="text-lg font-semibold">{item.title}</h3>
+                {saved[channel] ? (
                   <span
                     className={cn(
                       "rounded-full px-2 py-0.5 text-caption font-semibold",
@@ -220,33 +237,58 @@ export function CompanyCommunicationsPage() {
                     {draft.enabled ? "ON" : "OFF"}
                   </span>
                 ) : null}
-                {saved[item.channel] ? <p className="text-sm text-muted-foreground">Saved for the company.</p> : null}
               </div>
               <p className="flex items-center gap-2 text-sm text-muted-foreground" role="status">
                 <span className={cn("h-2.5 w-2.5 rounded-full", statusDot)} aria-hidden="true" />
                 {statusText}
               </p>
-              <CommunicationChannelFields
-                channel={item.channel}
-                draft={draft}
-                idPrefix={`company-${item.channel}`}
-                onChange={(patch) => update(item.channel, patch)}
-              />
-              <div className="flex flex-wrap items-center gap-3">
-                <PrimaryButton type="submit" disabled={pending !== null || !loaded}>
-                  {item.action}
-                </PrimaryButton>
-                <SecondaryButton
-                  type="button"
-                  disabled={pending !== null || check.state === "checking"}
-                  onClick={() => testConnection(item.channel, draft)}
-                >
-                  Test connection
-                </SecondaryButton>
-              </div>
-            </form>
-          );
-        })}
+            </>
+          ) : (
+            <div className="flex flex-wrap items-center gap-2" role="status">
+              {check.state === "ok" ? (
+                <span className="rounded-full border border-success-border bg-success-soft/70 px-2.5 py-0.5 text-[0.7rem] font-semibold uppercase tracking-[0.08em] text-success">
+                  Connected
+                </span>
+              ) : check.state === "failed" ? (
+                <span className="rounded-full border border-destructive/30 bg-destructive/10 px-2.5 py-0.5 text-[0.7rem] font-semibold uppercase tracking-[0.08em] text-destructive">
+                  Not connected
+                </span>
+              ) : check.state === "checking" ? (
+                <span className="rounded-full bg-surface-muted px-2.5 py-0.5 text-[0.7rem] font-semibold uppercase tracking-[0.08em] text-muted-foreground">
+                  Checking
+                </span>
+              ) : null}
+              <span className="text-sm text-muted-foreground">
+                {check.state === "ok"
+                  ? check.reason ||
+                    `${SMS_PROVIDER_LABELS[smsProvider!]}${draft.sender ? ` — sender ID ${draft.sender}` : "."}`
+                  : check.state === "failed"
+                    ? check.reason
+                    : saved.sms
+                      ? "Connection not tested yet."
+                      : "Save the details, then test the connection."}
+              </span>
+            </div>
+          )}
+          <CommunicationChannelFields
+            channel={channel}
+            draft={draft}
+            idPrefix={`company-${channel}`}
+            onChange={(patch) => update(channel, patch)}
+          />
+          <div className="flex flex-wrap items-center gap-3">
+            <PrimaryButton type="submit" disabled={pending !== null || !loaded}>
+              {item.action}
+            </PrimaryButton>
+            <SecondaryButton
+              type="button"
+              disabled={pending !== null || check.state === "checking"}
+              onClick={() => testConnection(channel, draft)}
+            >
+              Test connection
+            </SecondaryButton>
+          </div>
+        </form>
       </div>
     </div>
   );

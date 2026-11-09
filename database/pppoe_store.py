@@ -680,15 +680,25 @@ def voucher_detail(cursor, code, client_id=None):
         f"""
         SELECT v.code, v.client_id, v.amount, v.status, v.issued_at, v.used_at,
                COALESCE(NULLIF(v.package_name, ''), p.name, 'Subscription') AS package_name,
-               s.first_name, s.last_name, s.pppoe_username
+               s.first_name, s.last_name, s.pppoe_username,
+               sub.next_due_date, sub.expiry_date, sub.cycle_days, sub.price AS package_price,
+               r.package_price AS quoted_price
         FROM pppoe_vouchers v
         JOIN pppoe_subscribers s ON s.id = v.subscriber_id
         LEFT JOIN isp_packages p ON p.id = v.package_id
+        LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = v.subscriber_id
+        LEFT JOIN pppoe_stk_requests r ON r.checkout_id = v.checkout_id
         WHERE v.code = %s{scope}
         """,
         params,
     )
-    return cursor.fetchone()
+    row = cursor.fetchone()
+    if not row:
+        return None
+    price = row.get("quoted_price") if row.get("quoted_price") is not None else row.get("package_price")
+    days = pppoe_service.days_purchased(row.get("amount"), price, row.get("cycle_days") or 30)
+    row["days_purchased"] = days
+    return row
 
 
 def mark_vouchers_used(cursor, usernames):
@@ -909,6 +919,9 @@ def check_username(cursor, client_id, username):
 
 
 def public_row(row):
+    today = date.today()
+    status = effective_subscriber_status(row["status"], row.get("start_date"), row.get("expiry_date"), today)
+    billing = effective_billing_status(row.get("billing_status"), row.get("next_due_date"), today)
     return {
         "id": row["id"],
         "firstName": row["first_name"],
@@ -922,22 +935,22 @@ def public_row(row):
         "packageId": row["package_id"],
         "packageName": row.get("package_name") or "",
         "serial": row.get("router_serial") or "",
-        "status": row["status"],
+        "status": status,
         "connection": pppoe_service.connection_label(
             int(row.get("open_sessions") or 0),
             int(row.get("any_sessions") or 0) > 0,
             row.get("tunnel_status") or "unknown",
         ),
         "routerStatus": pppoe_service.router_status(
-            row["status"],
+            status,
             row.get("open_sessions") or 0,
             as_day(row.get("expiry_date")),
-            date.today(),
+            today,
             row.get("last_action") or "",
             row.get("tunnel_status") or "unknown",
             int(row.get("any_sessions") or 0) > 0,
         ),
-        "billingStatus": row.get("billing_status") or "pending",
+        "billingStatus": billing,
         "expiry": stamp(row.get("expiry_date")),
         "price": format(Decimal(row["price"]), ".2f") if row.get("price") is not None else None,
         "downloadMbps": None if row.get("download_mbps") is None else int(row["download_mbps"]),
@@ -981,8 +994,24 @@ def subscriber_used_percent(row):
     return min(100, elapsed * 100 // span), f"{min(elapsed, span)} of {span} days"
 
 
+def effective_subscriber_status(status, start_date, expiry_date, today=None):
+    """Status the UI should show right now — includes pending→active and
+    active→expired even before the background sweep writes the row."""
+    day = today or date.today()
+    return pppoe_service.job_transition(status, as_day(start_date), as_day(expiry_date), day) or status
+
+
+def effective_billing_status(billing_status, next_due_date, today=None):
+    day = today or date.today()
+    due = as_day(next_due_date)
+    if billing_status == "pending" and due and day > due:
+        return "overdue"
+    return billing_status or "pending"
+
+
 def list_subscribers(cursor, client_id, query, service="pppoe"):
-    reconcile(cursor, client_id)
+    # Read-only list: never CoA / apply RADIUS here. Background reconcile
+    # enforces; badges use effective_* so the UI does not wait for the sweep.
     where = ["s.client_id = %s", "s.service = %s", "s.deleted = 0"]
     args = [client_id, service]
     router = (query.get("router") or [""])[0]
@@ -1946,16 +1975,19 @@ def disconnect_router_clients(cursor, client_id, router_id, actor_id, reason):
     return count
 
 
-def reconcile(cursor, client_id):
+def sync_subscription_states(cursor, client_id):
+    """Advance pending/expired/overdue flags for display. Never touches RADIUS
+    or sends CoA — safe to call from list/status polls every few seconds.
+
+    Returns the subscriber ids whose status just changed (for the enforce path).
+    """
     today = date.today()
+    changed = []
     cursor.execute(
         """
-        SELECT s.id, s.status, s.start_date, s.password_sealed, s.pppoe_username, s.package_id, s.session_limit,
-               s.static_ip, s.router_id, sub.expiry_date, sub.billing_status, sub.next_due_date,
-               p.download_mbps, p.upload_mbps, p.simultaneous_devices AS package_devices
+        SELECT s.id, s.status, s.start_date, sub.expiry_date, sub.billing_status, sub.next_due_date
         FROM pppoe_subscribers s
         LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
-        LEFT JOIN isp_packages p ON p.id = s.package_id
         WHERE s.client_id = %s AND s.deleted = 0 AND s.service = 'pppoe'
         """,
         (client_id,),
@@ -1969,24 +2001,43 @@ def reconcile(cursor, client_id):
             )
             row["billing_status"] = "overdue"
         nxt = pppoe_service.job_transition(row["status"], as_day(row["start_date"]), as_day(row["expiry_date"]), today)
-        if nxt:
-            cursor.execute("UPDATE pppoe_subscribers SET status = %s WHERE id = %s", (nxt, row["id"]))
-            row["status"] = nxt
-            if nxt == "expired":
-                cursor.execute(
-                    "UPDATE pppoe_subscriptions SET billing_status = 'suspended' WHERE subscriber_id = %s AND billing_status <> 'cancelled'",
-                    (row["id"],),
-                )
-                if row["billing_status"] != "cancelled":
-                    row["billing_status"] = "suspended"
-            log_event(cursor, client_id, row["id"], client_id, nxt, "Scheduled from the start or expiry date.")
+        if not nxt:
+            continue
+        cursor.execute("UPDATE pppoe_subscribers SET status = %s WHERE id = %s", (nxt, row["id"]))
+        if nxt == "expired":
+            cursor.execute(
+                "UPDATE pppoe_subscriptions SET billing_status = 'suspended' WHERE subscriber_id = %s AND billing_status <> 'cancelled'",
+                (row["id"],),
+            )
+        log_event(cursor, client_id, row["id"], client_id, nxt, "Scheduled from the start or expiry date.")
+        changed.append(row["id"])
+    return changed
+
+
+def reconcile(cursor, client_id):
+    """Background enforcement: sync flags, push RADIUS plans, CoA when needed."""
+    today = date.today()
+    changed = set(sync_subscription_states(cursor, client_id))
+    cursor.execute(
+        """
+        SELECT s.id, s.status, s.start_date, s.password_sealed, s.pppoe_username, s.package_id, s.session_limit,
+               s.static_ip, s.router_id, sub.expiry_date, sub.billing_status, sub.next_due_date,
+               p.download_mbps, p.upload_mbps, p.simultaneous_devices AS package_devices
+        FROM pppoe_subscribers s
+        LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
+        LEFT JOIN isp_packages p ON p.id = s.package_id
+        WHERE s.client_id = %s AND s.deleted = 0 AND s.service = 'pppoe'
+        """,
+        (client_id,),
+    )
+    for row in cursor.fetchall():
         can_surf = subscription_can_surf(row, today)
         try:
             apply_plan(cursor, row, can_surf)
         except routeros_api.RouterError as error:
             print(f"event=pppoe-reconcile sub={row['id']} user={row['pppoe_username']} plan-error={error}", flush=True)
             continue
-        kick = nxt is not None
+        kick = row["id"] in changed
         if not kick and not can_surf:
             # A blocked subscriber's legitimate session is capped by
             # Session-Timeout at RESTRICTED_SESSION_SECONDS — anything still
@@ -2052,6 +2103,50 @@ def set_status(cursor, client_id, subscriber_id, status, billing, reason, active
     return body
 
 
+def package_cycle_days(cursor, client_id, package_id, fallback=30):
+    """Billing-cycle length for a package, from its validity window."""
+    cursor.execute(
+        """
+        SELECT COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
+               COALESCE(p.validity_unit, c.validity_unit, 'months') AS validity_unit
+        FROM isp_packages p
+        LEFT JOIN company_packages c ON c.id = p.company_package_id
+        WHERE p.id = %s AND p.client_id = %s
+        """,
+        (str(package_id or "")[:36], client_id),
+    )
+    row = cursor.fetchone()
+    if not row:
+        return max(1, int(fallback or 30))
+    return pppoe_service.validity_cycle_days(row["validity_amount"], row["validity_unit"], fallback)
+
+
+def sync_paid_package(cursor, client_id, subscriber_id, package_id, package_price):
+    """Point the subscription at the package/price quoted on the pay page.
+
+    Always syncs price (and cycle length) to the quote the customer saw, so
+    any-amount day math after payment matches the live calculator.
+    """
+    package_id = str(package_id or "").strip()
+    if not package_id:
+        return None
+    cycle = package_cycle_days(cursor, client_id, package_id)
+    price = format(Decimal(str(package_price or 0)), ".2f")
+    cursor.execute(
+        "UPDATE pppoe_subscribers SET package_id = %s WHERE id = %s",
+        (package_id, subscriber_id),
+    )
+    cursor.execute(
+        """
+        UPDATE pppoe_subscriptions
+        SET package_id = %s, price = %s, cycle_days = %s
+        WHERE subscriber_id = %s
+        """,
+        (package_id, price, cycle, subscriber_id),
+    )
+    return cycle
+
+
 def renew(cursor, client_id, subscriber_id, payload):
     row = require_owned(cursor, client_id, subscriber_id)
     # Renewing a session that was already authorized to surf must not drop it —
@@ -2078,9 +2173,10 @@ def renew(cursor, client_id, subscriber_id, payload):
         )
         if price <= 0:
             price = amount
+        cycle = package_cycle_days(cursor, client_id, package_id, fallback=30)
         row["package_id"] = package_id
         row["price"] = price
-        row["cycle_days"] = 30
+        row["cycle_days"] = cycle
         row["billing_cycle"] = "monthly"
         row["grace_days"] = 3
         row["next_due_date"] = None
@@ -2092,11 +2188,22 @@ def renew(cursor, client_id, subscriber_id, payload):
             row["download_mbps"] = package["downloadMbps"]
             row["upload_mbps"] = package["uploadMbps"]
             row["package_devices"] = package["devices"]
-    price = Decimal(row["price"] or 0)
+    # Prefer the package price quoted on the pay page so partial payments buy
+    # the same number of days the customer was shown while typing.
+    quoted = pppoe_service.money(payload.get("packagePrice"), "package price")
+    price = quoted if quoted and quoted > 0 else Decimal(row["price"] or 0)
     period = int(row["cycle_days"] or 30)
+    try:
+        override = int(payload.get("cycleDays")) if payload.get("cycleDays") is not None else None
+    except (TypeError, ValueError):
+        override = None
+    if override and override > 0:
+        period = override
     if price <= 0 or period <= 0:
         raise PppoeError(400, "This subscription has no package price to bill against.")
-    days = max(1, int(-(-amount * period // price)))
+    days = pppoe_service.days_purchased(amount, price, period)
+    if days <= 0:
+        raise PppoeError(400, "Enter the verified payment amount before renewal.")
     anchor = None
     if payload.get("startDate"):
         anchor = as_day(payload.get("startDate"))
@@ -4004,12 +4111,16 @@ def dispatch(cursor, method, path, payload, token, query):
         row = require_owned(cursor, client_id, subscriber_id)
         return {"billing": billing_block(cursor, subscriber_id, row)}, None
     if method == "GET" and action == "status":
+        # Read-only: never CoA here. Effective status updates the badge immediately
+        # even before the background sweep writes the row / enforces access.
         row = require_owned(cursor, client_id, subscriber_id)
         live = current_session(cursor, row["pppoe_username"])
         label = pppoe_service.connection_label(int(row["open_sessions"] or 0), int(row["any_sessions"] or 0) > 0, row["tunnel_status"])
         rates = live_rates(cursor, row) if label == "online" else None
         devices = device_rows(cursor, row)
-        return {"connection": label, "live": live, "status": row["status"], "billingStatus": row["billing_status"], "rates": rates, "devices": devices}, None
+        status = effective_subscriber_status(row["status"], row.get("start_date"), row.get("expiry_date"))
+        billing = effective_billing_status(row.get("billing_status"), row.get("next_due_date"))
+        return {"connection": label, "live": live, "status": status, "billingStatus": billing, "rates": rates, "devices": devices}, None
     if method != "POST":
         return None
     actions = {

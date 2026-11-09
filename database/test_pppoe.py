@@ -265,6 +265,29 @@ class PppoeValidationTests(unittest.TestCase):
         self.assertEqual(renewed["nextDueDate"], "2026-11-20")
         self.assertIsNone(pppoe_service.renewal_dates(TODAY, "monthly", 0, 3, TODAY, False))
 
+    def test_effective_status_updates_before_sweep(self):
+        # UI badges must flip immediately even while the DB row is still 'active'.
+        self.assertEqual(
+            pppoe_store.effective_subscriber_status("active", TODAY, date(2026, 10, 15), TODAY),
+            "expired",
+        )
+        self.assertEqual(
+            pppoe_store.effective_subscriber_status("pending_activation", TODAY, None, TODAY),
+            "active",
+        )
+        self.assertEqual(
+            pppoe_store.effective_subscriber_status("active", TODAY, date(2026, 10, 20), TODAY),
+            "active",
+        )
+        self.assertEqual(
+            pppoe_store.effective_billing_status("pending", date(2026, 10, 15), TODAY),
+            "overdue",
+        )
+        self.assertEqual(
+            pppoe_store.effective_billing_status("pending", date(2026, 10, 20), TODAY),
+            "pending",
+        )
+
     def test_radius_replace_repeats_safely(self):
         checked = pppoe_service.validate_pppoe_provisioning(payload(), context(), TODAY)
         cursor = MemoryCursor()
@@ -573,6 +596,22 @@ PACKAGE = {
 }
 
 
+class DaysPurchasedTests(unittest.TestCase):
+    def test_days_purchased_ceilings_partial_amounts(self):
+        self.assertEqual(pppoe_service.days_purchased("1000", "1000", 30), 30)
+        self.assertEqual(pppoe_service.days_purchased("500", "1000", 30), 15)
+        self.assertEqual(pppoe_service.days_purchased("34", "1000", 30), 2)
+        self.assertEqual(pppoe_service.days_purchased("1", "1000", 30), 1)
+        self.assertEqual(pppoe_service.days_purchased("2000", "1000", 30), 60)
+        self.assertEqual(pppoe_service.days_purchased("0", "1000", 30), 0)
+
+    def test_validity_cycle_days(self):
+        self.assertEqual(pppoe_service.validity_cycle_days(1, "months"), 30)
+        self.assertEqual(pppoe_service.validity_cycle_days(2, "weeks"), 14)
+        self.assertEqual(pppoe_service.validity_cycle_days(1, "days"), 1)
+        self.assertEqual(pppoe_service.validity_cycle_days(6, "hours"), 1)
+
+
 class RenewHealTests(unittest.TestCase):
     def test_renew_recreates_a_missing_subscription_row(self):
         cursor = RenewCursor(subless_row(), PACKAGE)
@@ -598,6 +637,34 @@ class RenewHealTests(unittest.TestCase):
         plan.assert_called_once()
         self.assertTrue(plan.call_args[0][2])
         self.assertEqual(cursor.connection.commits, 1)
+
+    def test_renew_credits_partial_amount_as_pro_rata_days(self):
+        row = subless_row(
+            subscription_id="bill-1",
+            price="1000.00",
+            cycle_days=30,
+            grace_days=3,
+            billing_status="expired",
+            next_due_date=date(2026, 10, 1),
+            expiry_date=date(2026, 10, 4),
+            status="disconnected",
+        )
+        cursor = RenewCursor(row)
+        with patch("pppoe_store.apply_plan", return_value={}), patch(
+            "pppoe_store.coa_for", return_value="queued"
+        ), patch("pppoe_store.subscriber_detail", return_value={"id": "sub-1"}):
+            body = pppoe_store.renew(
+                cursor,
+                "client-1",
+                "sub-1",
+                {"amount": "500.00", "packagePrice": "1000.00", "mpesaReference": "PARTIAL01"},
+            )
+        self.assertEqual(body["daysPurchased"], 15)
+        updates = cursor.ran("UPDATE pppoe_subscriptions SET next_due_date")
+        self.assertEqual(len(updates), 1)
+        # Disconnected accounts restart from today; 15 days later.
+        due = date.fromisoformat(updates[0][0])
+        self.assertEqual((due - date.today()).days, 15)
 
     def test_renew_without_any_package_is_rejected(self):
         cursor = RenewCursor(subless_row(package_id=None))

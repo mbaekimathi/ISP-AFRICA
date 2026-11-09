@@ -4,10 +4,9 @@ import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { PageHeader } from "@/components/ui/DetailGrid";
 import { FormField } from "@/components/ui/FormField";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { TunnelNotification } from "@/components/ui/TunnelNotification";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
-import { buildMikrotikSetupScript, buildRecoveryScripts, isPhysicalPort, loadPortUses, portUseLabels, type PortUse, type SetupWifi } from "@/lib/routerScripts";
+import { buildMikrotikSetupScript, buildRecoveryScripts, ensureCustomerServices, isPhysicalPort, loadPortUses, portUseLabels, type PortUse, type SetupWifi } from "@/lib/routerScripts";
 import { backupName } from "@/lib/winboxScript";
 import { WanUplinkPanel } from "@/components/mikrotik/WanUplinkPanel";
 
@@ -209,31 +208,34 @@ export function MikrotikPortPage() {
       const next: Record<string, PortChoice> = {};
       for (const port of ports) {
         if (touched[port.name] && current[port.name]) {
-          next[port.name] = current[port.name];
+          next[port.name] = { uses: ensureCustomerServices(current[port.name].uses) };
           continue;
         }
-        next[port.name] = { uses: resolved.uses[port.name] ?? [] };
+        next[port.name] = { uses: ensureCustomerServices(resolved.uses[port.name] ?? []) };
       }
       return next;
     });
   }, [ports, touched, resolved]);
 
   const selection = ports.map((port) => `${port.name}:${(choices[port.name]?.uses ?? []).join("+")}`).join("|");
-  const userChanged = Object.values(touched).some(Boolean);
+  const canPush = Boolean(device?.apiReady) && ports.length > 0;
+  const appliedKey = useRef("");
 
   useEffect(() => {
-    if (!userChanged || !deviceId || ports.length === 0) return;
+    if (!canPush || !deviceId) return;
+    const recorded = ports.map((port) => ({
+      iface: port.name,
+      uses: ensureCustomerServices(choices[port.name]?.uses ?? []),
+    }));
+    if (!recorded.some((item) => item.uses.length > 0)) {
+      setApplying(false);
+      setApplyNote("Choose what at least one port will do.");
+      return;
+    }
+    const key = `${deviceId}|${recorded.map((item) => `${item.iface}:${item.uses.join("+")}`).join("|")}`;
+    if (key === appliedKey.current) return;
     let stopped = false;
     const timer = window.setTimeout(() => {
-      const recorded = ports.map((port) => ({
-        iface: port.name,
-        uses: choices[port.name]?.uses ?? [],
-      }));
-      if (!recorded.some((item) => item.uses.length > 0)) {
-        setApplying(false);
-        setApplyNote("Choose what at least one port will do.");
-        return;
-      }
       setApplying(true);
       setApplyNote("Updating the router…");
       apiRequest<{ applied: boolean; message: string; portPlan?: Record<string, PortUse[]> }>(`/api/mikrotiks/${deviceId}/ports`, {
@@ -242,7 +244,8 @@ export function MikrotikPortPage() {
       })
         .then((result) => {
           if (stopped) return;
-          if (result.applied && result.portPlan) setSavedPlan(result.portPlan);
+          appliedKey.current = key;
+          if (result.portPlan) setSavedPlan(result.portPlan);
           setApplyNote(result.applied ? "Updated on the router." : result.message);
         })
         .catch((cause: unknown) => {
@@ -256,23 +259,29 @@ export function MikrotikPortPage() {
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, [userChanged, selection, deviceId]);
+  }, [canPush, selection, deviceId, ports, choices]);
 
   const customerOrder = ["hotspot", "pppoe", "static"] as const;
 
-  function chooseRole(name: string, use: PortUse) {
+  function chooseRole(name: string, use: PortUse | "customer") {
     setTouched((current) => ({ ...current, [name]: true }));
-    setChoices((current) => ({ ...current, [name]: { uses: [use] } }));
+    setChoices((current) => ({
+      ...current,
+      [name]: { uses: use === "customer" ? ensureCustomerServices(["hotspot", "pppoe"]) : [use] },
+    }));
   }
 
   function toggleCustomer(name: string, use: "hotspot" | "pppoe" | "static", checked: boolean) {
+    // Hotspot and PPPoE stay locked on for customer ports; only static is optional.
+    if (use === "hotspot" || use === "pppoe") return;
     setTouched((current) => ({ ...current, [name]: true }));
     setChoices((current) => {
       const previous = current[name] ?? choiceFor({ name, type: "ether", running: false, disabled: false, comment: "" });
       const kept = previous.uses.filter((item) => item === "hotspot" || item === "pppoe" || item === "static");
-      const uses = customerOrder.filter((item) => (item === use ? checked : kept.includes(item)));
-      if (uses.length === 0) return current;
-      return { ...current, [name]: { uses: [...uses] } };
+      const uses = ensureCustomerServices(
+        customerOrder.filter((item) => (item === use ? checked : kept.includes(item))),
+      );
+      return { ...current, [name]: { uses } };
     });
   }
 
@@ -377,7 +386,7 @@ export function MikrotikPortPage() {
                       {(
                         [
                           ["wan", "Uplink", "Internet"],
-                          ["customer", "Customer", "Hotspot, PPPoE, and static can be combined"],
+                          ["customer", "Customer", "Hotspot and PPPoE stay on together; static is optional"],
                           ["dhcp", "Local network", "DHCP for office devices"],
                         ] as const
                       ).map(([value, label, hint]) => {
@@ -390,7 +399,7 @@ export function MikrotikPortPage() {
                                 type="radio"
                                 name={`port-role-${port.name}`}
                                 checked={selected}
-                                onChange={() => chooseRole(port.name, value === "customer" ? customerUse ?? "hotspot" : value)}
+                                onChange={() => chooseRole(port.name, value === "customer" ? "customer" : value)}
                               />
                               <span>
                                 <span className="font-medium">{label}</span>
@@ -399,16 +408,21 @@ export function MikrotikPortPage() {
                             </label>
                             {value === "customer" && selected ? (
                               <div className="mb-2 ml-6 flex flex-wrap gap-2">
-                                {customerOrder.map((use) => (
-                                  <label key={use} className="flex min-h-11 items-center gap-2 rounded-lg border border-border px-3 text-sm">
-                                    <input
-                                      type="checkbox"
-                                      checked={choice.uses.includes(use)}
-                                      onChange={(event) => toggleCustomer(port.name, use, event.target.checked)}
-                                    />
-                                    {portUseLabels[use]}
-                                  </label>
-                                ))}
+                                {customerOrder.map((use) => {
+                                  const locked = use === "hotspot" || use === "pppoe";
+                                  return (
+                                    <label key={use} className="flex min-h-11 items-center gap-2 rounded-lg border border-border px-3 text-sm">
+                                      <input
+                                        type="checkbox"
+                                        checked={choice.uses.includes(use) || locked}
+                                        disabled={locked}
+                                        onChange={(event) => toggleCustomer(port.name, use, event.target.checked)}
+                                      />
+                                      {portUseLabels[use]}
+                                      {locked ? <span className="text-xs text-muted-foreground">always on</span> : null}
+                                    </label>
+                                  );
+                                })}
                               </div>
                             ) : null}
                           </div>
@@ -882,17 +896,9 @@ export function MikrotikRouterSetupPage() {
     winboxUser: passwordChanged ? { currentName: "isp-centric", name: "isp-centric", password: winboxPassword } : undefined,
   });
   const detailsChanged = seeded && (name.trim() !== (device?.name ?? "") || site.trim() !== (device?.site ?? ""));
-  const tunnelStatus = device?.tunnelStatus === "up" ? "up" : device?.tunnelStatus === "down" ? "down" : "unknown";
 
   return (
     <SetupFrame title="MikroTik setup" description="Read from this router. You can change the registered name, location, Winbox password, and the name and password of WiFi that is already on.">
-      {device ? (
-        <TunnelNotification
-          tunnelStatus={tunnelStatus}
-          routerName={device?.name || "Router"}
-          polling={false}
-        />
-      ) : null}
       {error ? <p className="mb-4 notice" role="alert">{error}</p> : null}
       {device ? (
         <p className="mb-4 text-sm text-muted-foreground">

@@ -58,6 +58,16 @@ function validate(values: SignUpValues, photo: string) {
   return errors;
 }
 
+function mapRegisterError(message: string) {
+  if (/login code is already in use by a company employee/i.test(message)) {
+    return { loginCode: message };
+  }
+  if (/login code is already in use/i.test(message)) {
+    return { loginCode: message };
+  }
+  return { form: message };
+}
+
 export function EmployeeSignUpPage() {
   usePageMeta("Employee sign up — ISP CENTRIC", "Create a pending ISP CENTRIC employee account.");
   const { user, ready: clientReady } = useAuth();
@@ -116,7 +126,8 @@ export function EmployeeSignUpPage() {
       await register({ ...values, photoDataUrl: photo });
       navigate("/employee/login", { replace: true, state: { registered: true } });
     } catch (error) {
-      setErrors({ form: error instanceof Error ? error.message : "Could not create the employee account." });
+      const message = error instanceof Error ? error.message : "Could not create the employee account.";
+      setErrors(mapRegisterError(message));
     } finally {
       setPending(false);
     }
@@ -161,7 +172,7 @@ export function EmployeeSignUpPage() {
             </FormField>
           </div>
           <div className="grid gap-4" hidden={step !== 1}>
-            <FormField id="emp-code" label="6-digit login code" error={errors.loginCode} hint="You will use this code to sign in.">
+            <FormField id="emp-code" label="6-digit login code" error={errors.loginCode} hint="Must be unique among company employees.">
               <input id="emp-code" className="field tracking-[0.3em]" inputMode="numeric" autoComplete="off" maxLength={6} value={values.loginCode} aria-invalid={Boolean(errors.loginCode)} aria-describedby={errors.loginCode ? "emp-code-error" : "emp-code-hint"} onChange={(event) => update("loginCode", event.target.value.replace(/\D/g, "").slice(0, 6))} />
             </FormField>
             <FormField id="emp-password" label="Password" error={errors.password} hint="Must be 6 digits.">

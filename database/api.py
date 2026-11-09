@@ -645,10 +645,51 @@ def gateway_precheck(cursor):
     return {"ok": all(check["ok"] for check in checks), "checks": checks}
 
 
+SMS_PROVIDERS = ("africastalking", "twilio", "blessedtexts", "custom")
+
+SMS_PROVIDER_ENDPOINTS = {
+    "africastalking": "https://api.africastalking.com/version1/messaging",
+    "twilio": "https://api.twilio.com",
+    "blessedtexts": "https://sms.blessedtexts.com/api/sms/v1",
+}
+
+SMS_PROVIDER_LABELS = {
+    "africastalking": "Africa's Talking",
+    "twilio": "Twilio",
+    "blessedtexts": "BlessedTexts",
+    "custom": "Custom HTTP",
+}
+
+
+def clean_sms_provider(value, endpoint=""):
+    compact = "".join(character for character in str(value or "").strip().lower() if character.isalnum())
+    aliases = {
+        "africastalking": "africastalking",
+        "twilio": "twilio",
+        "blessedtexts": "blessedtexts",
+        "blessedtext": "blessedtexts",
+        "custom": "custom",
+        "customhttp": "custom",
+    }
+    provider = aliases.get(compact)
+    if provider in SMS_PROVIDERS:
+        return provider
+    host = (endpoint or "").lower()
+    if "africastalking" in host:
+        return "africastalking"
+    if "twilio.com" in host:
+        return "twilio"
+    if "blessedtexts" in host:
+        return "blessedtexts"
+    return "custom"
+
+
 def clean_communication_sender(channel, value):
     text = str(value or "").strip()
     if channel == "sms":
-        if not 3 <= len(text) <= 11 or not all(character.isalnum() or character == "-" for character in text):
+        if not 3 <= len(text) <= 32 or not all(
+            character.isalnum() or character in "-_" for character in text
+        ):
             raise ApiError(400, "Enter an SMS sender ID.")
         return text
     if channel == "whatsapp":
@@ -707,13 +748,19 @@ def clean_communication(payload, existing):
     previous = existing or {}
     previous_details = communication_details(previous.get("details"))
     secret_label = {
-        "sms": "Enter the SMS API key.",
+        "sms": "Enter the API key / username.",
         "whatsapp": "Enter the WhatsApp access token.",
         "email": "Enter the SMTP password.",
     }[channel]
     fields = {
         "channel": channel,
-        "api_key": keep_or_clean(payload.get("apiKey"), previous.get("api_key"), secret_label, 8, 255),
+        "api_key": keep_or_clean(
+            payload.get("apiKey"),
+            previous.get("api_key"),
+            secret_label,
+            3 if channel == "sms" else 8,
+            255,
+        ),
     }
     details = {"enabled": bool(payload.get("enabled", previous_details.get("enabled", True)))}
     if channel == "email":
@@ -731,11 +778,35 @@ def clean_communication(payload, existing):
             payload.get("businessAccountId"), "Enter the WhatsApp business account ID."
         )
     else:
-        fields["endpoint"] = clean_endpoint(payload.get("endpoint"))
+        provider = clean_sms_provider(payload.get("provider"), payload.get("endpoint") or previous.get("endpoint"))
+        details["provider"] = provider
+        endpoint = str(payload.get("endpoint") or "").strip() or SMS_PROVIDER_ENDPOINTS.get(provider, "")
+        fields["endpoint"] = clean_endpoint(endpoint)
         fields["sender"] = clean_communication_sender(channel, payload.get("sender"))
+        # API KEY / USERNAME is the primary credential; API SECRET is optional
+        # except for Africa's Talking and Twilio, where the secret is required.
         details["username"] = optional_text(
             payload.get("username"), "Enter the SMS API username or account ID.", 120
         )
+        previous_secret = open_secret(previous_details.get("apiSecret") or "")
+        requires_secret = provider in {"africastalking", "twilio"}
+        if requires_secret:
+            secret = keep_or_clean(
+                payload.get("apiSecret"),
+                previous_secret,
+                "Enter the API secret / auth token.",
+                8,
+                255,
+            )
+        else:
+            secret = keep_optional_secret(
+                payload.get("apiSecret"),
+                previous_secret,
+                "Enter the API secret / auth token.",
+                8,
+                255,
+            )
+        details["apiSecret"] = seal_secret(secret) if secret else ""
     fields["details"] = json.dumps(details)
     return fields
 
@@ -744,11 +815,19 @@ def public_communication(row):
     if not row:
         return None
     details = communication_details(row.get("details"))
+    channel = str(row.get("channel") or "")
+    provider = ""
+    api_secret = ""
+    if channel == "sms" or details.get("provider"):
+        provider = clean_sms_provider(details.get("provider"), row.get("endpoint"))
+        api_secret = open_secret(details.get("apiSecret") or "")
     return {
         "enabled": bool(details.get("enabled", True)),
         "endpoint": row["endpoint"],
         "sender": row["sender"],
         "apiKey": masked_secret(row["api_key"]),
+        "apiSecret": masked_secret(api_secret) if api_secret else "",
+        "provider": provider,
         "username": details.get("username") or "",
         "port": details.get("port") or "",
         "fromName": details.get("fromName") or "",
@@ -861,7 +940,175 @@ def probe_communication(channel, row):
                 reject_codes=(400, 401, 403),
             )
         return probe_endpoint(endpoint)
-    return probe_endpoint(row.get("endpoint"))
+    result = probe_endpoint(row.get("endpoint"))
+    if channel == "sms" and result.get("connected"):
+        provider = clean_sms_provider(details.get("provider"), row.get("endpoint"))
+        label = SMS_PROVIDER_LABELS.get(provider, "SMS")
+        sender = str(row.get("sender") or "").strip()
+        result["reason"] = f"{label} — sender ID {sender}." if sender else f"{label} endpoint answered."
+    return result
+
+
+def sms_destination(phone):
+    normalized = pppoe_service.normalize_phone(phone) or "".join(
+        character for character in str(phone or "") if character.isdigit()
+    )
+    if not normalized:
+        return ""
+    return normalized if normalized.startswith("254") else normalized
+
+
+def load_active_sms(cursor, client_id):
+    """Resolve the SMS gateway this ISP account currently uses (own or company)."""
+    cursor.execute(
+        "SELECT mode FROM isp_communication_preferences WHERE client_id = %s AND channel = 'sms'",
+        (client_id,),
+    )
+    mode = ((cursor.fetchone() or {}).get("mode") or "own").strip()
+    if mode == "company":
+        cursor.execute(
+            "SELECT channel, endpoint, sender, api_key, details FROM company_communication_settings WHERE channel = 'sms'"
+        )
+        row = cursor.fetchone()
+    else:
+        cursor.execute(
+            """
+            SELECT channel, endpoint, sender, api_key, details
+            FROM isp_communication_settings
+            WHERE client_id = %s AND channel = 'sms'
+            """,
+            (client_id,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            cursor.execute(
+                "SELECT channel, endpoint, sender, api_key, details FROM company_communication_settings WHERE channel = 'sms'"
+            )
+            row = cursor.fetchone()
+            mode = "company" if row else mode
+    return mode, row
+
+
+def send_sms(row, phone, message):
+    """Deliver one SMS through the saved company/ISP SMS gateway settings."""
+    import urllib.error
+    import urllib.parse
+    import urllib.request
+
+    row = row or {}
+    details = communication_details(row.get("details"))
+    if details.get("enabled") is False:
+        return {"ok": False, "reason": "The SMS channel is turned off."}
+    endpoint = str(row.get("endpoint") or "").strip()
+    sender = str(row.get("sender") or "").strip()
+    api_key = open_secret(row.get("api_key") or "")
+    api_secret = open_secret(details.get("apiSecret") or "")
+    username = str(details.get("username") or "").strip()
+    provider = clean_sms_provider(details.get("provider"), endpoint)
+    to = sms_destination(phone)
+    text = str(message or "").strip()
+    if not endpoint:
+        return {"ok": False, "reason": "Save an SMS API endpoint first."}
+    if not api_key:
+        return {"ok": False, "reason": "Save the SMS API key / username first."}
+    if not to:
+        return {"ok": False, "reason": "That client has no valid phone number."}
+    if not text:
+        return {"ok": False, "reason": "Enter a message to send."}
+
+    try:
+        if provider == "africastalking":
+            # New form: API KEY/USERNAME = AT username, SECRET = AT apiKey.
+            # Older rows may still keep username in details.username and the key in api_key.
+            at_user = username or api_key
+            at_key = api_secret or (api_key if username else "")
+            if not at_key:
+                return {"ok": False, "reason": "Save the Africa's Talking API key in the secret field."}
+            form = urllib.parse.urlencode(
+                {
+                    "username": at_user,
+                    "to": f"+{to}" if not to.startswith("+") else to,
+                    "message": text,
+                    **({"from": sender} if sender else {}),
+                }
+            ).encode()
+            request = urllib.request.Request(
+                endpoint,
+                data=form,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                    "apiKey": at_key,
+                },
+                method="POST",
+            )
+        elif provider == "twilio":
+            account = api_key
+            auth = api_secret or username
+            target = endpoint.rstrip("/")
+            if "Accounts" not in target:
+                target = f"https://api.twilio.com/2010-04-01/Accounts/{account}/Messages.json"
+            form = urllib.parse.urlencode(
+                {
+                    "To": f"+{to}" if not to.startswith("+") else to,
+                    "From": sender,
+                    "Body": text,
+                }
+            ).encode()
+            request = urllib.request.Request(
+                target,
+                data=form,
+                headers={
+                    "Authorization": "Basic "
+                    + base64.b64encode(f"{account}:{auth}".encode()).decode(),
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                method="POST",
+            )
+        else:
+            # BlessedTexts and Custom HTTP — JSON body with common field names.
+            body = json.dumps(
+                {
+                    "api_key": api_key,
+                    "apiKey": api_key,
+                    "username": username or api_key,
+                    "sender": sender,
+                    "sender_id": sender,
+                    "to": to,
+                    "phone": to,
+                    "message": text,
+                    "msg": text,
+                    **({"api_secret": api_secret} if api_secret else {}),
+                }
+            ).encode()
+            request = urllib.request.Request(
+                endpoint,
+                data=body,
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {api_key}",
+                },
+                method="POST",
+            )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            code = response.status
+            response.read(500)
+        if code >= 400:
+            return {"ok": False, "reason": f"The SMS API returned HTTP {code}."}
+        return {"ok": True, "reason": f"Sent (HTTP {code})."}
+    except urllib.error.HTTPError as error:
+        detail = ""
+        try:
+            detail = error.read().decode("utf-8", errors="replace")[:180]
+        except Exception:
+            detail = ""
+        return {
+            "ok": False,
+            "reason": f"The SMS API rejected the message (HTTP {error.code}).{(' ' + detail) if detail else ''}",
+        }
+    except (urllib.error.URLError, OSError, ValueError) as error:
+        return {"ok": False, "reason": f"The SMS API could not be reached: {getattr(error, 'reason', error)}."}
 
 
 def vapid_keys(cursor):
@@ -900,6 +1147,7 @@ NOTIFICATION_TOGGLES = {
     "mikrotikUnreachable": "mikrotik_unreachable",
     "mikrotikAdded": "mikrotik_added",
     "ispRegistered": "isp_registered",
+    "systemPerformance": "system_performance",
     "communicationsFailed": "communications_failed",
     "paymentsFailed": "payments_failed",
 }
@@ -917,8 +1165,30 @@ ISP_NOTIFICATION_TOGGLES = {
 }
 
 
+ISP_CLIENT_NOTIFICATION_TOGGLES = {
+    "subscriptionEnding": "subscription_ending",
+    "subscriptionExpired": "subscription_expired",
+    "paymentReceived": "payment_received",
+    "accountActivated": "account_activated",
+    "accountPaused": "account_paused",
+    "maintenance": "maintenance",
+}
+
+
+ISP_HOTSPOT_NOTIFICATION_TOGGLES = {
+    "sessionEnding": "session_ending",
+    "sessionExpired": "session_expired",
+    "paymentReceived": "payment_received",
+    "voucherActivated": "voucher_activated",
+    "maintenance": "maintenance",
+}
+
+
 def public_notification_settings(row, toggles):
-    return {key: bool(row[column]) if row else True for key, column in toggles.items()}
+    return {
+        key: bool(row[column]) if row and column in row else True
+        for key, column in toggles.items()
+    }
 
 
 def clean_company(payload):
@@ -1534,9 +1804,9 @@ def ensure_schema():
                 ("last_api_at", "last_api_at DATETIME NULL"),
                 ("tunnel_status", "tunnel_status ENUM('unknown', 'down', 'up') NOT NULL DEFAULT 'unknown'"),
                 ("api_secret", "api_secret VARCHAR(512) NULL"),
-                ("pppoe_enforced", "pppoe_enforced TINYINT NOT NULL DEFAULT 0"),
-                ("hotspot_enabled", "hotspot_enabled TINYINT NOT NULL DEFAULT 0"),
-                ("hotspot_block_sharing", "hotspot_block_sharing TINYINT NOT NULL DEFAULT 0"),
+                ("pppoe_enforced", "pppoe_enforced TINYINT NOT NULL DEFAULT 1"),
+                ("hotspot_enabled", "hotspot_enabled TINYINT NOT NULL DEFAULT 1"),
+                ("hotspot_block_sharing", "hotspot_block_sharing TINYINT NOT NULL DEFAULT 1"),
                 ("wg_private", "wg_private VARCHAR(512) NULL"),
                 ("port_plan", "port_plan TEXT NULL"),
                 ("latitude", "latitude DECIMAL(10,7) NULL"),
@@ -1551,6 +1821,11 @@ def ensure_schema():
                 MODIFY status ENUM('identity', 'waiting', 'active', 'suspended') NOT NULL DEFAULT 'identity'
                 """
             )
+            # Onboarding defaults: PPPoE + hotspot with sharing blocked.
+            for column in ("pppoe_enforced", "hotspot_enabled", "hotspot_block_sharing"):
+                cursor.execute(
+                    f"ALTER TABLE isp_mikrotik_devices MODIFY {column} TINYINT NOT NULL DEFAULT 1"
+                )
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS isp_mikrotik_health_events (
@@ -1817,12 +2092,18 @@ def ensure_schema():
                   mikrotik_unreachable TINYINT NOT NULL DEFAULT 1,
                   mikrotik_added TINYINT NOT NULL DEFAULT 1,
                   isp_registered TINYINT NOT NULL DEFAULT 1,
+                  system_performance TINYINT NOT NULL DEFAULT 1,
                   communications_failed TINYINT NOT NULL DEFAULT 1,
                   payments_failed TINYINT NOT NULL DEFAULT 1,
                   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                 )
                 """
             )
+            cursor.execute("SHOW COLUMNS FROM company_notification_settings LIKE 'system_performance'")
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    "ALTER TABLE company_notification_settings ADD COLUMN system_performance TINYINT NOT NULL DEFAULT 1"
+                )
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS company_push_settings (
@@ -1934,6 +2215,7 @@ def ensure_schema():
                 ("deleted", "deleted TINYINT NOT NULL DEFAULT 0"),
                 ("ended_at", "ended_at TIMESTAMP NULL"),
                 ("last_verified_at", "last_verified_at DATETIME NULL"),
+                ("sms_payment_notified", "sms_payment_notified TINYINT NOT NULL DEFAULT 0"),
             ):
                 cursor.execute("SHOW COLUMNS FROM hotspot_purchases LIKE %s", (column,))
                 if cursor.fetchone() is None:
@@ -2058,6 +2340,38 @@ def ensure_schema():
                   communications_failed TINYINT NOT NULL DEFAULT 1,
                   payments_failed TINYINT NOT NULL DEFAULT 1,
                   server_unreachable TINYINT NOT NULL DEFAULT 1,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_client_notification_settings (
+                  client_id CHAR(36) NOT NULL PRIMARY KEY,
+                  subscription_ending TINYINT NOT NULL DEFAULT 1,
+                  subscription_expired TINYINT NOT NULL DEFAULT 1,
+                  payment_received TINYINT NOT NULL DEFAULT 1,
+                  account_activated TINYINT NOT NULL DEFAULT 1,
+                  account_paused TINYINT NOT NULL DEFAULT 1,
+                  maintenance TINYINT NOT NULL DEFAULT 1,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute("SHOW COLUMNS FROM isp_client_notification_settings LIKE 'maintenance'")
+            if cursor.fetchone() is None:
+                cursor.execute(
+                    "ALTER TABLE isp_client_notification_settings ADD COLUMN maintenance TINYINT NOT NULL DEFAULT 1"
+                )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_hotspot_notification_settings (
+                  client_id CHAR(36) NOT NULL PRIMARY KEY,
+                  session_ending TINYINT NOT NULL DEFAULT 1,
+                  session_expired TINYINT NOT NULL DEFAULT 1,
+                  payment_received TINYINT NOT NULL DEFAULT 1,
+                  voucher_activated TINYINT NOT NULL DEFAULT 1,
+                  maintenance TINYINT NOT NULL DEFAULT 1,
                   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
                 )
                 """
@@ -2353,7 +2667,7 @@ def publish_tunnel_peers(cursor):
     cursor.execute("SELECT public_key, tunnel_ip FROM isp_mikrotik_devices")
     try:
         wg_host.sync_peers(cursor.fetchall())
-    except OSError as error:
+    except (OSError, RuntimeError) as error:
         print(f"event=wireguard error={error}", flush=True)
 
 
@@ -2554,7 +2868,7 @@ def clean_registration(payload):
         raise ApiError(400, "Enter a phone number with 10 to 15 digits.")
     if len(login_code) != 6 or not login_code.isdigit() or len(password) != 6 or not password.isdigit():
         raise ApiError(400, "The login code and password must each be 6 digits.")
-    if not photo.startswith("data:image/jpeg") or len(photo) > 200_000:
+    if photo and (not photo.startswith("data:image/jpeg") or len(photo) > 200_000):
         raise ApiError(400, "The profile photo could not be accepted.")
     return {
         "first": first,
@@ -2578,6 +2892,9 @@ def other_label(kind):
 
 
 def clean_profile(payload, existing):
+    photo = str(payload.get("photoDataUrl", "")).strip()
+    if photo.startswith("data:image/svg"):
+        photo = ""
     data = {
         "firstName": payload.get("firstName", ""),
         "lastName": payload.get("lastName", ""),
@@ -2586,7 +2903,7 @@ def clean_profile(payload, existing):
         "phone": payload.get("phone", ""),
         "loginCode": str(payload.get("loginCode", "")).strip() or existing["login_code"],
         "password": str(payload.get("password", "")).strip() or "000000",
-        "photoDataUrl": str(payload.get("photoDataUrl", "")) or existing["photo_data_url"] or "data:image/jpeg;base64,",
+        "photoDataUrl": photo or existing["photo_data_url"] or "",
     }
     return clean_registration(data)
 
@@ -2625,10 +2942,12 @@ def assert_unique(cursor, kind, fields, exclude_id=None):
         raise ApiError(409, "That phone number is already registered.")
     if unique_phone_taken(cursor, other_table(kind), fields["phone_digits"], None):
         raise ApiError(409, f"That phone number is already used by an {label} account.")
-    if unique_taken(cursor, table, "login_code", fields["login_code"], exclude_id) or unique_taken(
-        cursor, other_table(kind), "login_code", fields["login_code"], None
-    ) or unique_taken(cursor, "isp_client_employees", "login_code", fields["login_code"], None):
-        raise ApiError(409, "Those sign-in details are not available.")
+    if unique_taken(cursor, "isp_employees", "login_code", fields["login_code"], exclude_id if kind == "employee" else None):
+        raise ApiError(409, "That login code is already in use by a company employee.")
+    if unique_taken(cursor, "isp_clients", "login_code", fields["login_code"], exclude_id if kind == "client" else None):
+        raise ApiError(409, "That login code is already in use by an ISP client account.")
+    if unique_taken(cursor, "isp_client_employees", "login_code", fields["login_code"], None):
+        raise ApiError(409, "That login code is already in use by a staff account.")
 
 
 def clean_staff_update(payload, existing):
@@ -2692,12 +3011,12 @@ def assert_staff_unique(cursor, client_id, fields, exclude_id=None):
     )
     if cursor.fetchone():
         raise ApiError(409, "That phone number is already used by another employee on this account.")
-    if (
-        unique_taken(cursor, "isp_client_employees", "login_code", fields["login_code"], exclude_id)
-        or unique_taken(cursor, "isp_clients", "login_code", fields["login_code"], None)
-        or unique_taken(cursor, "isp_employees", "login_code", fields["login_code"], None)
-    ):
-        raise ApiError(409, "That login code is already in use by another sign-in.")
+    if unique_taken(cursor, "isp_employees", "login_code", fields["login_code"], None):
+        raise ApiError(409, "That login code is already in use by a company employee.")
+    if unique_taken(cursor, "isp_clients", "login_code", fields["login_code"], None):
+        raise ApiError(409, "That login code is already in use by an ISP client account.")
+    if unique_taken(cursor, "isp_client_employees", "login_code", fields["login_code"], exclude_id):
+        raise ApiError(409, "That login code is already in use by another employee on this account.")
 
 
 PAYROLL_CYCLES = ("weekly", "biweekly", "monthly")
@@ -3113,8 +3432,8 @@ def company_notification_items(cursor):
                 {
                     "id": f"device-{row['id']}",
                     "kind": "mikrotikAdded",
-                    "subject": "New MikroTik added",
-                    "detail": f"{row['name']} was added by {owner}.",
+                    "subject": "MikroTik onboarded",
+                    "detail": f"{row['name']} was onboarded by {owner}.",
                     "at": stamp(row["created_at"]),
                     "open": False,
                 }
@@ -3144,8 +3463,59 @@ def company_notification_items(cursor):
                     "open": not ended,
                 }
             )
+    if prefs["systemPerformance"]:
+        items += system_performance_feed_items()
     items += gateway_feed_items(cursor, "company")
     items.sort(key=lambda item: item["at"] or "", reverse=True)
+    return items
+
+
+def system_performance_feed_items():
+    """Host pressure alerts for the company feed. IDs bucket by day + metric +
+    severity so a sustained spike notifies once, not on every poll."""
+    day = datetime.now().strftime("%Y-%m-%d")
+    now = datetime.now().isoformat(timespec="seconds")
+    items = []
+
+    def add(metric, percent, label):
+        if percent is None or percent < 75:
+            return
+        band = "critical" if percent >= 90 else "warning"
+        items.append(
+            {
+                "id": f"perf-{metric}-{day}-{band}",
+                "kind": "systemPerformance",
+                "subject": f"System {label} is {band}",
+                "detail": f"Host {label} is at {percent}% — check System performance.",
+                "at": now,
+                "open": True,
+            }
+        )
+
+    cpu = cpu_usage()
+    add("cpu", cpu.get("percent"), "CPU")
+    memory = memory_usage()
+    if memory:
+        add("memory", memory.get("percent"), "memory")
+    try:
+        disk = shutil.disk_usage(os.environ.get("ISP_DISK_PATH", "/"))
+        add("disk", round(disk.used / disk.total * 100, 1), "disk")
+    except OSError:
+        pass
+    try:
+        with socket.create_connection(("8.8.8.8", 53), timeout=0.4):
+            pass
+    except OSError:
+        items.append(
+            {
+                "id": f"perf-uplink-{day}-down",
+                "kind": "systemPerformance",
+                "subject": "System uplink is down",
+                "detail": "The host could not reach the internet on this check.",
+                "at": now,
+                "open": True,
+            }
+        )
     return items
 
 
@@ -3556,6 +3926,15 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST" and path == "/api/employee/approve":
             require_reviewer(cursor, token.get("isp_employee_session"))
             return {"employee": self.approve_employee(cursor, str(payload.get("id", "")))}, None
+        if method == "POST" and path == "/api/employee/role":
+            require_reviewer(cursor, token.get("isp_employee_session"))
+            return {
+                "employee": self.allocate_role(
+                    cursor,
+                    str(payload.get("id", "")),
+                    str(payload.get("role", "")).strip(),
+                )
+            }, None
         if method == "POST" and path == "/api/daraja/callback":
             expected = os.environ.get("ISP_DARAJA_CALLBACK_TOKEN", "").strip()
             if expected:
@@ -3706,6 +4085,10 @@ class Handler(BaseHTTPRequestHandler):
             return self.read_notifications(cursor, token.get("isp_client_session")), None
         if method == "POST" and path == "/api/notifications":
             return self.save_notifications(cursor, payload, token.get("isp_client_session")), None
+        if method == "GET" and path == "/api/notifications/message-recipients":
+            return self.message_recipients(cursor, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/notifications/message":
+            return self.send_client_message(cursor, payload, token.get("isp_client_session")), None
         if method == "GET" and path == "/api/notifications/feed":
             return self.notification_feed(cursor, token.get("isp_client_session")), None
         if method == "POST" and path == "/api/notifications/feed/read":
@@ -5055,7 +5438,7 @@ class Handler(BaseHTTPRequestHandler):
         cursor.execute(
             """
             SELECT id, name, site, role, routeros_version, status, tunnel_status, last_seen_at, last_api_at,
-                   latitude, longitude, api_secret IS NOT NULL AS api_ready
+                   latitude, longitude, tunnel_ip, api_secret IS NOT NULL AS api_ready
             FROM isp_mikrotik_devices
             WHERE client_id = %s
             ORDER BY name
@@ -5063,8 +5446,12 @@ class Handler(BaseHTTPRequestHandler):
             """,
             (client_id, limit, offset),
         )
+        rows = list(cursor.fetchall())
+        # Read-only TCP reachability on the page — never logs in or pushes config,
+        # so polling the list cannot drop PPPoE clients.
+        probe_mikrotik_tunnels(cursor, client_id, rows)
         devices = []
-        for row in cursor.fetchall():
+        for row in rows:
             devices.append(
                 {
                     "id": row["id"],
@@ -5440,6 +5827,16 @@ class Handler(BaseHTTPRequestHandler):
     def reissue_mikrotik(self, cursor, existing, site, role, latitude, longitude):
         private_key = stored_router_key(existing.get("wg_private"))
         if not private_key:
+            # Minting a replacement keypair changes the server-side peer identity
+            # while the live MikroTik still has the old private key — that drops
+            # the tunnel until the WinBox script is re-run. Never do it silently
+            # when a key was already issued (e.g. after ISP_ROUTER_SECRET drift).
+            if existing.get("wg_private") or existing.get("public_key"):
+                raise ApiError(
+                    409,
+                    "This router's WireGuard key could not be opened. "
+                    "Restore ISP_ROUTER_SECRET, or delete the device and onboard it again.",
+                )
             private_key, public_key = wireguard_keypair()
             cursor.execute(
                 """
@@ -5525,7 +5922,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def observe_tunnel(self, cursor, device_id, client_id):
         cursor.execute(
-            "SELECT tunnel_ip, api_secret FROM isp_mikrotik_devices WHERE id = %s AND client_id = %s",
+            """
+            SELECT tunnel_ip, api_secret, status, pppoe_enforced, hotspot_enabled, hotspot_block_sharing
+            FROM isp_mikrotik_devices WHERE id = %s AND client_id = %s
+            """,
             (device_id, client_id),
         )
         row = cursor.fetchone()
@@ -5533,10 +5933,11 @@ class Handler(BaseHTTPRequestHandler):
             return
         try:
             password = routeros_api.open_password(row["api_secret"])
-            live = routeros_api.read_router(row["tunnel_ip"], password, timeout=2)
+            live = routeros_api.read_router(row["tunnel_ip"], password, timeout=5)
         except routeros_api.RouterError:
             return
         version = (live.get("version") or "")[:20] or None
+        previous_status = row.get("status") or "identity"
         cursor.execute(
             """
             UPDATE isp_mikrotik_devices
@@ -5550,6 +5951,40 @@ class Handler(BaseHTTPRequestHandler):
             "UPDATE isp_mikrotik_health_events SET ended_at = CURRENT_TIMESTAMP WHERE client_id = %s AND device_id = %s AND subject = 'Management tunnel' AND ended_at IS NULL",
             (client_id, device_id),
         )
+        self.apply_onboard_access_defaults(cursor, device_id, client_id, previous_status, row)
+
+    def apply_onboard_access_defaults(self, cursor, device_id, client_id, previous_status, row=None):
+        """Turn on PPPoE + hotspot (block sharing) when a router first comes up.
+
+        Flags are stored on create; this pushes them to RouterOS once the
+        management tunnel answers. Also seeds already-active routers that
+        never had either service enabled (legacy onboardings).
+        """
+        if previous_status == "suspended":
+            return
+        flags = row or {}
+        never_seeded = not flags.get("pppoe_enforced") and not flags.get("hotspot_enabled") and not flags.get(
+            "hotspot_block_sharing"
+        )
+        first_up = previous_status in {"identity", "waiting"}
+        if not first_up and not never_seeded:
+            return
+        cursor.execute(
+            """
+            UPDATE isp_mikrotik_devices
+            SET pppoe_enforced = 1, hotspot_enabled = 1, hotspot_block_sharing = 1
+            WHERE id = %s AND client_id = %s
+            """,
+            (device_id, client_id),
+        )
+        try:
+            self.push_pppoe_enforcement(cursor, device_id, client_id, True)
+        except routeros_api.RouterError as error:
+            print(f"event=onboard-access device={device_id} change=pppoe error={error}", flush=True)
+        try:
+            self.push_hotspot_access(cursor, device_id, client_id, True, True, False)
+        except routeros_api.RouterError as error:
+            print(f"event=onboard-access device={device_id} change=hotspot error={error}", flush=True)
 
     def mark_mikrotik_waiting(self, cursor, device_id, token, payload):
         client_id = self.require_client(cursor, token)
@@ -5671,10 +6106,31 @@ class Handler(BaseHTTPRequestHandler):
             self.push_port_uses(cursor, device_id, client_id, plan)
         except routeros_api.RouterError as error:
             return {"applied": False, "message": routeros_api.router_change_message(error), "portPlan": current.get("portPlan") or {}}
-        cursor.execute(
-            "UPDATE isp_mikrotik_devices SET port_plan = %s WHERE id = %s AND client_id = %s",
-            (json.dumps(plan), device_id, client_id),
+        wants_customer = any(
+            use in {"hotspot", "pppoe", "static"} for uses in plan.values() for use in uses
         )
+        if wants_customer:
+            cursor.execute(
+                """
+                UPDATE isp_mikrotik_devices
+                SET port_plan = %s, pppoe_enforced = 1, hotspot_enabled = 1, hotspot_block_sharing = 1
+                WHERE id = %s AND client_id = %s
+                """,
+                (json.dumps(plan), device_id, client_id),
+            )
+            try:
+                self.push_pppoe_enforcement(cursor, device_id, client_id, True)
+            except routeros_api.RouterError as error:
+                print(f"event=port-plan device={device_id} change=pppoe error={error}", flush=True)
+            try:
+                self.push_hotspot_access(cursor, device_id, client_id, True, True, False)
+            except routeros_api.RouterError as error:
+                print(f"event=port-plan device={device_id} change=hotspot error={error}", flush=True)
+        else:
+            cursor.execute(
+                "UPDATE isp_mikrotik_devices SET port_plan = %s WHERE id = %s AND client_id = %s",
+                (json.dumps(plan), device_id, client_id),
+            )
         return {"applied": True, "message": "Updated on the router.", "portPlan": plan}
 
     def push_port_uses(self, cursor, device_id, client_id, plan):
@@ -6026,6 +6482,18 @@ class Handler(BaseHTTPRequestHandler):
         )
         return plan
 
+    def ensure_customer_port_services(self, uses):
+        """Customer ports always activate hotspot + PPPoE together."""
+        cleaned = [use for use in uses if use in {"wan", "lan", "hotspot", "pppoe", "static", "dhcp"}]
+        customer = any(use in {"hotspot", "pppoe", "static"} for use in cleaned)
+        if not customer:
+            return cleaned
+        ordered = ["hotspot", "pppoe"]
+        for use in cleaned:
+            if use not in ordered:
+                ordered.append(use)
+        return ordered
+
     def clean_port_plan(self, payload):
         raw = payload.get("ports") if isinstance(payload, dict) else None
         if raw is None:
@@ -6049,7 +6517,7 @@ class Handler(BaseHTTPRequestHandler):
                 if use not in allowed or use in cleaned:
                     raise ApiError(400, "Choose what that port will do.")
                 cleaned.append(use)
-            plan[iface] = cleaned
+            plan[iface] = self.ensure_customer_port_services(cleaned)
         return plan
 
     def read_port_plan(self, row):
@@ -6066,7 +6534,7 @@ class Handler(BaseHTTPRequestHandler):
             name = str(iface)
             if not isinstance(uses, list):
                 continue
-            cleaned = [str(use) for use in uses if str(use) in allowed]
+            cleaned = self.ensure_customer_port_services([str(use) for use in uses if str(use) in allowed])
             if cleaned:
                 plan[name] = cleaned
         return plan
@@ -6597,12 +7065,26 @@ class Handler(BaseHTTPRequestHandler):
         cursor.execute("SELECT * FROM isp_notification_settings WHERE client_id = %s", (client_id,))
         return cursor.fetchone()
 
+    def isp_client_notification_row(self, cursor, client_id):
+        cursor.execute("SELECT * FROM isp_client_notification_settings WHERE client_id = %s", (client_id,))
+        return cursor.fetchone()
+
+    def isp_hotspot_notification_row(self, cursor, client_id):
+        cursor.execute("SELECT * FROM isp_hotspot_notification_settings WHERE client_id = %s", (client_id,))
+        return cursor.fetchone()
+
     def read_notifications(self, cursor, token):
         client_id = self.require_notification_client(cursor, token)
         return {
             "notifications": public_notification_settings(
                 self.isp_notification_row(cursor, client_id), ISP_NOTIFICATION_TOGGLES
-            )
+            ),
+            "clientNotifications": public_notification_settings(
+                self.isp_client_notification_row(cursor, client_id), ISP_CLIENT_NOTIFICATION_TOGGLES
+            ),
+            "hotspotNotifications": public_notification_settings(
+                self.isp_hotspot_notification_row(cursor, client_id), ISP_HOTSPOT_NOTIFICATION_TOGGLES
+            ),
         }
 
     def save_notifications(self, cursor, payload, token):
@@ -6638,7 +7120,254 @@ class Handler(BaseHTTPRequestHandler):
                 fields["serverUnreachable"],
             ),
         )
+        if "clientNotifications" in payload:
+            client_current = public_notification_settings(
+                self.isp_client_notification_row(cursor, client_id), ISP_CLIENT_NOTIFICATION_TOGGLES
+            )
+            client_submitted = payload.get("clientNotifications") or {}
+            client_fields = {
+                key: 1 if bool(client_submitted.get(key, client_current[key])) else 0
+                for key in ISP_CLIENT_NOTIFICATION_TOGGLES
+            }
+            cursor.execute(
+                """
+                INSERT INTO isp_client_notification_settings (
+                  client_id, subscription_ending, subscription_expired, payment_received,
+                  account_activated, account_paused, maintenance
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                  subscription_ending = VALUES(subscription_ending),
+                  subscription_expired = VALUES(subscription_expired),
+                  payment_received = VALUES(payment_received),
+                  account_activated = VALUES(account_activated),
+                  account_paused = VALUES(account_paused),
+                  maintenance = VALUES(maintenance)
+                """,
+                (
+                    client_id,
+                    client_fields["subscriptionEnding"],
+                    client_fields["subscriptionExpired"],
+                    client_fields["paymentReceived"],
+                    client_fields["accountActivated"],
+                    client_fields["accountPaused"],
+                    client_fields["maintenance"],
+                ),
+            )
+        if "hotspotNotifications" in payload:
+            hotspot_current = public_notification_settings(
+                self.isp_hotspot_notification_row(cursor, client_id), ISP_HOTSPOT_NOTIFICATION_TOGGLES
+            )
+            hotspot_submitted = payload.get("hotspotNotifications") or {}
+            hotspot_fields = {
+                key: 1 if bool(hotspot_submitted.get(key, hotspot_current[key])) else 0
+                for key in ISP_HOTSPOT_NOTIFICATION_TOGGLES
+            }
+            cursor.execute(
+                """
+                INSERT INTO isp_hotspot_notification_settings (
+                  client_id, session_ending, session_expired, payment_received,
+                  voucher_activated, maintenance
+                ) VALUES (%s, %s, %s, %s, %s, %s)
+                ON DUPLICATE KEY UPDATE
+                  session_ending = VALUES(session_ending),
+                  session_expired = VALUES(session_expired),
+                  payment_received = VALUES(payment_received),
+                  voucher_activated = VALUES(voucher_activated),
+                  maintenance = VALUES(maintenance)
+                """,
+                (
+                    client_id,
+                    hotspot_fields["sessionEnding"],
+                    hotspot_fields["sessionExpired"],
+                    hotspot_fields["paymentReceived"],
+                    hotspot_fields["voucherActivated"],
+                    hotspot_fields["maintenance"],
+                ),
+            )
         return self.read_notifications(cursor, token)
+
+    def active_sms_row(self, cursor, client_id):
+        return load_active_sms(cursor, client_id)
+
+    def _group_message_recipients(self, rows, id_key, name_fn, router_id_key="router_id", router_name_key="router_name"):
+        groups = {}
+        order = []
+        for row in rows:
+            router_id = row.get(router_id_key) or "none"
+            if router_id not in groups:
+                groups[router_id] = {
+                    "id": str(router_id),
+                    "name": row.get(router_name_key) or "No MikroTik",
+                    "clients": [],
+                }
+                order.append(router_id)
+            groups[router_id]["clients"].append(
+                {
+                    "id": row[id_key],
+                    "name": name_fn(row),
+                    "phone": row["phone"],
+                }
+            )
+        return [groups[key] for key in order]
+
+    def message_recipients(self, cursor, token):
+        client_id = self.require_notification_client(cursor, token)
+        cursor.execute(
+            """
+            SELECT s.id, s.first_name, s.last_name, s.phone, s.router_id,
+                   COALESCE(d.name, 'No MikroTik') AS router_name
+            FROM pppoe_subscribers s
+            LEFT JOIN isp_mikrotik_devices d ON d.id = s.router_id AND d.client_id = s.client_id
+            WHERE s.client_id = %s
+              AND COALESCE(s.service, 'pppoe') = 'pppoe'
+              AND s.phone IS NOT NULL
+              AND s.phone <> ''
+            ORDER BY router_name, s.first_name, s.last_name
+            """,
+            (client_id,),
+        )
+        pppoe_routers = self._group_message_recipients(
+            cursor.fetchall(),
+            "id",
+            lambda row: f"{row['first_name']} {row['last_name']}".strip(),
+        )
+        # One SMS target per paying phone on each hotspot router — repeat
+        # purchases for the same number must not create duplicate recipients.
+        cursor.execute(
+            """
+            SELECT MIN(h.id) AS id, h.phone, h.device_id AS router_id,
+                   COALESCE(d.name, 'No MikroTik') AS router_name
+            FROM hotspot_purchases h
+            LEFT JOIN isp_mikrotik_devices d ON d.id = h.device_id AND d.client_id = h.client_id
+            WHERE h.client_id = %s
+              AND COALESCE(h.deleted, 0) = 0
+              AND h.phone IS NOT NULL
+              AND h.phone <> ''
+            GROUP BY h.device_id, h.phone, d.name
+            ORDER BY router_name, h.phone
+            """,
+            (client_id,),
+        )
+        hotspot_routers = self._group_message_recipients(
+            cursor.fetchall(),
+            "id",
+            lambda row: f"Hotspot {row['phone']}",
+        )
+        mode, sms = self.active_sms_row(cursor, client_id)
+        details = communication_details((sms or {}).get("details"))
+        return {
+            "pppoe": {"routers": pppoe_routers},
+            "hotspot": {"routers": hotspot_routers},
+            "routers": pppoe_routers,
+            "sms": {
+                "ready": bool(sms and details.get("enabled", True) and sms.get("endpoint") and sms.get("api_key")),
+                "mode": mode,
+                "provider": clean_sms_provider(details.get("provider"), (sms or {}).get("endpoint")),
+                "sender": (sms or {}).get("sender") or "",
+            },
+        }
+
+    def send_client_message(self, cursor, payload, token):
+        client_id = self.require_notification_client(cursor, token)
+        message = str(payload.get("message") or "").strip()
+        if not message or len(message) > 640:
+            raise ApiError(400, "Enter a message of up to 640 characters.")
+        if any(ord(character) < 9 or ord(character) in {11, 12} or 14 <= ord(character) < 32 for character in message):
+            raise ApiError(400, "The message contains characters that cannot be sent.")
+        service = str(payload.get("service") or "pppoe").strip().lower()
+        if service not in {"pppoe", "hotspot"}:
+            raise ApiError(400, "Choose PPPoE or hotspot clients.")
+        raw_ids = payload.get("subscriberIds") or []
+        if not isinstance(raw_ids, list) or not raw_ids:
+            raise ApiError(400, "Select at least one client to message.")
+        if len(raw_ids) > 200:
+            raise ApiError(400, "Send to at most 200 clients at a time.")
+        ids = []
+        seen = set()
+        for item in raw_ids:
+            value = str(item or "").strip()
+            if value and value not in seen:
+                seen.add(value)
+                ids.append(value)
+        marks = ", ".join(["%s"] * len(ids))
+        targets = []
+        if service == "pppoe":
+            cursor.execute(
+                f"""
+                SELECT id, first_name, last_name, phone
+                FROM pppoe_subscribers
+                WHERE client_id = %s AND id IN ({marks})
+                  AND COALESCE(service, 'pppoe') = 'pppoe'
+                """,
+                [client_id, *ids],
+            )
+            for row in cursor.fetchall():
+                targets.append(
+                    {
+                        "id": row["id"],
+                        "name": f"{row['first_name']} {row['last_name']}".strip(),
+                        "phone": row["phone"],
+                    }
+                )
+        else:
+            cursor.execute(
+                f"""
+                SELECT h.id, h.phone, h.device_id
+                FROM hotspot_purchases h
+                WHERE h.client_id = %s AND h.id IN ({marks})
+                  AND COALESCE(h.deleted, 0) = 0
+                  AND h.phone IS NOT NULL
+                  AND h.phone <> ''
+                """,
+                [client_id, *ids],
+            )
+            phones_seen = set()
+            for row in cursor.fetchall():
+                key = f"{row['device_id']}|{row['phone']}"
+                if key in phones_seen:
+                    continue
+                phones_seen.add(key)
+                targets.append(
+                    {
+                        "id": row["id"],
+                        "name": f"Hotspot {row['phone']}",
+                        "phone": row["phone"],
+                    }
+                )
+        if not targets:
+            raise ApiError(400, "None of the selected clients could be found.")
+        mode, sms = self.active_sms_row(cursor, client_id)
+        if not sms:
+            raise ApiError(400, "Set up an SMS gateway under Communications before sending.")
+        details = communication_details(sms.get("details"))
+        if details.get("enabled") is False:
+            raise ApiError(400, "Turn on the SMS channel before sending.")
+        results = []
+        sent = 0
+        failed = 0
+        for row in targets:
+            outcome = send_sms(sms, row["phone"], message)
+            ok = bool(outcome.get("ok"))
+            if ok:
+                sent += 1
+            else:
+                failed += 1
+            results.append(
+                {
+                    "id": row["id"],
+                    "name": row["name"],
+                    "phone": row["phone"],
+                    "ok": ok,
+                    "reason": outcome.get("reason") or "",
+                }
+            )
+        return {
+            "sent": sent,
+            "failed": failed,
+            "mode": mode,
+            "service": service,
+            "results": results,
+        }
 
     def notification_feed(self, cursor, token):
         client_id = self.require_notification_client(cursor, token)
@@ -7666,13 +8395,14 @@ class Handler(BaseHTTPRequestHandler):
             """
             INSERT INTO company_notification_settings (
               id, server_unreachable, mikrotik_unreachable, mikrotik_added, isp_registered,
-              communications_failed, payments_failed
-            ) VALUES (1, %s, %s, %s, %s, %s, %s)
+              system_performance, communications_failed, payments_failed
+            ) VALUES (1, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
               server_unreachable = VALUES(server_unreachable),
               mikrotik_unreachable = VALUES(mikrotik_unreachable),
               mikrotik_added = VALUES(mikrotik_added),
               isp_registered = VALUES(isp_registered),
+              system_performance = VALUES(system_performance),
               communications_failed = VALUES(communications_failed),
               payments_failed = VALUES(payments_failed)
             """,
@@ -7681,6 +8411,7 @@ class Handler(BaseHTTPRequestHandler):
                 fields["mikrotikUnreachable"],
                 fields["mikrotikAdded"],
                 fields["ispRegistered"],
+                fields["systemPerformance"],
                 fields["communicationsFailed"],
                 fields["paymentsFailed"],
             ),
@@ -8351,7 +9082,8 @@ def publish_tunnel_peers_later():
 
 
 def pppoe_sweep_loop():
-    interval = max(60, int(os.environ.get("ISP_PPPOE_SWEEP_SECONDS", "300")))
+    # Enforce expiry/suspend on the background only — list/status polls stay read-only.
+    interval = max(60, int(os.environ.get("ISP_PPPOE_SWEEP_SECONDS", "120")))
     while True:
         time.sleep(interval)
         try:
@@ -8361,7 +9093,8 @@ def pppoe_sweep_loop():
 
 
 def reconcile_loop():
-    interval = max(15, int(os.environ.get("ISP_RECONCILE_SECONDS", "60")))
+    # Faster "up" detection; down still needs ISP_TUNNEL_DOWN_AFTER failures.
+    interval = max(15, int(os.environ.get("ISP_RECONCILE_SECONDS", "30")))
     while True:
         time.sleep(interval)
         try:
@@ -8619,6 +9352,76 @@ def _mark_tunnel(connect, device, status):
 
 
 _PROBE_FAILURES = {}
+_PROBE_DOWN_AFTER = max(2, int(os.environ.get("ISP_TUNNEL_DOWN_AFTER", "3")))
+_LIST_PROBE_TIMEOUT = max(0.4, float(os.environ.get("ISP_TUNNEL_LIST_PROBE_TIMEOUT", "1.2")))
+
+
+def _tcp_reachable(host, port=8728, timeout=_LIST_PROBE_TIMEOUT):
+    """True when the management API port answers a TCP connect — no login."""
+    if not host:
+        return False
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
+def probe_mikrotik_tunnels(cursor, client_id, rows):
+    """Update tunnel_status from a cheap TCP probe. Never authenticates or
+    applies router config — safe for frequent list polling."""
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    targets = [row for row in rows if row.get("tunnel_ip") and row.get("status") == "active"]
+    if not targets:
+        return
+    results = {}
+    workers = min(8, len(targets))
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_tcp_reachable, row["tunnel_ip"]): row["id"] for row in targets}
+        for future in as_completed(futures):
+            results[futures[future]] = bool(future.result())
+    for row in rows:
+        device_id = row["id"]
+        if device_id not in results:
+            continue
+        if results[device_id]:
+            _PROBE_FAILURES.pop(device_id, None)
+            if (row.get("tunnel_status") or "") != "up":
+                cursor.execute(
+                    """
+                    UPDATE isp_mikrotik_devices
+                    SET tunnel_status = 'up', last_seen_at = CURRENT_TIMESTAMP
+                    WHERE id = %s AND client_id = %s AND tunnel_status <> 'up'
+                    """,
+                    (device_id, client_id),
+                )
+                if cursor.rowcount:
+                    cursor.execute(
+                        "UPDATE isp_mikrotik_health_events SET ended_at = CURRENT_TIMESTAMP WHERE client_id = %s AND device_id = %s AND subject = 'Management tunnel' AND ended_at IS NULL",
+                        (client_id, device_id),
+                    )
+                row["tunnel_status"] = "up"
+                row["last_seen_at"] = datetime.now()
+            continue
+        _PROBE_FAILURES[device_id] = _PROBE_FAILURES.get(device_id, 0) + 1
+        if _PROBE_FAILURES[device_id] < _PROBE_DOWN_AFTER:
+            continue
+        if (row.get("tunnel_status") or "") != "down":
+            cursor.execute(
+                "UPDATE isp_mikrotik_devices SET tunnel_status = 'down' WHERE id = %s AND client_id = %s AND tunnel_status <> 'down'",
+                (device_id, client_id),
+            )
+            if cursor.rowcount:
+                cursor.execute(
+                    """
+                    INSERT INTO isp_mikrotik_health_events (id, client_id, device_id, subject, reason, started_at)
+                    VALUES (%s, %s, %s, 'Management tunnel', 'The management tunnel did not answer.', CURRENT_TIMESTAMP)
+                    """,
+                    (str(uuid.uuid4()), client_id, device_id),
+                )
+                notify_push_now()
+            row["tunnel_status"] = "down"
 
 
 def reconcile_device(connect, device):
@@ -8626,7 +9429,7 @@ def reconcile_device(connect, device):
 
     Reads the router first and only pushes what is missing, so a healthy
     router is never touched and live PPP sessions are not kicked needlessly.
-    tunnel_status only flips to 'down' after two consecutive failed loops —
+    tunnel_status only flips to 'down' after several consecutive failed loops —
     one congested interval must not reap radacct rows or mark clients offline.
     """
     try:
@@ -8634,12 +9437,14 @@ def reconcile_device(connect, device):
     except routeros_api.RouterError:
         return
     state = None
+    probe_timeout = max(4, int(os.environ.get("ISP_TUNNEL_PROBE_TIMEOUT", "8")))
     for _ in range(2):
         try:
             state = routeros_api.inspect_access(
                 device["tunnel_ip"],
                 password,
                 radius_address=os.environ.get("ISP_RADIUS_HOST") or wg_host.HOST_IP,
+                timeout=probe_timeout,
             )
             break
         except routeros_api.RouterError as error:
@@ -8650,7 +9455,7 @@ def reconcile_device(connect, device):
                 return
     if state is None:
         _PROBE_FAILURES[device["id"]] = _PROBE_FAILURES.get(device["id"], 0) + 1
-        if _PROBE_FAILURES[device["id"]] >= 2:
+        if _PROBE_FAILURES[device["id"]] >= _PROBE_DOWN_AFTER:
             _mark_tunnel(connect, device, "down")
         return
     _PROBE_FAILURES.pop(device["id"], None)

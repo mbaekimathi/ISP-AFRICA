@@ -84,6 +84,18 @@ export function inferPortUses(comment: string): PortUse[] {
   return PORT_USES.filter((use) => parts.some((part) => part === use || part === portUseLabels[use].toLowerCase()));
 }
 
+/** Customer ports always run hotspot + PPPoE together; static stays optional. */
+export function ensureCustomerServices(uses: PortUse[]): PortUse[] {
+  const customer = uses.some((use) => use === "hotspot" || use === "pppoe" || use === "static");
+  if (!customer) return uses.filter((use) => PORT_USES.includes(use));
+  const extras = uses.filter((use) => use === "static" || use === "wan" || use === "lan" || use === "dhcp");
+  const ordered: PortUse[] = ["hotspot", "pppoe"];
+  for (const use of extras) {
+    if (!ordered.includes(use)) ordered.push(use);
+  }
+  return ordered;
+}
+
 export function assignPortRoles(
   ports: { name: string; comment: string; running?: boolean; disabled?: boolean; slave?: boolean }[],
   role: string,
@@ -92,27 +104,25 @@ export function assignPortRoles(
   const assigned: Record<string, PortUse[]> = {};
   for (const port of sorted) {
     const labeled = inferPortUses(port.comment);
-    if (labeled.length > 0) assigned[port.name] = labeled;
+    if (labeled.length > 0) assigned[port.name] = ensureCustomerServices(labeled);
   }
   const open = sorted.filter((port) => !assigned[port.name] && !port.slave && !port.disabled);
   const requested = routerPortUses(role);
-  const customerUses = requested.length
-    ? requested.filter((use) => use === "hotspot" || use === "pppoe" || use === "static")
-    : (["hotspot", "pppoe"] as PortUse[]);
+  const wantsCustomer =
+    requested.length === 0 || requested.some((use) => use === "hotspot" || use === "pppoe" || use === "static");
+  const customerUses = ensureCustomerServices(
+    requested.length
+      ? requested.filter((use) => use === "hotspot" || use === "pppoe" || use === "static")
+      : (["hotspot", "pppoe"] as PortUse[]),
+  );
   const wanName = (open.find((port) => port.running) ?? open[0])?.name;
-  if (wanName && (requested.includes("wan") || customerUses.length > 0 || requested.includes("dhcp"))) assigned[wanName] = ["wan"];
+  if (wanName && (requested.includes("wan") || wantsCustomer || requested.includes("dhcp"))) assigned[wanName] = ["wan"];
   const rest = open.filter((port) => port.name !== wanName);
   const localName = requested.includes("dhcp") ? rest[rest.length - 1]?.name : "";
   const customerPorts = rest.filter((port) => port.name !== localName);
-  if (requested.length === 0 || customerUses.length === 1) {
+  // Every customer port gets hotspot + PPPoE (and static when the role asks).
+  if (wantsCustomer) {
     for (const port of customerPorts) assigned[port.name] = [...customerUses];
-  } else {
-    customerPorts.forEach((port, index) => {
-      if (index < customerUses.length) assigned[port.name] = [customerUses[index]];
-    });
-    if (customerPorts.length > 0 && customerUses.length > customerPorts.length) {
-      assigned[customerPorts[customerPorts.length - 1].name] = customerUses.slice(customerPorts.length - 1);
-    }
   }
   if (localName) assigned[localName] = ["dhcp"];
   if (requested.includes("lan")) {
@@ -138,11 +148,11 @@ export function loadPortUses(
     const labeled = inferPortUses(port.comment);
     const stored = (plan[port.name] ?? []).filter((use) => PORT_USES.includes(use));
     if (labeled.length > 0) {
-      uses[port.name] = labeled;
+      uses[port.name] = ensureCustomerServices(labeled);
       saved[port.name] = true;
       remembered = true;
     } else if (stored.length > 0) {
-      uses[port.name] = stored;
+      uses[port.name] = ensureCustomerServices(stored);
       saved[port.name] = true;
       remembered = true;
     }

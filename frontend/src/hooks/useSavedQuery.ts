@@ -16,7 +16,7 @@ export function useSavedQuery<T>(path: string | null): SavedState<T> {
     if (!path) return;
     let stopped = false;
     let timer = 0;
-    let delay = 15000;
+    let delay = 10000;
     let controller = new AbortController();
 
     const load = () => {
@@ -25,7 +25,7 @@ export function useSavedQuery<T>(path: string | null): SavedState<T> {
       apiRequest<T>(path, { signal: controller.signal })
         .then((body) => {
           if (stopped) return;
-          delay = 15000;
+          delay = 10000;
           setData(body);
           setError("");
           setLoading(false);

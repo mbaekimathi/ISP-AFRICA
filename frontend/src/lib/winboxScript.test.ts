@@ -27,8 +27,19 @@ assert.equal(ready.script.includes("0.0.0.0/0"), false);
 assert.equal(ready.script.includes("dst-port=8291"), false);
 assert.ok(ready.script.includes('persistent-keepalive=25s'));
 assert.ok(ready.script.includes('endpoint-address="vpn.example.net"'));
+assert.ok(ready.script.includes("comment=isp-centric-wg-udp"));
+assert.ok(ready.script.includes("dst-port=51820 comment=isp-centric-wg-udp"));
+assert.equal(ready.script.includes("dst-address=vpn.example.net"), false);
+assert.ok(ready.script.includes("isp-centric-watch"));
+assert.ok(ready.script.includes("interval=2m"));
+assert.ok(ready.script.includes("peers disable"));
+assert.ok(ready.script.includes('endpoint-address="vpn.example.net" endpoint-port=51820'));
 assert.equal(ready.script.includes('Tower "West"'), false);
 assert.equal(backupName('Tower "West"'), "isp-TowerWest");
+
+const byIp = buildWinboxScript({ ...device, endpoint: "203.0.113.10" }, "Abcdefghij1234567890");
+assert.equal(byIp.applicable, true);
+assert.ok(byIp.script.includes("dst-address=203.0.113.10 dst-port=51820 comment=isp-centric-wg-udp"));
 
 const blocked = buildWinboxScript({ ...device, endpoint: "bad endpoint;" }, "Abcdefghij1234567890");
 assert.equal(blocked.applicable, false);

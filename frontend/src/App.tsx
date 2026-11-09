@@ -4,6 +4,7 @@ import { EmployeeLayout } from "@/components/layout/EmployeeLayout";
 import { PublicLayout } from "@/components/layout/PublicLayout";
 import { CompanyAdvertsPage } from "@/pages/employee/CompanyAdvertsPage";
 import { CompanyCommunicationsPage } from "@/pages/employee/CompanyCommunicationsPage";
+import { CompanyHrPage } from "@/pages/employee/CompanyHrPage";
 import { CompanyNotificationsPage } from "@/pages/employee/CompanyNotificationsPage";
 import { CompanyNotificationSettingsPage } from "@/pages/employee/CompanyNotificationSettingsPage";
 import { CompanyGatewayControlsPage } from "@/pages/employee/CompanyGatewayControlsPage";
@@ -62,6 +63,7 @@ import { TopPage } from "@/pages/public/TopPage";
 import { DemoPage, PrivacyPage, TermsPage } from "@/pages/SitePages";
 import { AuthProvider } from "@/providers/AuthProvider";
 import { EmployeeAuthProvider } from "@/providers/EmployeeAuthProvider";
+import { TunnelAlertProvider } from "@/providers/TunnelAlertProvider";
 
 const portalRoles = ["isp-technician", "isp-customercare", "isp-manager"] as const;
 
@@ -107,7 +109,8 @@ const clientPages = (
     <Route path="account/settings/isp-company/theme" element={<IspThemePage />} />
     <Route path="account/settings/isp-package" element={<IspPackagePage />} />
     <Route path="account/settings/isp-payments" element={<IspPaymentsPage />} />
-    <Route path="account/settings/isp-communications" element={<IspCommunicationsPage />} />
+    <Route path="account/settings/isp-communications" element={<Navigate to="sms" replace />} />
+    <Route path="account/settings/isp-communications/:channel" element={<IspCommunicationsPage />} />
     <Route path="account/settings/isp-notifications" element={<IspNotificationsPage />} />
     <Route path="account/settings/isp-notifications/settings" element={<IspNotificationSettingsPage />} />
     <Route path="account/settings/isp-adverts" element={<IspAdvertsPage />} />
@@ -120,6 +123,7 @@ export function App() {
     <BrowserRouter>
       <AuthProvider>
         <EmployeeAuthProvider>
+        <TunnelAlertProvider>
         <Routes>
           <Route element={<PublicLayout />}>
             <Route path="/" element={<Navigate to="/top" replace />} />
@@ -176,6 +180,7 @@ export function App() {
             <Route path="/:role/:code/dashboard" element={<EmployeeDashboardPage />} />
             <Route path="/:role/:code/performance" element={<SystemPerformancePage />} />
             <Route path="/:role/:code/clients" element={<IspClientsPage />} />
+            <Route path="/:role/:code/hr" element={<CompanyHrPage />} />
             <Route path="/:role/:code/account" element={<EmployeeAccountPage />} />
             <Route path="/:role/:code/company-settings" element={<SectionPage title="Company settings" />} />
             <Route path="/:role/:code/company-settings/profile" element={<CompanyProfilePage />} />
@@ -186,7 +191,8 @@ export function App() {
             <Route path="/:role/:code/company-settings/billings" element={<SectionPage title="COMPANY BILLINGS" />} />
             <Route path="/:role/:code/company-settings/billings/gateway" element={<CompanyGatewayPage />} />
             <Route path="/:role/:code/company-settings/billings/gateway/charges" element={<CompanyGatewayControlsPage />} />
-            <Route path="/:role/:code/company-settings/communications" element={<CompanyCommunicationsPage />} />
+            <Route path="/:role/:code/company-settings/communications" element={<Navigate to="sms" replace />} />
+            <Route path="/:role/:code/company-settings/communications/:channel" element={<CompanyCommunicationsPage />} />
             <Route path="/:role/:code/company-settings/adverts" element={<CompanyAdvertsPage />} />
             <Route path="/:role/:code/company-settings/notifications" element={<CompanyNotificationsPage />} />
             <Route path="/:role/:code/company-settings/notifications/settings" element={<CompanyNotificationSettingsPage />} />
@@ -197,6 +203,7 @@ export function App() {
             <Route path="dashboard" element={<EmployeeDashboardPage />} />
             <Route path=":code/dashboard" element={<EmployeeDashboardPage />} />
             <Route path="clients" element={<IspClientsPage />} />
+            <Route path="hr" element={<CompanyHrPage />} />
             <Route path="login" element={<EmployeeLoginPage />} />
             <Route path="signup" element={<EmployeeSignUpPage />} />
             <Route path="account" element={<EmployeeAccountPage />} />
@@ -210,7 +217,8 @@ export function App() {
             <Route path="company-settings/billings" element={<SectionPage title="COMPANY BILLINGS" />} />
             <Route path="company-settings/billings/gateway" element={<CompanyGatewayPage />} />
             <Route path="company-settings/billings/gateway/charges" element={<CompanyGatewayControlsPage />} />
-            <Route path="company-settings/communications" element={<CompanyCommunicationsPage />} />
+            <Route path="company-settings/communications" element={<Navigate to="sms" replace />} />
+            <Route path="company-settings/communications/:channel" element={<CompanyCommunicationsPage />} />
             <Route path="company-settings/adverts" element={<CompanyAdvertsPage />} />
             <Route path="company-settings/notifications" element={<CompanyNotificationsPage />} />
             <Route path="company-settings/notifications/settings" element={<CompanyNotificationSettingsPage />} />
@@ -223,6 +231,7 @@ export function App() {
           </Route>
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
+        </TunnelAlertProvider>
         </EmployeeAuthProvider>
       </AuthProvider>
     </BrowserRouter>

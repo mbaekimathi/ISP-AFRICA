@@ -538,3 +538,35 @@ def prorate_credit(price, next_due, today, period_days):
     remaining = (next_due - today).days
     credit = (Decimal(price) * Decimal(remaining) / Decimal(period_days)).quantize(Decimal("0.01"))
     return min(credit, Decimal(price))
+
+
+def days_purchased(amount, price, period_days):
+    """Whole surfing days a payment buys against a package price and cycle.
+
+    Ceiling division so a partial payment never rounds down to zero days —
+    the smallest positive amount always buys at least one day. Uses
+    (n + d - 1) // d because Decimal's // truncates toward zero and breaks
+    the usual -(-n // d) ceiling trick.
+    """
+    paid = Decimal(str(amount or 0))
+    rate = Decimal(str(price or 0))
+    period = int(period_days or 0)
+    if paid <= 0 or rate <= 0 or period <= 0:
+        return 0
+    units = paid * period
+    return max(1, int((units + rate - Decimal("1")) // rate))
+
+
+def validity_cycle_days(amount, unit, fallback=30):
+    """Map a package validity window onto whole days used for PPPoE billing."""
+    unit = str(unit or "days").lower()
+    count = max(1, int(amount or 1))
+    if unit in {"hour", "hours"}:
+        return max(1, (count + 23) // 24)
+    if unit in {"day", "days"}:
+        return count
+    if unit in {"week", "weeks"}:
+        return count * 7
+    if unit in {"month", "months"}:
+        return count * 30
+    return max(1, int(fallback or 30))

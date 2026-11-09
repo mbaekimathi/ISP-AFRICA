@@ -2,6 +2,7 @@ import type { FormEvent } from "react";
 import { useState } from "react";
 import { PrimaryButton } from "@/components/ui/Buttons";
 import { FormField } from "@/components/ui/FormField";
+import { storedProfilePhoto } from "@/lib/api";
 import { fileToProfilePhoto, type AccountInput } from "@/lib/accounts";
 
 export type ProfileSource = Pick<
@@ -101,7 +102,7 @@ export function ProfileForm({
         phone: values.phone.trim(),
         loginCode: values.loginCode,
         password: values.password,
-        photoDataUrl: photo,
+        photoDataUrl: storedProfilePhoto(photo),
       });
       setValues((current) => ({ ...current, password: "", confirmPassword: "" }));
       setNotice("Saved — your profile details are up to date.");
@@ -115,7 +116,12 @@ export function ProfileForm({
   return (
     <form className="form-card mt-6 max-w-2xl" onSubmit={submit} noValidate>
       <div className="grid gap-4">
-        <FormField id={`${idPrefix}-photo`} label="Profile photo" error={errors.photo} hint="Upload a new photo to replace the current one.">
+        <FormField
+          id={`${idPrefix}-photo`}
+          label="Profile photo"
+          error={errors.photo}
+          hint="Optional — leave unchanged to keep the current photo."
+        >
           <div className="flex flex-col items-start gap-4 sm:flex-row sm:items-center">
             {photo ? (
               <img src={photo} alt="Current profile photo" className="h-20 w-20 rounded-full object-cover" />

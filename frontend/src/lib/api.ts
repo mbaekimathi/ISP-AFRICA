@@ -36,3 +36,11 @@ export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T
 export function withProfilePhoto<T extends { photoDataUrl: string }>(record: T): T {
   return record.photoDataUrl ? record : { ...record, photoDataUrl: PLACEHOLDER_PHOTO };
 }
+
+export function isPlaceholderPhoto(photoDataUrl: string) {
+  return !photoDataUrl || photoDataUrl === PLACEHOLDER_PHOTO || photoDataUrl.startsWith("data:image/svg");
+}
+
+export function storedProfilePhoto(photoDataUrl: string) {
+  return isPlaceholderPhoto(photoDataUrl) ? "" : photoDataUrl;
+}

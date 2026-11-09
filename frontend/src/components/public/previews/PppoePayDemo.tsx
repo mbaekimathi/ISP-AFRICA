@@ -3,16 +3,17 @@ import { Check, Smartphone, Wifi, WifiOff } from "lucide-react";
 import { cn } from "@/lib/cn";
 
 /* Interactive replica of the expired-subscription pay page — sample data only.
-   Mirrors the real flow: pick a package, enter an M-Pesa number, get a prompt
-   on the phone, page confirms itself when the payment lands. */
+   Mirrors the real flow: pick a package, enter any M-Pesa amount, see surfing
+   days update live, get a prompt on the phone, page confirms itself when the
+   payment lands. */
 const SAMPLE = {
   brand: "ISP CENTRIC",
   portal: "Secure payment portal",
   headline: "Hi Amina Wanjiku, let's get you back online",
   hint: "Pick a package and pay — your internet comes back on its own, no call needed.",
   packages: [
-    { id: "simba", name: "SIMBA · 10 MBPS", detail: "10 Mbps down · 15 Mbps up · 1 month", meta: "Up to 1 device", price: "1" },
-    { id: "fibre", name: "FIBRE · 20 MBPS", detail: "20 Mbps down · 20 Mbps up · 1 month", meta: "Up to 3 devices", price: "1500" },
+    { id: "simba", name: "SIMBA · 10 MBPS", detail: "10 Mbps down · 15 Mbps up · 1 month", meta: "Up to 1 device", price: 1000, cycleDays: 30 },
+    { id: "fibre", name: "FIBRE · 20 MBPS", detail: "20 Mbps down · 20 Mbps up · 1 month", meta: "Up to 3 devices", price: 1500, cycleDays: 30 },
   ],
 };
 
@@ -26,18 +27,36 @@ function normalizePhone(value: string) {
   return "";
 }
 
+function daysForAmount(amount: number, price: number, cycleDays: number) {
+  if (!(amount > 0) || !(price > 0) || !(cycleDays > 0)) return 0;
+  return Math.max(1, Math.ceil((amount * cycleDays) / price));
+}
+
 export function PppoePayDemo() {
   const [packageId, setPackageId] = useState(SAMPLE.packages[0].id);
   const [phone, setPhone] = useState("");
+  const [amount, setAmount] = useState(String(SAMPLE.packages[0].price));
   const [state, setState] = useState<PayState>("idle");
   const [error, setError] = useState("");
-  const selected = SAMPLE.packages.find((p) => p.id === packageId) ?? SAMPLE.packages[0];
+  const selected = SAMPLE.packages.find((pkg) => pkg.id === packageId) ?? SAMPLE.packages[0];
+  const paidAmount = Number(String(amount).replace(/,/g, ""));
+  const purchasedDays = daysForAmount(paidAmount, selected.price, selected.cycleDays);
+
+  function choosePackage(id: string) {
+    const next = SAMPLE.packages.find((pkg) => pkg.id === id) ?? SAMPLE.packages[0];
+    setPackageId(next.id);
+    setAmount(String(next.price));
+  }
 
   function pay(event: React.FormEvent) {
     event.preventDefault();
     const normalized = normalizePhone(phone);
     if (!normalized) {
       setError("Enter the M-Pesa number that should receive the payment prompt.");
+      return;
+    }
+    if (!(paidAmount > 0)) {
+      setError("Enter the amount to pay.");
       return;
     }
     setError("");
@@ -64,13 +83,17 @@ export function PppoePayDemo() {
               <Check className="h-6 w-6" aria-hidden="true" />
             </span>
             <p className="text-base font-semibold text-foreground">Payment confirmed</p>
-            <p className="text-sm text-muted-foreground">Amina is back online on {selected.name}.</p>
+            <p className="text-sm text-muted-foreground">
+              Amina is back online on {selected.name}
+              {purchasedDays > 0 ? ` for ${purchasedDays} day${purchasedDays === 1 ? "" : "s"}` : ""}.
+            </p>
             <button
               type="button"
               className="mt-2 text-xs font-semibold text-primary underline-offset-4 hover:underline"
               onClick={() => {
                 setState("idle");
                 setPhone("");
+                setAmount(String(selected.price));
               }}
             >
               Try the demo again
@@ -94,7 +117,13 @@ export function PppoePayDemo() {
               </div>
               <div className="flex items-baseline justify-between gap-3 border-b border-border/70 py-2">
                 <dt className="text-muted-foreground">Amount</dt>
-                <dd className="font-semibold text-foreground">KSh {selected.price}</dd>
+                <dd className="font-semibold text-foreground">KSh {paidAmount}</dd>
+              </div>
+              <div className="flex items-baseline justify-between gap-3 border-b border-border/70 py-2">
+                <dt className="text-muted-foreground">Surfing days</dt>
+                <dd className="font-semibold text-foreground">
+                  {purchasedDays} day{purchasedDays === 1 ? "" : "s"}
+                </dd>
               </div>
               <div className="flex items-baseline justify-between gap-3 py-2">
                 <dt className="text-muted-foreground">M-Pesa number</dt>
@@ -148,7 +177,7 @@ export function PppoePayDemo() {
                       name="pppoe-package"
                       value={pkg.id}
                       checked={pkg.id === packageId}
-                      onChange={() => setPackageId(pkg.id)}
+                      onChange={() => choosePackage(pkg.id)}
                       className="h-4 w-4 accent-primary"
                     />
                     <span
@@ -186,6 +215,24 @@ export function PppoePayDemo() {
                 value={phone}
                 onChange={(event) => setPhone(event.target.value)}
               />
+            </div>
+
+            <div className="mt-3">
+              <label className="block text-xs font-medium text-foreground" htmlFor="pppoe-demo-amount">
+                Amount (KSh)
+              </label>
+              <input
+                id="pppoe-demo-amount"
+                className="field mt-1"
+                inputMode="decimal"
+                value={amount}
+                onChange={(event) => setAmount(event.target.value)}
+              />
+              {purchasedDays > 0 ? (
+                <p className="mt-1.5 text-[11px] font-semibold text-primary">
+                  Buys {purchasedDays} day{purchasedDays === 1 ? "" : "s"} of internet.
+                </p>
+              ) : null}
               {error ? (
                 <p className="mt-1.5 text-[11px] font-medium text-destructive" role="alert">
                   {error}
@@ -198,10 +245,10 @@ export function PppoePayDemo() {
               className="mt-4 inline-flex w-full items-center justify-center gap-2 rounded-xl bg-primary py-3 text-sm font-semibold text-primary-foreground transition"
             >
               <Smartphone className="h-4 w-4" aria-hidden="true" />
-              Pay KSh {selected.price} with M-Pesa
+              {paidAmount > 0 ? `Pay KSh ${paidAmount} with M-Pesa` : "Pay with M-Pesa"}
             </button>
             <p className="mt-3 text-[11px] leading-4 text-muted-foreground">
-              You will get a prompt on the phone to approve. The page updates itself when the payment lands.
+              Pay any amount — surfing days update as you type. The page updates itself when the payment lands.
             </p>
           </form>
         )}

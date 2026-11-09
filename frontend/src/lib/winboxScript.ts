@@ -135,12 +135,19 @@ export function buildWinboxScript(device: ScriptDevice, apiPassword: string) {
       ':do { /ip firewall filter add chain=input action=accept protocol=icmp in-interface=isp-centric comment=isp-centric-icmp place-before=$inAnchor } on-error={ /ip firewall filter add chain=input action=accept protocol=icmp in-interface=isp-centric comment=isp-centric-icmp };',
       ':do { /ip firewall filter add chain=input action=accept protocol=udp dst-port=3799 in-interface=isp-centric comment=isp-centric-coa place-before=$inAnchor } on-error={ /ip firewall filter add chain=input action=accept protocol=udp dst-port=3799 in-interface=isp-centric comment=isp-centric-coa };',
       ':if ([:len [/ip firewall filter find where comment="isp-centric-api"]] > 0) do={:put "[ISP CENTRIC OK] API and ICMP allowed from the tunnel"} else={:put "[ISP CENTRIC FAIL] Tunnel API rule is missing"};',
-      ...(local || !endpointIp
+      // DNS endpoints cannot use a fixed dst-address rule; still allow the WG
+      // UDP port so a default output-drop policy does not kill the tunnel.
+      ...(local
         ? []
-        : [
-            `:do { /ip firewall filter add chain=output action=accept protocol=udp dst-address=${endpointIp} dst-port=${port} comment=isp-centric-wg-udp place-before=$outAnchor } on-error={ /ip firewall filter add chain=output action=accept protocol=udp dst-address=${endpointIp} dst-port=${port} comment=isp-centric-wg-udp };`,
-            ':if ([:len [/ip firewall filter find where comment="isp-centric-wg-udp"]] > 0) do={:put "[ISP CENTRIC OK] Output allows WireGuard to the server"} else={:put "[ISP CENTRIC FAIL] WireGuard output rule is missing"};',
-          ]),
+        : endpointIp
+          ? [
+              `:do { /ip firewall filter add chain=output action=accept protocol=udp dst-address=${endpointIp} dst-port=${port} comment=isp-centric-wg-udp place-before=$outAnchor } on-error={ /ip firewall filter add chain=output action=accept protocol=udp dst-address=${endpointIp} dst-port=${port} comment=isp-centric-wg-udp };`,
+              ':if ([:len [/ip firewall filter find where comment="isp-centric-wg-udp"]] > 0) do={:put "[ISP CENTRIC OK] Output allows WireGuard to the server"} else={:put "[ISP CENTRIC FAIL] WireGuard output rule is missing"};',
+            ]
+          : [
+              `:do { /ip firewall filter add chain=output action=accept protocol=udp dst-port=${port} comment=isp-centric-wg-udp place-before=$outAnchor } on-error={ /ip firewall filter add chain=output action=accept protocol=udp dst-port=${port} comment=isp-centric-wg-udp };`,
+              ':if ([:len [/ip firewall filter find where comment="isp-centric-wg-udp"]] > 0) do={:put "[ISP CENTRIC OK] Output allows WireGuard UDP to the VPS hostname"} else={:put "[ISP CENTRIC FAIL] WireGuard output rule is missing"};',
+            ]),
       ':put "[ISP CENTRIC] Step 5/8 hotspot";',
       `:do { /ip hotspot ip-binding add type=bypassed address=${tunnelNetwork} comment=isp-centric-hotspot-bypass ; :put "[ISP CENTRIC OK] Hotspot bypasses the management subnet" } on-error={:put "[ISP CENTRIC WARN] Hotspot bypass skipped"};`,
       ':put "[ISP CENTRIC] Step 6/8 nat";',
@@ -151,15 +158,17 @@ export function buildWinboxScript(device: ScriptDevice, apiPassword: string) {
         ? [':put "[ISP CENTRIC] Handshake waits until the VPS peer is added";']
         : [
             ':put "[ISP CENTRIC] The server peer handshakes in the background — no wait needed";',
-            `:do { :local hs [/interface wireguard peers get [find where interface="isp-centric"] last-handshake] ; :put ("[ISP CENTRIC OK] Server last-handshake: " . $hs) } on-error={ :put "[ISP CENTRIC] Server last-handshake: none yet — the watchdog re-checks every 3 minutes" };`,
+            `:do { :local hs [/interface wireguard peers get [find where interface="isp-centric"] last-handshake] ; :put ("[ISP CENTRIC OK] Server last-handshake: " . $hs) } on-error={ :put "[ISP CENTRIC] Server last-handshake: none yet — the watchdog re-checks every 2 minutes" };`,
           ]),
       ':put "[ISP CENTRIC] Step 8/8 summary";',
       ...(local
         ? []
         : [
-            `:do { /system script add name=isp-centric-watch policy=read,write,test source=":do { /interface enable [find where name=isp-centric] } on-error={} ; /ping ${serverTunnel} count=1" } on-error={};`,
-            ':do { /system scheduler add name=isp-centric-watch interval=3m on-event=isp-centric-watch } on-error={};',
-            ':put "[ISP CENTRIC OK] Watchdog checks the tunnel every 3 minutes";',
+            // Bounce a dead peer and re-apply the endpoint so CGNAT / hostname
+            // IP changes recover without a manual WinBox paste.
+            `:do { /system script add name=isp-centric-watch policy=read,write,test source={ :do { /interface enable [find where name=isp-centric] } on-error={} ; :local ok [/ping ${serverTunnel} count=2 interval=1s] ; :if (\$ok < 1) do={ :do { /interface wireguard peers disable [find where interface=isp-centric] } on-error={} ; :delay 1s ; :do { /interface wireguard peers enable [find where interface=isp-centric] } on-error={} ; :do { /interface wireguard peers set [find where interface=isp-centric] endpoint-address="${endpoint}" endpoint-port=${port} } on-error={} } } } on-error={};`,
+            ':do { /system scheduler add name=isp-centric-watch interval=2m on-event=isp-centric-watch } on-error={};',
+            ':put "[ISP CENTRIC OK] Watchdog recovers the tunnel every 2 minutes";',
           ]),
       ':if ([:len [/interface wireguard find where name="isp-centric"]] > 0) do={:put "[ISP CENTRIC OK] Summary: interface"} else={:put "[ISP CENTRIC FAIL] Summary: interface"};',
       local

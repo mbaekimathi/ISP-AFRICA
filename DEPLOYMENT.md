@@ -103,9 +103,11 @@ mysqldump -u root -p --databases ISP-DB > isp-backup.sql   # on the dev machine
 mysql -u root -p < isp-backup.sql                          # on the XPS
 ```
 
-Also copy `database\wg\server.key` so routers keep the same server public key;
-if you skip it, `api.py` generates a new key and every router must be given
-the new `serverPublicKey` shown in the app.
+Also copy `database\wg\server.key` so routers keep the same server public key.
+If `server.key` is missing, `api.py` first tries to recover the private key from
+an existing `isp-centric.conf`. It will only mint a brand-new key on a clean
+first install, or when you explicitly set `ISP_WG_ALLOW_NEW_KEY=1` (that forces
+every MikroTik to be re-onboarded with the new `serverPublicKey`).
 
 ## Autostart (optional)
 
@@ -124,7 +126,10 @@ Or use NSSM (`nssm install ISPCentric "C:\Python312\python.exe" "C:\isp\database
 
 Same single-process design, but WireGuard is driven with `wg-quick` instead of
 the Windows tunnel service. `api.py` must run as root (it writes
-`/etc/wireguard/isp-centric.conf` and applies peers with `wg syncconf`).
+`/etc/wireguard/isp-centric.conf` and applies peers with `wg syncconf`). Peer
+updates prefer `wg syncconf` so live MikroTik handshakes are not reset; a full
+`wg-quick` down/up only runs when the tunnel is already down, or when
+`ISP_WG_ALLOW_RESTART=1` is set.
 
 ```bash
 sudo apt update && sudo apt install -y python3 python3-venv mysql-server \

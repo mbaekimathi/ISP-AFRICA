@@ -64,6 +64,44 @@ def ensure_server():
     )
 
 
+def _config_candidates():
+    paths = [CONFIG_FILE, SYNC_FILE]
+    if os.name == "nt":
+        paths.append(Path(os.environ.get("PROGRAMDATA", r"C:\ProgramData")) / "ISP-CENTRIC" / CONFIG_FILE.name)
+    else:
+        paths.append(Path("/etc/wireguard") / CONFIG_FILE.name)
+        paths.append(Path("/etc/wireguard") / SYNC_FILE.name)
+    return paths
+
+
+def _existing_private_key_from_config():
+    """Recover the live interface private key from a leftover conf so a missing
+    server.key does not mint a new identity and orphan every MikroTik peer."""
+    for path in _config_candidates():
+        if not path.exists():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            if line.startswith("PrivateKey ="):
+                private_key = line.split("=", 1)[1].strip()
+                if private_key:
+                    return private_key
+    return None
+
+
+def _public_from_private(private_key):
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
+
+    raw = base64.b64decode(private_key.encode())
+    private = X25519PrivateKey.from_private_bytes(raw)
+    public_raw = private.public_key().public_bytes(serialization.Encoding.Raw, serialization.PublicFormat.Raw)
+    return base64.b64encode(public_raw).decode()
+
+
 def load_or_create_keypair():
     ROOT.mkdir(exist_ok=True)
     if KEY_FILE.exists():
@@ -72,11 +110,30 @@ def load_or_create_keypair():
         public_key = public_key.strip()
         if private_key and public_key:
             return private_key, public_key
+    recovered = _existing_private_key_from_config()
+    if recovered:
+        try:
+            public_key = _public_from_private(recovered)
+        except Exception as error:
+            print(f"event=wireguard status=key-recover-failed error={error}", flush=True)
+        else:
+            KEY_FILE.write_text(f"{recovered}\n{public_key}\n", encoding="utf-8")
+            print("event=wireguard status=recovered-keypair detail=from-config", flush=True)
+            return recovered, public_key
+    had_prior_config = any(path.exists() for path in _config_candidates())
+    # First install (no key, no conf) may mint. Redeploys that lost server.key
+    # while a conf/peer set still exists must opt in — a new identity drops every
+    # already-onboarded MikroTik until the WinBox script is re-run.
+    if had_prior_config and os.environ.get("ISP_WG_ALLOW_NEW_KEY", "").strip() != "1":
+        raise RuntimeError(
+            "WireGuard server.key is missing but an isp-centric config still exists. "
+            "Restore database/wg/server.key, or set ISP_WG_ALLOW_NEW_KEY=1 to mint a "
+            "new key and re-onboard every MikroTik."
+        )
     private_key, public_key = wireguard_keypair()
     KEY_FILE.write_text(f"{private_key}\n{public_key}\n", encoding="utf-8")
-    # A fresh key means every router peer must be re-onboarded — loud event so
-    # a forgotten wg/server.key on a new host is spotted immediately.
-    print("event=wireguard status=new-keypair detail=no-server-key-file", flush=True)
+    detail = "ISP_WG_ALLOW_NEW_KEY" if had_prior_config else "first-install"
+    print(f"event=wireguard status=new-keypair detail={detail}", flush=True)
     return private_key, public_key
 
 
@@ -221,6 +278,14 @@ def _apply_windows():
     if sync_config(wireguard, service_config, sync_target):
         print("event=wireguard status=listening", flush=True)
         return
+    # Reinstalling the Windows tunnel service drops every MikroTik handshake.
+    # Only fall back when the tunnel is already down, or the operator opts in.
+    if tunnel_service_running() and os.environ.get("ISP_WG_ALLOW_RESTART", "").strip() != "1":
+        print(
+            "event=wireguard status=sync-failed detail=refusing-reinstall-set-ISP_WG_ALLOW_RESTART=1",
+            flush=True,
+        )
+        return
     elevate_apply(wireguard, service_config, sync_target)
 
 
@@ -246,10 +311,14 @@ def _apply_posix(peers):
         print("event=wireguard status=listening", flush=True)
         return
     if tunnel_running():
+        # Prefer syncconf so connected routers keep their sessions. A down/up
+        # cycle drops every peer handshake at once — only use it when the
+        # operator opts in, or when the interface is already down.
         result = subprocess.run(
             [wg, "syncconf", TUNNEL_NAME, str(sync_target)],
             check=False,
             capture_output=True,
+            text=True,
             timeout=15,
         )
         if result.returncode == 0:
@@ -257,6 +326,17 @@ def _apply_posix(peers):
             _allow_posix_port()
             print("event=wireguard status=listening", flush=True)
             return
+        detail = (result.stderr or result.stdout or "").strip().splitlines()
+        error = detail[-1] if detail else f"exit {result.returncode}"
+        allow_restart = os.environ.get("ISP_WG_ALLOW_RESTART", "").strip() == "1"
+        if not allow_restart:
+            print(
+                f"event=wireguard status=sync-failed error={error} "
+                "detail=refusing-restart-set-ISP_WG_ALLOW_RESTART=1",
+                flush=True,
+            )
+            return
+        print(f"event=wireguard status=restarting error={error}", flush=True)
         subprocess.run(
             [wg_quick, "down", str(service_config)],
             check=False,

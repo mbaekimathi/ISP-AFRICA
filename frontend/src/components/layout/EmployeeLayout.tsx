@@ -40,13 +40,22 @@ const companyNotificationLinks = [
 ];
 
 const companyCommunicationsLinks = [
+  { label: "SMS", to: "/employee/company-settings/communications/sms" },
+  { label: "WhatsApp", to: "/employee/company-settings/communications/whatsapp" },
+  { label: "Email", to: "/employee/company-settings/communications/email" },
   { label: "Notifications", to: "/employee/company-settings/notifications/settings" },
 ];
 
 const dashboardLinks = [
   { label: "ISP clients", to: "/dashboard" },
   { label: "Analytics", to: "/performance" },
+  { label: "Company HR", to: "/hr" },
   { label: "Billings", to: "/employee/company-settings/billings" },
+];
+
+const hrLinks = [
+  { label: "Company HR", to: "/hr" },
+  { label: "Register employee", to: "/hr?add=1" },
 ];
 
 const billingsLinks = [
@@ -63,10 +72,12 @@ const companyPaymentsLinks = [
 function employeeSidebarItems(pathname: string, director: boolean) {
   const path = pathname.replace(/^\/employee/, "").replace(/^\/[a-z-]+\/[A-Z0-9]+/, "");
   if (path === "/dashboard" || path === "/performance" || path === "/clients") return director ? dashboardLinks : [];
+  if (path === "/hr") return director ? hrLinks : [];
   if (path.startsWith("/company-settings/billings")) return billingsLinks;
   if (path === "/company-settings/payments") return companyPaymentsLinks;
+  if (path === "/company-settings/notifications/settings") return companyCommunicationsLinks;
   if (path.startsWith("/company-settings/notifications")) return companyNotificationLinks;
-  if (path === "/company-settings/communications") return companyCommunicationsLinks;
+  if (path.startsWith("/company-settings/communications")) return companyCommunicationsLinks;
   if (path === "/company-settings/adverts") return companyAdvertsLinks;
   if (path === "/company-settings") return companyLinks;
   if (path === "/company-settings/profile") return companyProfileLinks;
@@ -223,10 +234,10 @@ export function EmployeeLayout() {
           <nav aria-label="Employee footer" className="flex flex-wrap gap-x-4 gap-y-1">
             <Link
               className="inline-flex items-center gap-1.5 text-foreground hover:text-primary"
-              to={employee ? employeePage(employee, "/reviews") : "/employee/reviews"}
+              to={employee ? employeePage(employee, "/hr") : "/employee/hr"}
             >
               <Users className="h-3.5 w-3.5 text-emerald-500" aria-hidden="true" />
-              Roles
+              Company HR
             </Link>
             <Link className="inline-flex items-center gap-1.5 text-foreground hover:text-primary" to="/">
               <Globe className="h-3.5 w-3.5 text-sky-500" aria-hidden="true" />

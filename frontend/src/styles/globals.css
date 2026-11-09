@@ -1540,6 +1540,21 @@
   }
 }
 
+.tunnel-toast {
+  animation: tunnel-toast-in var(--duration) var(--ease);
+}
+
+@keyframes tunnel-toast-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.75rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 @keyframes dialog-fade {
   from {
     opacity: 0;

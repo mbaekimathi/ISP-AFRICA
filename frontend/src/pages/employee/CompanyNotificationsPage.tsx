@@ -33,8 +33,9 @@ type NotificationItem = {
 const kindLabels: Record<string, string> = {
   serverUnreachable: "Servers",
   mikrotikUnreachable: "MikroTik down",
-  mikrotikAdded: "MikroTik added",
+  mikrotikAdded: "MikroTik onboarded",
   ispRegistered: "New ISP",
+  systemPerformance: "Performance",
   communicationsFailed: "Communications",
   paymentsFailed: "Payments",
   gateway: "Billing",
@@ -64,6 +65,9 @@ function categoryOf(kind: string): Exclude<CategoryKey, "all"> {
   }
   if (kind === "paymentsFailed" || kind === "gateway") {
     return "billing";
+  }
+  if (kind === "systemPerformance" || kind === "serverUnreachable" || kind === "communicationsFailed") {
+    return "system";
   }
   return "system";
 }
