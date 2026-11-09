@@ -499,6 +499,25 @@ def health(cursor, client_id, payment_row=None):
     }
 
 
+def _explain_register_error(message, environment=""):
+    text = str(message or "").strip()
+    lower = text.lower()
+    if "invalid access token" in lower or "401" in lower or "403" in lower:
+        env = environment or "live/sandbox"
+        return (
+            f"{text} — Daraja rejected the token for C2B Register URL. On the M-Pesa "
+            f"portal, open this {env} app and enable “Customer to Business Register URL” "
+            f"(and C2B) for shortcode matching your Paybill, then re-save the consumer "
+            f"key/secret here and try again. STK-only apps cannot register C2B URLs."
+        )[:255]
+    if "invalid" in lower and ("credential" in lower or "consumer" in lower):
+        return (
+            f"{text} — Check that the environment (sandbox/live) matches these consumer "
+            f"key/secret values, then save and retry."
+        )[:255]
+    return text[:255] or "Daraja rejected the C2B registration."
+
+
 def register(cursor, client_id, payment_row, open_secret_fn):
     """Register validation/confirmation URLs on the ISP's own shortcode."""
     import daraja_client
@@ -512,26 +531,47 @@ def register(cursor, client_id, payment_row, open_secret_fn):
         return None, "Daraja only accepts https callback URLs for C2B registration."
     if (payment_row or {}).get("account_type") != "paybill":
         return None, "Switch your account type to Paybill — Till numbers cannot carry an account reference."
+    consumer_key = str((payment_row or {}).get("consumer_key") or "").strip()
+    consumer_secret = str(open_secret_fn((payment_row or {}).get("consumer_secret")) or "").strip()
+    passkey = str(open_secret_fn((payment_row or {}).get("passkey")) or "").strip()
+    environment = str((payment_row or {}).get("environment") or "").strip()
+    if not consumer_key or not consumer_secret:
+        return None, "Saved consumer key/secret could not be read — paste them again under My Daraja API and save."
     try:
         client = daraja_client.DarajaClient(
             daraja_client.DarajaConfig(
-                environment=payment_row["environment"],
-                consumer_key=payment_row["consumer_key"],
-                consumer_secret=open_secret_fn(payment_row.get("consumer_secret")),
+                environment=environment,
+                consumer_key=consumer_key,
+                consumer_secret=consumer_secret,
                 short_code=payment_row["short_code"],
-                passkey=open_secret_fn(payment_row.get("passkey")),
+                passkey=passkey,
                 account_type=payment_row["account_type"],
             )
         )
+        # Always mint a fresh token for Register URL — a cached STK token can
+        # mask bad secrets and Daraja still answers "Invalid Access Token".
+        client._drop_token()
+        client.token()
         result = client.c2b_register(
             health_body["confirmationUrl"],
             health_body["validationUrl"],
             response_type="Completed",
         )
     except Exception as error:
-        detail = str(error)[:255]
+        detail = _explain_register_error(error, environment)
         mark_registered(cursor, client_id, False, detail)
-        return None, detail or "Daraja rejected the C2B registration."
+        return None, detail
+    # Daraja sometimes returns HTTP 200 with an error payload.
+    result_code = str((result or {}).get("ResponseCode") or (result or {}).get("errorCode") or "0")
+    if result_code not in ("0", "00000000", ""):
+        detail = _explain_register_error(
+            (result or {}).get("ResponseDescription")
+            or (result or {}).get("errorMessage")
+            or result_code,
+            environment,
+        )
+        mark_registered(cursor, client_id, False, detail)
+        return None, detail
     detail = (
         (result or {}).get("ResponseDescription")
         or (result or {}).get("ConversationID")

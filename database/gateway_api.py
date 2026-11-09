@@ -111,19 +111,39 @@ def register_c2b(cursor, actor_id):
         return None, "Save the company Daraja credentials first."
     try:
         client = gateway_settle.company_client(company)
+        client._drop_token()
+        client.token()
         result = client.c2b_register(
             health["confirmationUrl"],
             health["validationUrl"],
             response_type="Completed",
         )
     except Exception as error:
-        detail = str(error)[:255]
+        import isp_c2b
+
+        detail = isp_c2b._explain_register_error(error, company.get("environment"))
         gateway_store.mark_c2b_registered(cursor, False, detail)
         gateway_store.audit(
             cursor, None, "employee", actor_id, "c2b.register.failed",
             new={"detail": detail},
         )
-        return None, detail or "Daraja rejected the C2B registration."
+        return None, detail
+    result_code = str((result or {}).get("ResponseCode") or (result or {}).get("errorCode") or "0")
+    if result_code not in ("0", "00000000", ""):
+        import isp_c2b
+
+        detail = isp_c2b._explain_register_error(
+            (result or {}).get("ResponseDescription")
+            or (result or {}).get("errorMessage")
+            or result_code,
+            company.get("environment"),
+        )
+        gateway_store.mark_c2b_registered(cursor, False, detail)
+        gateway_store.audit(
+            cursor, None, "employee", actor_id, "c2b.register.failed",
+            new={"detail": detail},
+        )
+        return None, detail
     detail = (
         (result or {}).get("ResponseDescription")
         or (result or {}).get("ConversationID")

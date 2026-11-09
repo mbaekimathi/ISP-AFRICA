@@ -301,6 +301,11 @@ class OptInTests(unittest.TestCase):
         self.assertFalse(health["enabled"])
         self.assertFalse(health["ready"])
 
+    def test_invalid_access_token_explains_missing_c2b_product(self):
+        detail = isp_c2b._explain_register_error("Error Occurred - Invalid Access Token -", "live")
+        self.assertIn("Customer to Business Register URL", detail)
+        self.assertIn("live", detail)
+
 
 if __name__ == "__main__":
     unittest.main()
