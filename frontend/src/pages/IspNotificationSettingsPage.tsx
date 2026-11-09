@@ -5,41 +5,25 @@ import { SoundAlertsCard } from "@/components/ui/SoundAlertsCard";
 import { LiveLoad } from "@/components/ui/LiveLoad";
 import { PageHeader } from "@/components/ui/DetailGrid";
 import { FormField, FormPicker } from "@/components/ui/FormField";
+import { NotificationEventList } from "@/components/notifications/NotificationEventList";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { ApiRequestError, apiRequest } from "@/lib/api";
-import { cn } from "@/lib/cn";
+import {
+  clientNotificationEvents,
+  hotspotNotificationEvents,
+  meNotificationEvents,
+  type IspClientNotificationKey,
+  type IspHotspotNotificationKey,
+  type IspMeNotificationKey,
+} from "@/lib/notificationMessages";
 import { SMS_PROVIDER_LABELS, type SmsProvider } from "@/components/communication/CommunicationFields";
 import { useAuth } from "@/providers/AuthProvider";
 
-type NotificationKey =
-  | "mikrotikOnboarded"
-  | "mikrotikUnreachable"
-  | "mikrotikNoInternet"
-  | "clientCannotSurf"
-  | "subscriptionEnding"
-  | "communicationsFailed"
-  | "paymentsFailed"
-  | "serverUnreachable";
-
-type ClientNotificationKey =
-  | "subscriptionEnding"
-  | "subscriptionExpired"
-  | "paymentReceived"
-  | "accountActivated"
-  | "accountPaused"
-  | "maintenance";
-
-type HotspotNotificationKey =
-  | "sessionEnding"
-  | "sessionExpired"
-  | "paymentReceived"
-  | "voucherActivated"
-  | "maintenance";
-
-type NotificationSettings = Record<NotificationKey, boolean>;
-type ClientNotificationSettings = Record<ClientNotificationKey, boolean>;
-type HotspotNotificationSettings = Record<HotspotNotificationKey, boolean>;
+type NotificationSettings = Record<IspMeNotificationKey, boolean>;
+type ClientNotificationSettings = Record<IspClientNotificationKey, boolean>;
+type HotspotNotificationSettings = Record<IspHotspotNotificationKey, boolean>;
 type Audience = "me" | "client" | "hotspot" | "custom";
+type MessageMap<T extends string> = Partial<Record<T, string>>;
 
 type MessageClient = { id: string; name: string; phone: string };
 type MessageRouter = { id: string; name: string; clients: MessageClient[] };
@@ -49,109 +33,14 @@ type MessageRecipients = {
   sms: { ready: boolean; mode: string; provider: string; sender: string };
 };
 
-const meEvents: { key: NotificationKey; label: string; detail: string }[] = [
-  {
-    key: "mikrotikOnboarded",
-    label: "A MikroTik is successfully onboarded",
-    detail: "Alert when a router finishes onboarding and comes under management.",
-  },
-  {
-    key: "mikrotikUnreachable",
-    label: "The system cannot communicate with a MikroTik",
-    detail: "Alert when a router fails health checks or disconnects.",
-  },
-  {
-    key: "mikrotikNoInternet",
-    label: "There is no internet on a MikroTik",
-    detail: "Alert when a router is reachable but its uplinks have no internet.",
-  },
-  {
-    key: "clientCannotSurf",
-    label: "A client cannot surf",
-    detail: "Alert when a subscriber is connected but cannot reach the internet.",
-  },
-  {
-    key: "subscriptionEnding",
-    label: "A client subscription is ending",
-    detail: "Alert a day before a PPPoE subscription expires.",
-  },
-  {
-    key: "communicationsFailed",
-    label: "The communications API fails",
-    detail: "Alert when the SMS, WhatsApp, or email API in use stops working.",
-  },
-  {
-    key: "paymentsFailed",
-    label: "The payments API fails",
-    detail: "Alert when the payment API in use stops working.",
-  },
-  {
-    key: "serverUnreachable",
-    label: "The app cannot communicate with the servers",
-    detail: "Alert when this portal loses contact with the account service.",
-  },
-];
-
-const clientEvents: { key: ClientNotificationKey; label: string; detail: string }[] = [
-  {
-    key: "subscriptionEnding",
-    label: "Their subscription is ending",
-    detail: "Message the PPPoE subscriber a day before their package expires.",
-  },
-  {
-    key: "subscriptionExpired",
-    label: "Their subscription has expired",
-    detail: "Message the PPPoE subscriber when their package ends and service stops.",
-  },
-  {
-    key: "paymentReceived",
-    label: "A payment is received",
-    detail: "Confirm the payment and renewed expiry after a successful top-up.",
-  },
-  {
-    key: "accountActivated",
-    label: "Their account is activated",
-    detail: "Welcome the PPPoE subscriber when a new account or package starts.",
-  },
-  {
-    key: "accountPaused",
-    label: "Their account is paused",
-    detail: "Tell the PPPoE subscriber when their line is paused or restricted.",
-  },
-  {
-    key: "maintenance",
-    label: "There is maintenance (cannot surf)",
-    detail: "Message affected PPPoE subscribers when maintenance puts their line in a cannot-surf state.",
-  },
-];
-
-const hotspotEvents: { key: HotspotNotificationKey; label: string; detail: string }[] = [
-  {
-    key: "sessionEnding",
-    label: "Their hotspot session is ending",
-    detail: "Message the guest before their voucher time runs out.",
-  },
-  {
-    key: "sessionExpired",
-    label: "Their hotspot session has expired",
-    detail: "Message the guest when voucher time ends and surfing stops.",
-  },
-  {
-    key: "paymentReceived",
-    label: "A hotspot payment is received",
-    detail: "Confirm the payment by SMS and include the voucher code(s) for the paid device slots.",
-  },
-  {
-    key: "voucherActivated",
-    label: "Their voucher is activated",
-    detail: "Tell the guest when a voucher is redeemed and surfing starts.",
-  },
-  {
-    key: "maintenance",
-    label: "There is maintenance (cannot surf)",
-    detail: "Message affected hotspot guests when maintenance puts their session in a cannot-surf state.",
-  },
-];
+type NotificationsPayload = {
+  notifications: NotificationSettings;
+  clientNotifications?: ClientNotificationSettings;
+  hotspotNotifications?: HotspotNotificationSettings;
+  notificationMessages?: MessageMap<IspMeNotificationKey>;
+  clientNotificationMessages?: MessageMap<IspClientNotificationKey>;
+  hotspotNotificationMessages?: MessageMap<IspHotspotNotificationKey>;
+};
 
 const meDefaults: NotificationSettings = {
   mikrotikOnboarded: true,
@@ -180,50 +69,6 @@ const hotspotDefaults: HotspotNotificationSettings = {
   voucherActivated: true,
   maintenance: true,
 };
-
-function ToggleList<T extends string>({
-  items,
-  values,
-  onChange,
-  intro,
-}: {
-  items: { key: T; label: string; detail: string }[];
-  values: Record<T, boolean>;
-  onChange: (key: T, enabled: boolean) => void;
-  intro: string;
-}) {
-  return (
-    <fieldset className="grid gap-3">
-      <legend className="sr-only">{intro}</legend>
-      <p className="text-sm text-muted-foreground">{intro}</p>
-      {items.map((item) => {
-        const enabled = values[item.key];
-        return (
-          <label
-            key={item.key}
-            className={cn(
-              "grid cursor-pointer gap-1 rounded-lg border px-3 py-2 transition-colors duration-fast ease-out",
-              enabled
-                ? "border-primary bg-primary/5 shadow-xs"
-                : "border-border hover:border-input hover:bg-surface-muted/50",
-            )}
-          >
-            <span className="flex items-center gap-3">
-              <input
-                type="checkbox"
-                className="h-4 w-4"
-                checked={enabled}
-                onChange={(event) => onChange(item.key, event.target.checked)}
-              />
-              <span className="font-semibold">{item.label}</span>
-            </span>
-            <span className="pl-7 text-sm text-muted-foreground">{item.detail}</span>
-          </label>
-        );
-      })}
-    </fieldset>
-  );
-}
 
 function CustomMessagePanel() {
   const [recipients, setRecipients] = useState<MessageRecipients | null>(null);
@@ -457,33 +302,29 @@ export function IspNotificationSettingsPage() {
   const [toggles, setToggles] = useState<NotificationSettings>(meDefaults);
   const [clientToggles, setClientToggles] = useState<ClientNotificationSettings>(clientDefaults);
   const [hotspotToggles, setHotspotToggles] = useState<HotspotNotificationSettings>(hotspotDefaults);
+  const [messages, setMessages] = useState<MessageMap<IspMeNotificationKey>>({});
+  const [clientMessages, setClientMessages] = useState<MessageMap<IspClientNotificationKey>>({});
+  const [hotspotMessages, setHotspotMessages] = useState<MessageMap<IspHotspotNotificationKey>>({});
+  const [savingMessageKey, setSavingMessageKey] = useState<string | null>(null);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [pending, setPending] = useState(false);
   const [loaded, setLoaded] = useState(false);
 
-  const apply = useCallback(
-    (body: {
-      notifications: NotificationSettings;
-      clientNotifications?: ClientNotificationSettings;
-      hotspotNotifications?: HotspotNotificationSettings;
-    }) => {
-      setToggles(body.notifications);
-      setClientToggles(body.clientNotifications ?? clientDefaults);
-      setHotspotToggles(body.hotspotNotifications ?? hotspotDefaults);
-      setLoaded(true);
-    },
-    [],
-  );
+  const apply = useCallback((body: NotificationsPayload) => {
+    setToggles({ ...meDefaults, ...body.notifications });
+    setClientToggles({ ...clientDefaults, ...(body.clientNotifications ?? {}) });
+    setHotspotToggles({ ...hotspotDefaults, ...(body.hotspotNotifications ?? {}) });
+    setMessages(body.notificationMessages ?? {});
+    setClientMessages(body.clientNotificationMessages ?? {});
+    setHotspotMessages(body.hotspotNotificationMessages ?? {});
+    setLoaded(true);
+  }, []);
 
   useEffect(() => {
     if (!user || user.status !== "approved") return;
     let stopped = false;
-    apiRequest<{
-      notifications: NotificationSettings;
-      clientNotifications?: ClientNotificationSettings;
-      hotspotNotifications?: HotspotNotificationSettings;
-    }>("/api/notifications")
+    apiRequest<NotificationsPayload>("/api/notifications")
       .then((body) => {
         if (!stopped) apply(body);
       })
@@ -497,6 +338,24 @@ export function IspNotificationSettingsPage() {
       stopped = true;
     };
   }, [apply, user]);
+
+  async function saveMessage(
+    scope: "me" | "client" | "hotspot",
+    key: string,
+    message: string | null,
+  ) {
+    setSavingMessageKey(key);
+    try {
+      const body = await apiRequest<NotificationsPayload>("/api/notifications/messages", {
+        method: "POST",
+        body: JSON.stringify({ audience: scope, key, message }),
+      });
+      apply(body);
+      setNotice("Notification message saved.");
+    } finally {
+      setSavingMessageKey(null);
+    }
+  }
 
   if (!ready) {
     return <LiveLoad label="Loading account" />;
@@ -514,7 +373,7 @@ export function IspNotificationSettingsPage() {
     <div className="page-shell py-8">
       <PageHeader
         title="Notification settings"
-        description="Choose which events should notify this account, PPPoE clients, or hotspot clients, or send a custom SMS by MikroTik."
+        description="Enable or disable each alert, preview the message that will be sent, and add or edit the wording."
       />
       <div className="mt-6">
         <SoundAlertsCard apiBase="/api/notifications" scope="client" />
@@ -556,11 +415,7 @@ export function IspNotificationSettingsPage() {
               setError("");
               setNotice("");
               setPending(true);
-              apiRequest<{
-                notifications: NotificationSettings;
-                clientNotifications?: ClientNotificationSettings;
-                hotspotNotifications?: HotspotNotificationSettings;
-              }>("/api/notifications", {
+              apiRequest<NotificationsPayload>("/api/notifications", {
                 method: "POST",
                 body: JSON.stringify({
                   notifications: toggles,
@@ -585,27 +440,36 @@ export function IspNotificationSettingsPage() {
             }}
           >
             {audience === "me" ? (
-              <ToggleList
-                items={meEvents}
+              <NotificationEventList
+                items={meNotificationEvents}
                 values={toggles}
-                onChange={(key, enabled) => setToggles((current) => ({ ...current, [key]: enabled }))}
-                intro="Alerts for this ISP account — shown in the notifications feed and optional push sound."
+                messages={messages}
+                savingKey={savingMessageKey as IspMeNotificationKey | null}
+                onToggle={(key, enabled) => setToggles((current) => ({ ...current, [key]: enabled }))}
+                onSaveMessage={(key, message) => saveMessage("me", key, message)}
+                intro="Alerts for this ISP account — shown in the notifications feed and optional push sound. Use view to preview, then add or edit the message."
               />
             ) : null}
             {audience === "client" ? (
-              <ToggleList
-                items={clientEvents}
+              <NotificationEventList
+                items={clientNotificationEvents}
                 values={clientToggles}
-                onChange={(key, enabled) => setClientToggles((current) => ({ ...current, [key]: enabled }))}
-                intro="Automatic SMS to PPPoE subscribers through the communication API in use for this account."
+                messages={clientMessages}
+                savingKey={savingMessageKey as IspClientNotificationKey | null}
+                onToggle={(key, enabled) => setClientToggles((current) => ({ ...current, [key]: enabled }))}
+                onSaveMessage={(key, message) => saveMessage("client", key, message)}
+                intro="Automatic SMS to PPPoE subscribers through the communication API in use for this account. Toggle each event, preview the SMS, then add or edit the wording."
               />
             ) : null}
             {audience === "hotspot" ? (
-              <ToggleList
-                items={hotspotEvents}
+              <NotificationEventList
+                items={hotspotNotificationEvents}
                 values={hotspotToggles}
-                onChange={(key, enabled) => setHotspotToggles((current) => ({ ...current, [key]: enabled }))}
-                intro="Automatic SMS to hotspot guests through the communication API in use for this account."
+                messages={hotspotMessages}
+                savingKey={savingMessageKey as IspHotspotNotificationKey | null}
+                onToggle={(key, enabled) => setHotspotToggles((current) => ({ ...current, [key]: enabled }))}
+                onSaveMessage={(key, message) => saveMessage("hotspot", key, message)}
+                intro="Automatic SMS to hotspot guests through the communication API in use for this account. Toggle each event, preview the SMS, then add or edit the wording."
               />
             ) : null}
             <div>

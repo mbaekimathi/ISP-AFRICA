@@ -655,6 +655,7 @@ def live_sessions(host, password, username, timeout=4, port=API_PORT, opener=Non
             {
                 "mac": mac or active.get("caller-id") or "",
                 "ip": active.get("address") or "",
+                "interface": server.get("interface") or "",
                 "uptime": uptime,
                 "seconds": uptime_seconds(uptime),
                 "bytesIn": byte_count(iface.get("rx-byte")),
@@ -669,6 +670,7 @@ def live_sessions(host, password, username, timeout=4, port=API_PORT, opener=Non
                 {
                     "mac": active.get("caller-id") or "",
                     "ip": active.get("address") or "",
+                    "interface": "",
                     "uptime": uptime,
                     "seconds": uptime_seconds(uptime),
                     "bytesIn": byte_count(iface.get("rx-byte")),

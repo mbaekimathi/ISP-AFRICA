@@ -1,23 +1,17 @@
 import {
   ArrowRight,
-  Banknote,
   CircleAlert,
-  FileText,
   Filter,
   Inbox,
-  Landmark,
   Package,
   PackagePlus,
   Pencil,
   ReceiptText,
-  Smartphone,
-  Ticket,
   Wallet,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { EmptyState } from "@/components/ui/EmptyState";
-import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
 import { clientPage } from "@/lib/accounts";
@@ -30,6 +24,7 @@ type PeriodMode = "all" | "day" | "month" | "year" | "period";
 type Transaction = {
   id: string;
   kind: "payment" | "invoice" | "stk" | "purchase" | "gateway";
+  method?: string;
   service: "pppoe" | "hotspot";
   customer: string;
   contact: string;
@@ -47,35 +42,24 @@ type TransactionReport = {
   outstanding: string;
 };
 
-const kindLabel: Record<Transaction["kind"], string> = {
-  payment: "Payment",
-  invoice: "Invoice",
-  stk: "STK push",
-  purchase: "Hotspot sale",
-  gateway: "Gateway payment",
-};
-
-const statusTone: Record<string, "active" | "due" | "critical" | "paused" | "neutral"> = {
-  paid: "active",
-  pending: "due",
-  processing: "due",
-  failed: "critical",
-  void: "paused",
-};
-
-const kindIcon: Record<Transaction["kind"], ReactNode> = {
-  payment: <Banknote className="h-4 w-4" />,
-  invoice: <FileText className="h-4 w-4" />,
-  stk: <Smartphone className="h-4 w-4" />,
-  purchase: <Ticket className="h-4 w-4" />,
-  gateway: <Landmark className="h-4 w-4" />,
-};
-
 const serviceFilters: Array<{ value: ServiceFilter; label: string }> = [
   { value: "all", label: "All" },
   { value: "pppoe", label: "PPPoE" },
   { value: "hotspot", label: "Hotspot" },
 ];
+
+function paymentMode(item: Transaction): { label: string; isMpesa: boolean } {
+  const method = String(item.method || "").trim().toLowerCase();
+  if (item.kind === "stk" || item.kind === "purchase" || item.kind === "gateway" || method === "stk" || method === "mpesa") {
+    return { label: "M-Pesa", isMpesa: true };
+  }
+  if (item.kind === "invoice") return { label: "Invoice", isMpesa: false };
+  if (method === "manual") return { label: "Manual", isMpesa: false };
+  if (method === "cash") return { label: "Cash", isMpesa: false };
+  if (method === "bank") return { label: "Bank", isMpesa: false };
+  if (method) return { label: method.charAt(0).toUpperCase() + method.slice(1), isMpesa: false };
+  return { label: "Payment", isMpesa: false };
+}
 
 function money(value: string) {
   const amount = Number(value);
@@ -144,19 +128,25 @@ function StatCard({
   hintClass?: string;
 }) {
   return (
-    <div className="rounded-2xl border border-border bg-surface p-4 shadow-card">
-      <div className="flex items-center justify-between gap-2">
-        <p className="truncate text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
+    <div className="rounded-xl border border-border bg-surface p-2.5 shadow-card sm:rounded-2xl sm:p-4">
+      <div className="flex items-center justify-between gap-1.5">
+        <p className="truncate text-[10px] font-semibold uppercase tracking-wide text-muted-foreground sm:text-[11px]">
+          {label}
+        </p>
         <span
-          className={`flex h-7 w-7 shrink-0 items-center justify-center rounded-lg ${iconClass ?? "bg-primary/10 text-primary"}`}
+          className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md sm:h-7 sm:w-7 sm:rounded-lg ${iconClass ?? "bg-primary/10 text-primary"}`}
           aria-hidden="true"
         >
           {icon}
         </span>
       </div>
-      <div className={`mt-2 flex min-w-0 items-center gap-1.5 text-lg font-semibold tracking-tight ${valueClass ?? ""}`}>{value}</div>
+      <div
+        className={`mt-1.5 flex min-w-0 items-center gap-1.5 truncate text-sm font-semibold tracking-tight sm:mt-2 sm:text-lg ${valueClass ?? ""}`}
+      >
+        {value}
+      </div>
       {hint != null && hint !== "" ? (
-        <p className={`mt-0.5 truncate text-xs ${hintClass ?? "text-muted-foreground"}`}>{hint}</p>
+        <p className={`mt-0.5 truncate text-[10px] sm:text-xs ${hintClass ?? "text-muted-foreground"}`}>{hint}</p>
       ) : null}
     </div>
   );
@@ -188,62 +178,45 @@ function amountClass(status: string) {
   return "text-warning";
 }
 
-function iconTone(status: string) {
-  if (status === "paid") return "bg-success-soft/70 text-success";
-  if (status === "failed" || status === "void") return "bg-destructive-soft/70 text-destructive";
-  return "bg-warning-soft/70 text-warning";
-}
-
-function TransactionCard({ item }: { item: Transaction }) {
+function TransactionRow({ item }: { item: Transaction }) {
+  const mode = paymentMode(item);
   return (
-    <article className="flex h-full flex-col gap-2.5 rounded-xl border border-border bg-surface p-3.5 shadow-xs transition duration-fast ease-out hover:border-primary/40 hover:shadow-card">
-      <div className="flex items-center gap-2.5">
-        <span
-          className={cn("flex h-9 w-9 shrink-0 items-center justify-center rounded-lg", iconTone(item.status))}
-          aria-hidden="true"
-        >
-          {kindIcon[item.kind]}
-        </span>
-        <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold leading-5">{item.customer || "—"}</p>
-          <p className="truncate text-xs text-muted-foreground">{item.contact || kindLabel[item.kind]}</p>
-        </div>
-        <p className={cn("shrink-0 text-sm font-semibold tabular", amountClass(item.status))}>{money(item.amount)}</p>
+    <li className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 px-3 py-3 sm:grid-cols-[8.5rem_minmax(0,1.2fr)_minmax(0,1fr)_auto] sm:items-center sm:gap-x-4 sm:px-5">
+      <p className="order-1 truncate text-[11px] tabular text-muted-foreground sm:order-none sm:text-sm">
+        {item.createdAt}
+      </p>
+      <p className="order-3 col-span-2 truncate text-sm font-medium sm:order-none sm:col-span-1">
+        {item.customer || "—"}
+      </p>
+      <div className="order-4 col-span-2 min-w-0 sm:order-none sm:col-span-1">
+        <p className="truncate text-sm">{mode.label}</p>
+        {mode.isMpesa && item.reference ? (
+          <p className="truncate font-mono text-[11px] text-muted-foreground sm:text-xs">{item.reference}</p>
+        ) : null}
       </div>
-      <div className="flex flex-wrap items-center gap-x-2 gap-y-1.5 border-t border-border/60 pt-2.5 text-xs text-muted-foreground">
-        <StatusBadge tone={statusTone[item.status] ?? "neutral"}>{item.status}</StatusBadge>
-        <StatusBadge tone={item.service === "pppoe" ? "active" : "neutral"}>
-          {item.service === "pppoe" ? "PPPoE" : "Hotspot"}
-        </StatusBadge>
-        <span className="tabular">{item.createdAt}</span>
-        <span className="ml-auto">{kindLabel[item.kind]}</span>
-      </div>
-      {item.detail || item.reference ? (
-        <p className="truncate text-xs text-muted-foreground" title={`${item.detail} ${item.reference}`.trim()}>
-          {item.detail}
-          {item.detail && item.reference ? " · " : ""}
-          <span className="font-mono text-[11px]">{item.reference}</span>
-        </p>
-      ) : null}
-    </article>
+      <p className={cn("order-2 text-sm font-semibold tabular sm:order-none sm:text-right", amountClass(item.status))}>
+        {money(item.amount)}
+      </p>
+    </li>
   );
 }
 
-function TransactionSkeleton() {
+function TransactionSkeletonRows() {
   return (
-    <div className="flex flex-col gap-2.5 rounded-xl border border-border bg-surface p-3.5 shadow-xs">
-      <div className="flex items-center gap-2.5">
-        <div className="skeleton h-9 w-9 shrink-0 rounded-lg" />
-        <div className="min-w-0 flex-1 space-y-1.5">
-          <div className="skeleton h-3 w-2/3" />
-          <div className="skeleton h-2.5 w-1/3" />
-        </div>
-        <div className="skeleton h-3.5 w-12" />
-      </div>
-      <div className="border-t border-border/60 pt-2.5">
-        <div className="skeleton h-5 w-3/4 rounded-full" />
-      </div>
-    </div>
+    <>
+      {Array.from({ length: 6 }, (_, index) => (
+        <li
+          key={index}
+          className="grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1.5 px-3 py-3 sm:grid-cols-[8.5rem_minmax(0,1.2fr)_minmax(0,1fr)_auto] sm:gap-x-4 sm:px-5"
+          aria-hidden="true"
+        >
+          <div className="skeleton h-3 w-24" />
+          <div className="skeleton h-3.5 w-14 justify-self-end" />
+          <div className="skeleton col-span-2 h-3 w-2/5 sm:col-span-1 sm:w-28" />
+          <div className="skeleton col-span-2 h-3 w-1/3 sm:col-span-1 sm:w-20" />
+        </li>
+      ))}
+    </>
   );
 }
 
@@ -309,7 +282,7 @@ export function BillingsPage() {
         </p>
       ) : null}
 
-      <div className="mt-4 grid gap-3 sm:grid-cols-3">
+      <div className="mt-4 grid grid-cols-3 gap-2 sm:gap-3">
         <StatCard
           icon={<ReceiptText className="h-4 w-4" />}
           label="Transactions"
@@ -337,15 +310,15 @@ export function BillingsPage() {
       <section className="card mt-4 overflow-hidden">
         <CardHeader icon={<Filter className="h-4 w-4" />} title="Filters" />
         <form
-          className="flex flex-wrap items-end gap-x-4 gap-y-3 px-5 pb-5 pt-4"
+          className="grid grid-cols-1 gap-3 px-4 pb-4 pt-3 sm:grid-cols-2 sm:px-5 sm:pb-5 sm:pt-4 md:grid-cols-[auto_minmax(0,11rem)_minmax(0,11rem)] md:items-end"
           onSubmit={(event) => event.preventDefault()}
         >
-          <div className="grid gap-1.5">
+          <div className="grid gap-1.5 sm:col-span-2 md:col-span-1">
             <span className="text-xs font-medium text-muted-foreground">Service</span>
             <div
               role="group"
               aria-label="Service"
-              className="inline-flex w-max items-center gap-0.5 rounded-lg border border-border bg-surface-muted/60 p-0.5"
+              className="inline-flex w-full items-center gap-0.5 rounded-lg border border-border bg-surface-muted/60 p-0.5 sm:w-max"
             >
               {serviceFilters.map(({ value, label }) => (
                 <button
@@ -354,7 +327,7 @@ export function BillingsPage() {
                   aria-pressed={service === value}
                   onClick={() => setService(value)}
                   className={cn(
-                    "rounded-md px-3.5 py-1.5 text-xs font-semibold transition duration-fast ease-out",
+                    "min-h-9 flex-1 rounded-md px-3 py-1.5 text-xs font-semibold transition duration-fast ease-out sm:flex-none sm:px-3.5",
                     service === value
                       ? "bg-surface text-foreground shadow-xs ring-1 ring-border"
                       : "text-muted-foreground hover:text-foreground",
@@ -368,7 +341,7 @@ export function BillingsPage() {
           <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
             Period
             <select
-              className="field h-9 min-h-9 w-full py-0 text-sm sm:w-44"
+              className="field h-9 min-h-9 w-full py-0 text-sm"
               value={mode}
               onChange={(event) => setMode(event.target.value as PeriodMode)}
             >
@@ -384,7 +357,7 @@ export function BillingsPage() {
               Day
               <input
                 type="date"
-                className="field h-9 min-h-9 w-full py-0 text-sm sm:w-40"
+                className="field h-9 min-h-9 w-full py-0 text-sm"
                 value={day}
                 onChange={(event) => setDay(event.target.value)}
               />
@@ -395,7 +368,7 @@ export function BillingsPage() {
               Month
               <input
                 type="month"
-                className="field h-9 min-h-9 w-full py-0 text-sm sm:w-40"
+                className="field h-9 min-h-9 w-full py-0 text-sm"
                 value={month}
                 onChange={(event) => setMonth(event.target.value)}
               />
@@ -406,7 +379,7 @@ export function BillingsPage() {
               Year
               <input
                 type="number"
-                className="field h-9 min-h-9 w-full py-0 text-sm sm:w-28"
+                className="field h-9 min-h-9 w-full py-0 text-sm"
                 min={2000}
                 max={2100}
                 inputMode="numeric"
@@ -421,16 +394,16 @@ export function BillingsPage() {
                 From
                 <input
                   type="date"
-                  className="field h-9 min-h-9 w-full py-0 text-sm sm:w-40"
+                  className="field h-9 min-h-9 w-full py-0 text-sm"
                   value={from}
                   onChange={(event) => setFrom(event.target.value)}
                 />
               </label>
-              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground md:col-start-2">
                 To
                 <input
                   type="date"
-                  className="field h-9 min-h-9 w-full py-0 text-sm sm:w-40"
+                  className="field h-9 min-h-9 w-full py-0 text-sm"
                   value={to}
                   onChange={(event) => setTo(event.target.value)}
                 />
@@ -456,14 +429,7 @@ export function BillingsPage() {
           ) : null}
         </div>
 
-        {!report && !message ? (
-          <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {Array.from({ length: 6 }, (_, index) => (
-              <TransactionSkeleton key={index} />
-            ))}
-            <span className="sr-only">Loading transactions…</span>
-          </div>
-        ) : report && transactions.length === 0 ? (
+        {report && transactions.length === 0 ? (
           <div className="mt-3">
             <EmptyState
               icon={<Inbox className="h-5 w-5" />}
@@ -472,10 +438,24 @@ export function BillingsPage() {
             />
           </div>
         ) : (
-          <div className="mt-3 grid gap-3 sm:grid-cols-2 xl:grid-cols-3">
-            {transactions.map((item) => (
-              <TransactionCard key={item.id} item={item} />
-            ))}
+          <div className="panel mt-3 overflow-hidden">
+            <div className="hidden border-b border-border px-5 py-2.5 text-xs font-medium uppercase tracking-wide text-muted-foreground sm:grid sm:grid-cols-[8.5rem_minmax(0,1.2fr)_minmax(0,1fr)_auto] sm:gap-x-4">
+              <span>When</span>
+              <span>Customer</span>
+              <span>Payment</span>
+              <span className="text-right">Amount</span>
+            </div>
+            <ul className="divide-y divide-border">
+              {!report && !message ? (
+                <>
+                  <TransactionSkeletonRows />
+                  <li className="sr-only">Loading transactions…</li>
+                </>
+              ) : null}
+              {transactions.map((item) => (
+                <TransactionRow key={item.id} item={item} />
+              ))}
+            </ul>
           </div>
         )}
       </section>

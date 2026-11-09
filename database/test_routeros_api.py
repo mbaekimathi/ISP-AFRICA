@@ -451,6 +451,7 @@ class RouterOsApiTests(unittest.TestCase):
                     "!re",
                     "=name=<pppoe-user1>",
                     "=user=user1",
+                    "=interface=ether3",
                     "=remote-address=8C:44:BB:2F:AA:E8",
                     "=uptime=18m29s",
                     "=dynamic=true",
@@ -468,6 +469,7 @@ class RouterOsApiTests(unittest.TestCase):
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0]["mac"], "8C:44:BB:2F:AA:E8")
         self.assertEqual(sessions[0]["ip"], "10.10.0.2")
+        self.assertEqual(sessions[0]["interface"], "ether3")
         self.assertEqual(sessions[0]["uptime"], "18m29s")
         self.assertEqual(sessions[0]["seconds"], 18 * 60 + 29)
         self.assertEqual(sessions[0]["bytesIn"], 2704487)

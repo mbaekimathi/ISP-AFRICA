@@ -108,7 +108,14 @@ export async function enterClientPortal(id: string): Promise<PublicAccount> {
   return withProfilePhoto(body.account);
 }
 
-export function fileToPackageImage(file: File) {
+type PackageImageOptions = {
+  width?: number;
+  height?: number;
+  quality?: number;
+  maxLength?: number;
+};
+
+export function fileToPackageImage(file: File, options: PackageImageOptions = {}) {
   return new Promise<string>((resolve, reject) => {
     if (!file.type.startsWith("image/")) {
       reject(new Error("Choose an image file."));
@@ -118,11 +125,16 @@ export function fileToPackageImage(file: File) {
       reject(new Error("Choose an image smaller than 8 MB."));
       return;
     }
+    // Pay-page thumbs render at ~58×44; keep enough pixels for admin
+    // previews without shipping 640×360 JPEGs over captive links.
+    // Advert callers pass the larger banner size explicitly.
+    const width = options.width ?? 320;
+    const height = options.height ?? 180;
+    const quality = options.quality ?? 0.72;
+    const maxLength = options.maxLength ?? 120_000;
     const image = new Image();
     const url = URL.createObjectURL(file);
     image.onload = () => {
-      const width = 640;
-      const height = 360;
       const canvas = document.createElement("canvas");
       canvas.width = width;
       canvas.height = height;
@@ -137,8 +149,8 @@ export function fileToPackageImage(file: File) {
       const drawnHeight = image.height * scale;
       context.drawImage(image, (width - drawnWidth) / 2, (height - drawnHeight) / 2, drawnWidth, drawnHeight);
       URL.revokeObjectURL(url);
-      const dataUrl = canvas.toDataURL("image/jpeg", 0.82);
-      if (dataUrl.length > 200_000) {
+      const dataUrl = canvas.toDataURL("image/jpeg", quality);
+      if (dataUrl.length > maxLength) {
         reject(new Error("Choose a simpler image. That one is too large to save."));
         return;
       }
@@ -151,6 +163,13 @@ export function fileToPackageImage(file: File) {
     image.src = url;
   });
 }
+
+export const ADVERT_IMAGE_OPTIONS: PackageImageOptions = {
+  width: 640,
+  height: 360,
+  quality: 0.82,
+  maxLength: 200_000,
+};
 
 function fileToSquareImage(file: File, size: number) {
   return new Promise<string>((resolve, reject) => {

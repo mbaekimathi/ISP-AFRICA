@@ -9,7 +9,7 @@ import { ApiRequestError, apiRequest } from "@/lib/api";
 import { clientPage } from "@/lib/accounts";
 import { useAuth } from "@/providers/AuthProvider";
 
-const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz0123456789";
+const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ0123456789";
 
 type RouterOption = { id: string; name: string; tunnelStatus: string };
 type PackageOption = { id: string; name: string; price: string; downloadMbps: number; uploadMbps: number };
@@ -32,7 +32,6 @@ const empty = {
   routerId: "",
   packageId: "",
   serial: "",
-  startDate: "",
   price: "",
   billingCycle: "monthly",
   cycleDays: "30",
@@ -46,6 +45,15 @@ const empty = {
   accessInterface: "",
   mtu: "1492",
 };
+
+const lowercaseFields = new Set<keyof typeof empty>(["email"]);
+const preserveCaseFields = new Set<keyof typeof empty>(["routerId", "packageId", "billingCycle"]);
+
+function normalizeInput(name: keyof typeof empty, value: string) {
+  if (lowercaseFields.has(name)) return value.toLowerCase();
+  if (preserveCaseFields.has(name)) return value;
+  return value.toUpperCase();
+}
 
 export function PppoeRegisterPage() {
   usePageMeta("Register PPPoE client — ISP CENTRIC", "Create a PPPoE subscriber and RADIUS login.");
@@ -103,13 +111,14 @@ export function PppoeRegisterPage() {
 
   const phoneDigits = form.phone.replace(/\D/g, "");
   const selectedPackage = packages.find((item) => item.id === form.packageId);
-  const preview = useMemo(() => {
-    if (!form.startDate) return "No start date. The account stays pending and RADIUS will not grant access.";
-    return `Access starts ${form.startDate}. Due dates are calculated from that date and the ${form.billingCycle} cycle.`;
-  }, [form.startDate, form.billingCycle]);
+  const preview = useMemo(
+    () => `No start date. The account stays pending and RADIUS will not grant access until activated. Due dates use the ${form.billingCycle} cycle once access starts.`,
+    [form.billingCycle],
+  );
 
   function setField(name: keyof typeof empty, value: string | boolean) {
-    setForm((current) => ({ ...current, [name]: value }));
+    const next = typeof value === "string" ? normalizeInput(name, value) : value;
+    setForm((current) => ({ ...current, [name]: next }));
   }
 
   async function submit(another: boolean) {
@@ -263,9 +272,6 @@ export function PppoeRegisterPage() {
           {form.routerId ? <StatusBadge tone={routers.find((item) => item.id === form.routerId)?.tunnelStatus === "up" ? "active" : "due"}>{routers.find((item) => item.id === form.routerId)?.tunnelStatus === "up" ? "Router online" : "Router not confirmed"}</StatusBadge> : null}
           <FormField id="serial" label="Router / ONU serial" error={errors.serial}>
             <input id="serial" className="field" value={form.serial} onChange={(event) => setField("serial", event.target.value)} />
-          </FormField>
-          <FormField id="start" label="Package start date" error={errors.startDate} hint="Leave empty to keep the account pending.">
-            <input id="start" className="field" type="date" value={form.startDate} onChange={(event) => setField("startDate", event.target.value)} />
           </FormField>
         </section>
         <details className="rounded-xl border border-border bg-surface p-5">

@@ -71,6 +71,13 @@ def ensure_schema(cursor):
     cursor.execute("SHOW COLUMNS FROM pppoe_subscribers LIKE 'deleted'")
     if cursor.fetchone() is None:
         cursor.execute("ALTER TABLE pppoe_subscribers ADD COLUMN deleted TINYINT NOT NULL DEFAULT 0")
+    cursor.execute("SHOW COLUMNS FROM pppoe_subscribers LIKE 'pay_token'")
+    if cursor.fetchone() is None:
+        cursor.execute("ALTER TABLE pppoe_subscribers ADD COLUMN pay_token VARCHAR(32) NULL")
+    try:
+        cursor.execute("CREATE UNIQUE INDEX uq_pppoe_pay_token ON pppoe_subscribers (pay_token)")
+    except Exception:
+        pass
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS pppoe_subscriptions (
@@ -88,10 +95,18 @@ def ensure_schema(cursor):
           billing_status ENUM('pending','paid','overdue','suspended','cancelled') NOT NULL DEFAULT 'pending',
           discount DECIMAL(10,2) NOT NULL DEFAULT 0,
           discount_reason VARCHAR(160) NOT NULL DEFAULT '',
+          ending_notice_on DATE NULL,
+          expired_notice_on DATE NULL,
           UNIQUE KEY uq_pppoe_subscription (subscriber_id)
         )
         """
     )
+    cursor.execute("SHOW COLUMNS FROM pppoe_subscriptions LIKE 'ending_notice_on'")
+    if cursor.fetchone() is None:
+        cursor.execute("ALTER TABLE pppoe_subscriptions ADD COLUMN ending_notice_on DATE NULL")
+    cursor.execute("SHOW COLUMNS FROM pppoe_subscriptions LIKE 'expired_notice_on'")
+    if cursor.fetchone() is None:
+        cursor.execute("ALTER TABLE pppoe_subscriptions ADD COLUMN expired_notice_on DATE NULL")
     cursor.execute(
         """
         CREATE TABLE IF NOT EXISTS pppoe_invoices (
@@ -1324,7 +1339,9 @@ def device_rows(cursor, row):
     rows = cursor.fetchall()
     live = {}
     lan = {}
-    lan_scoped = bool(str(row.get("access_interface") or "").strip())
+    # Prefer the saved VLAN/port; otherwise learn it from the live PPPoE
+    # session so gadgets behind this client's CPE still show up.
+    access = str(row.get("access_interface") or "").strip()
     router_seen = False
     host, secret = session_device(cursor, row)
     if host and secret:
@@ -1332,12 +1349,15 @@ def device_rows(cursor, row):
             password = routeros_api.open_password(secret)
             for session in routeros_api.live_sessions(host, password, username):
                 live[routeros_api.norm_mac(session["mac"])] = session
-            for gadget in routeros_api.lan_gadgets(host, password, row.get("access_interface") or ""):
+                if not access and session.get("interface"):
+                    access = str(session["interface"]).strip()
+            for gadget in routeros_api.lan_gadgets(host, password, access):
                 lan[routeros_api.norm_mac(gadget["mac"])] = gadget
             router_seen = True
         except Exception:
             live = {}
             lan = {}
+    lan_scoped = bool(access)
     current = current_session(cursor, username) or {}
     router_key = routeros_api.norm_mac(current.get("mac"))
     now = datetime.now()
@@ -2018,6 +2038,12 @@ def reconcile(cursor, client_id):
     """Background enforcement: sync flags, push RADIUS plans, CoA when needed."""
     today = date.today()
     changed = set(sync_subscription_states(cursor, client_id))
+    try:
+        import pppoe_notify
+
+        pppoe_notify.dispatch_expiry_notices(cursor, client_id)
+    except Exception as error:
+        print(f"event=pppoe-expiry-sms client={client_id} error={error}", flush=True)
     cursor.execute(
         """
         SELECT s.id, s.status, s.start_date, s.password_sealed, s.pppoe_username, s.package_id, s.session_limit,
@@ -2345,14 +2371,30 @@ def upgrade(cursor, client_id, subscriber_id, payload):
 
 
 def migrate(cursor, client_id, subscriber_id, payload):
+    """Move one client to another MikroTik.
+
+    Keeps the current package unless a different packageId is sent. When the
+    package is not yet sold on the target router it is linked there first, so
+    a transfer does not force a package change.
+    """
     row = require_owned(cursor, client_id, subscriber_id)
     router = load_router(cursor, client_id, str(payload.get("routerId") or ""))
     if not router or router["status"] != "active":
-        raise PppoeError(400, "Choose an active router.")
+        raise PppoeError(400, "Choose an active MikroTik.")
+    if str(row["router_id"]) == router["id"]:
+        raise PppoeError(400, f"Already on {router['name']}.")
     package_id = str(payload.get("packageId") or row["package_id"])
     package = load_package(cursor, client_id, package_id)
-    if not package or router["id"] not in {str(item) for item in package["routers"]}:
-        raise PppoeError(400, "That package is not linked to the target router.")
+    if not package:
+        raise PppoeError(400, "That package was not found.")
+    if router["id"] not in {str(item) for item in package["routers"]}:
+        cursor.execute(
+            "UPDATE isp_packages SET availability_routers = %s WHERE id = %s AND client_id = %s",
+            (json.dumps([str(item) for item in package["routers"]] + [router["id"]]), package_id, client_id),
+        )
+        package = load_package(cursor, client_id, package_id)
+        if not package or router["id"] not in {str(item) for item in package["routers"]}:
+            raise PppoeError(400, "That package could not be linked to the target MikroTik.")
     old_nas = row["router_id"]
     begin(cursor)
     try:
@@ -2374,7 +2416,7 @@ def migrate(cursor, client_id, subscriber_id, payload):
         finish(cursor)
     except Exception as error:
         abort(cursor)
-        raise PppoeError(400, "The router move was not saved.") from error
+        raise PppoeError(400, "The MikroTik move was not saved.") from error
     row["router_id"] = old_nas
     coa_for(cursor, row, row["pppoe_username"])
     return subscriber_detail(cursor, client_id, subscriber_id)
@@ -2615,6 +2657,97 @@ def reveal_password(cursor, client_id, subscriber_id):
     return {"password": password}
 
 
+def start_subscriber_stk(cursor, client_id, subscriber_id, amount, phone=None, package_id=None):
+    """Push an M-Pesa STK prompt and SMS a payment-link backup."""
+    import portal_server
+    import pppoe_notify
+    import gateway_store
+
+    row = require_owned(cursor, client_id, subscriber_id)
+    amount = pppoe_service.money(amount, "amount")
+    if amount is None or amount <= 0:
+        raise PppoeError(400, "Enter the payment amount.")
+    phone = portal_server.normalize_phone(phone or row.get("phone"))
+    if not phone:
+        raise PppoeError(400, "Enter a valid Safaricom number, like 0712345678.")
+    package_id = str(package_id or row.get("package_id") or "").strip()
+    if not package_id:
+        raise PppoeError(400, "Assign a package before sending an M-Pesa prompt.")
+    cursor.execute(
+        "SELECT id, name, price FROM isp_packages WHERE id = %s AND client_id = %s",
+        (package_id, client_id),
+    )
+    package = cursor.fetchone()
+    if not package:
+        raise PppoeError(400, "That package was not found.")
+    settings = portal_server.daraja_settings(cursor, client_id)
+    if not settings or not settings.get("passkey"):
+        raise PppoeError(503, "M-Pesa prompts are not configured yet.")
+    charged = portal_server.whole_shillings(amount)
+    try:
+        result = portal_server.stk_push(settings, phone, charged, row["pppoe_username"])
+    except Exception as error:
+        raise PppoeError(502, f"M-Pesa could not start the payment: {error}") from error
+    checkout = result.get("CheckoutRequestID")
+    if str(result.get("ResponseCode")) != "0" or not checkout:
+        raise PppoeError(
+            502,
+            result.get("errorMessage") or result.get("CustomerMessage") or "M-Pesa rejected the request.",
+        )
+    price = Decimal(package.get("price") or amount)
+    cursor.execute(
+        """
+        INSERT INTO pppoe_stk_requests
+          (id, client_id, subscriber_id, package_id, package_price, amount, phone, checkout_id, status)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, 'pending')
+        """,
+        (
+            str(uuid.uuid4()),
+            client_id,
+            subscriber_id,
+            package_id,
+            format(price, ".2f"),
+            format(Decimal(charged), ".2f"),
+            phone,
+            checkout,
+        ),
+    )
+    if settings.get("gateway_pool"):
+        gateway_store.record_stk_initiated(
+            cursor,
+            checkout,
+            client_id,
+            "pppoe",
+            format(Decimal(charged), ".2f"),
+            phone,
+            subscriber_id=subscriber_id,
+        )
+    try:
+        pppoe_notify.notify_stk_pushed(
+            cursor,
+            {
+                "id": subscriber_id,
+                "client_id": client_id,
+                "first_name": row.get("first_name"),
+                "last_name": row.get("last_name"),
+                "phone": phone,
+                "pppoe_username": row.get("pppoe_username"),
+                "package_name": package.get("name"),
+                "price": price,
+            },
+            charged,
+        )
+    except Exception as error:
+        print(f"event=pppoe-stk-sms checkout={checkout} error={error}", flush=True)
+    log_event(cursor, client_id, subscriber_id, client_id, "stk", f"STK {checkout}")
+    return {
+        "checkoutId": checkout,
+        "amount": format(Decimal(charged), ".2f"),
+        "phone": phone,
+        "paymentLink": pppoe_notify.payment_link(cursor, subscriber_id),
+    }
+
+
 def record_payment(cursor, client_id, subscriber_id, payload):
     require_owned(cursor, client_id, subscriber_id)
     amount = pppoe_service.money(payload.get("amount"), "amount")
@@ -2623,7 +2756,17 @@ def record_payment(cursor, client_id, subscriber_id, payload):
     reference = str(payload.get("mpesaReference") or "").strip()[:40]
     method = "stk" if payload.get("method") == "stk" else "manual"
     if method == "stk":
-        raise PppoeError(400, "M-Pesa STK push is not connected on this server yet. Record the payment after it arrives.")
+        started = start_subscriber_stk(
+            cursor,
+            client_id,
+            subscriber_id,
+            amount,
+            phone=payload.get("phone"),
+            package_id=payload.get("packageId"),
+        )
+        detail = subscriber_detail(cursor, client_id, subscriber_id)
+        detail["stk"] = started
+        return detail
     begin(cursor)
     try:
         invoice_id = create_invoice(cursor, client_id, subscriber_id, format(amount, ".2f"), "payment", "paid", reference)

@@ -272,8 +272,6 @@ function ActionDialog({
   );
 }
 
-type HistoryTab = "journey" | "devices" | "payments" | "usage";
-
 function TrendChart({
   data,
   formatY = (value) => String(value),
@@ -318,11 +316,31 @@ function TrendChart({
   );
 }
 
-function InfoRow({ label, children }: { label: string; children: ReactNode }) {
+function StatTile({
+  label,
+  value,
+  hint,
+  tone,
+  icon,
+}: {
+  label: string;
+  value: ReactNode;
+  hint?: ReactNode;
+  tone?: string;
+  icon: ReactNode;
+}) {
   return (
-    <div className="flex items-baseline justify-between gap-3 border-b border-border/60 py-2.5 last:border-b-0">
-      <dt className="shrink-0 text-xs font-medium uppercase tracking-wide text-muted-foreground">{label}</dt>
-      <dd className="min-w-0 break-words text-right text-sm font-medium">{children}</dd>
+    <div className="rounded-xl border border-border bg-surface p-3 shadow-xs sm:rounded-2xl sm:p-4">
+      <div className="flex items-center justify-between gap-2">
+        <p className="truncate text-[10px] font-semibold uppercase tracking-wide text-muted-foreground sm:text-[11px]">
+          {label}
+        </p>
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-surface-muted text-muted-foreground" aria-hidden="true">
+          {icon}
+        </span>
+      </div>
+      <div className={cn("mt-2 truncate text-base font-semibold tracking-tight sm:text-lg", tone)}>{value}</div>
+      {hint != null && hint !== "" ? <p className="mt-0.5 truncate text-[11px] text-muted-foreground sm:text-xs">{hint}</p> : null}
     </div>
   );
 }
@@ -427,7 +445,6 @@ export function HotspotClientPage() {
   const [detail, setDetail] = useState<GuestDetail | null>(null);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState("");
-  const [tab, setTab] = useState<HistoryTab>("journey");
   const [dialog, setDialog] = useState<"recharge" | "end" | "delete" | null>(null);
   const [voucherCount, setVoucherCount] = useState(1);
   const [rechargePeriods, setRechargePeriods] = useState(1);
@@ -552,14 +569,7 @@ export function HotspotClientPage() {
   const ended = client.deleted || client.endedAt != null;
   const connectionDot = online ? "bg-success" : connected ? "bg-warning" : client.status === "failed" || ended ? "bg-destructive" : "bg-warning";
   const firstLive = detail.live[0] ?? null;
-  const firstHost = detail.hosts?.[0] ?? null;
   const timeLeft = firstLive?.sessionTimeLeft || "—";
-  const historyTabs: { id: HistoryTab; label: string; count: number }[] = [
-    { id: "journey", label: "Journey", count: (detail.connectionLog ?? []).length },
-    { id: "devices", label: "Devices", count: detail.devices.length },
-    { id: "payments", label: "Payments", count: detail.transactions.length },
-    { id: "usage", label: "Usage", count: detail.sessions.length },
-  ];
   const statusLabel = client.deleted ? "Deleted" : ended ? "Ended" : online ? "Online" : connected ? "Connected" : "Offline";
   const statusHint = online
     ? `Surfing for ${firstLive?.uptime || "a moment"}`
@@ -571,353 +581,344 @@ export function HotspotClientPage() {
           ? `Last seen ${detail.usage.lastSeen}`
           : "Never connected";
   const statusColor = client.deleted || ended ? "text-destructive" : online ? "text-success" : "text-warning";
+  const journeyCount = (detail.connectionLog ?? []).length;
 
   const menuItems: { label: string; icon?: ReactNode; danger?: boolean; onClick: () => void }[] = [
     { label: copied ? "Copied" : "Copy voucher codes", icon: <Copy className="h-4 w-4" />, onClick: copyVouchers },
-    ...(ended ? [] : [{ label: "divider", onClick: () => undefined }, { label: "Delete guest", icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => setDialog("delete") }]),
+    ...(ended
+      ? []
+      : [
+          { label: "End access", icon: <Power className="h-4 w-4" />, onClick: () => setDialog("end") },
+          { label: "divider", onClick: () => undefined },
+          { label: "Delete guest", icon: <Trash2 className="h-4 w-4" />, danger: true, onClick: () => setDialog("delete") },
+        ]),
   ];
 
   return (
     <div className="page-shell py-6 sm:py-8">
-      <div className="page-header">
-        <Link
-          to={home("/clients/hotspot")}
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground transition hover:text-foreground"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          Hotspot clients
-        </Link>
-        <div className="page-header-actions flex-nowrap">
-          {!ended ? (
-            <>
-              <PrimaryButton className="min-h-10 flex-1 whitespace-nowrap sm:flex-none" onClick={() => setDialog("recharge")}>
-                <Zap className="h-4 w-4" aria-hidden="true" />
-                Recharge
-              </PrimaryButton>
-              <SecondaryButton className="min-h-10 flex-1 whitespace-nowrap sm:flex-none" onClick={() => setDialog("end")}>
-                <Power className="h-4 w-4" aria-hidden="true" />
-                End access
-              </SecondaryButton>
-            </>
-          ) : null}
-          <div>
-            <SecondaryButton
-              ref={menuButtonRef}
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
-              className="min-h-10"
-              onClick={() => setMenuOpen((open) => !open)}
-            >
-              More
-              <ChevronDown className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
-            </SecondaryButton>
-            {menuOpen && menuPos
-              ? createPortal(
-                  <div
-                    role="menu"
-                    ref={menuListRef}
-                    style={{ top: menuPos.top, left: menuPos.left }}
-                    className="fixed z-50 w-60 overflow-hidden rounded-xl border border-border bg-surface py-1 text-foreground shadow-lg"
-                  >
-                    {menuItems.map((item, index) =>
-                      item.label === "divider" ? (
-                        <div key={`divider-${index}`} className="my-1 border-t border-border" />
-                      ) : (
-                        <button
-                          key={item.label}
-                          type="button"
-                          role="menuitem"
-                          className={`flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm hover:bg-surface-muted ${item.danger ? "text-destructive" : "text-foreground"}`}
-                          onClick={() => {
-                            setMenuOpen(false);
-                            item.onClick();
-                          }}
-                        >
-                          <span className={item.danger ? undefined : "text-muted-foreground"} aria-hidden="true">
-                            {item.icon}
-                          </span>
-                          {item.label}
-                        </button>
-                      ),
-                    )}
-                  </div>,
-                  document.body,
-                )
-              : null}
-          </div>
-        </div>
-      </div>
+      <Link
+        to={home("/clients/hotspot")}
+        className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground transition hover:text-foreground"
+      >
+        <ArrowLeft className="h-4 w-4" />
+        Hotspot clients
+      </Link>
 
-      <section className="card mt-5 overflow-hidden">
-        <div className="h-1 bg-gradient-brand" aria-hidden="true" />
-        <div className="grid gap-5 p-4 sm:p-6">
-          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-            <div className="flex min-w-0 items-center gap-4">
-              <div
-                className="relative flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-gradient-brand text-primary-foreground shadow-sm sm:h-14 sm:w-14"
-                aria-hidden="true"
-              >
-                <Wifi className="h-6 w-6" />
-                <span className={`absolute -bottom-1 -right-1 h-4 w-4 rounded-full border-2 border-surface ${connectionDot}`} />
-              </div>
-              <div className="min-w-0">
-                <div className="flex flex-wrap items-center gap-2">
-                  <h1 className="truncate text-xl font-semibold tracking-tight sm:text-2xl">{client.phone || "Hotspot guest"}</h1>
-                  <StatusBadge tone={client.deleted || ended ? "paused" : online ? "active" : connected ? "due" : "neutral"}>
-                    {statusLabel}
-                  </StatusBadge>
-                </div>
-                <p className="mt-1 truncate text-sm text-muted-foreground">
-                  {client.packageName} · {client.routerName || "This router"}
-                </p>
-              </div>
+      <section className="mt-4 overflow-hidden rounded-2xl bg-gradient-to-br from-primary via-primary/90 to-primary/65 text-primary-foreground shadow-card sm:rounded-3xl">
+        <div className="flex flex-col gap-4 px-4 py-5 sm:px-7 sm:py-6 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex min-w-0 items-center gap-3.5 sm:gap-4">
+            <div
+              className="relative flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-primary-foreground/15 text-primary-foreground ring-1 ring-primary-foreground/20 sm:h-14 sm:w-14"
+              aria-hidden="true"
+            >
+              <Wifi className="h-6 w-6" />
+              <span className={`absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-primary ${connectionDot}`} />
             </div>
-            {detail.vouchers.length ? (
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="truncate text-xl font-semibold tracking-tight sm:text-2xl">{client.phone || "Hotspot guest"}</h1>
+                <StatusBadge tone={client.deleted || ended ? "paused" : online ? "active" : connected ? "due" : "neutral"}>
+                  {statusLabel}
+                </StatusBadge>
+              </div>
+              <p className="mt-1.5 truncate text-sm text-primary-foreground/80">
+                {client.packageName || "No package"}
+                <span className="mx-1.5 opacity-50">·</span>
+                {client.routerName || "This router"}
+                {detail.vouchers[0]?.code ? (
+                  <>
+                    <span className="mx-1.5 opacity-50">·</span>
+                    <code className="font-medium text-primary-foreground">{detail.vouchers[0].code}</code>
+                    {detail.vouchers.length > 1 ? ` +${detail.vouchers.length - 1}` : ""}
+                  </>
+                ) : null}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+            {!ended ? (
               <button
                 type="button"
-                onClick={copyVouchers}
-                title={detail.vouchers.length > 1 ? `Copy all ${detail.vouchers.length} voucher codes` : "Copy voucher code"}
-                className="inline-flex items-center gap-2 self-start rounded-lg px-1 py-1 text-left text-muted-foreground transition hover:text-foreground sm:self-auto"
+                onClick={() => setDialog("recharge")}
+                className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-lg bg-white px-4 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-white/90 sm:flex-none"
               >
-                <Ticket className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
-                <code className="font-mono text-sm font-semibold tracking-wide">{detail.vouchers[0].code}</code>
-                {detail.vouchers.length > 1 ? (
-                  <span className="text-xs text-muted-foreground">+{detail.vouchers.length - 1}</span>
-                ) : null}
-                {copied ? <Check className="h-4 w-4 text-success" /> : <Copy className="h-4 w-4 text-muted-foreground" />}
+                <Zap className="h-4 w-4" aria-hidden="true" />
+                Recharge
               </button>
             ) : null}
+            <div>
+              <SecondaryButton
+                ref={menuButtonRef}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                className="min-h-10 border-primary-foreground/25 bg-primary-foreground/10 text-primary-foreground hover:bg-primary-foreground/15"
+                onClick={() => setMenuOpen((open) => !open)}
+              >
+                More
+                <ChevronDown className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
+              </SecondaryButton>
+              {menuOpen && menuPos
+                ? createPortal(
+                    <div
+                      role="menu"
+                      ref={menuListRef}
+                      style={{ top: menuPos.top, left: menuPos.left }}
+                      className="fixed z-50 w-60 overflow-hidden rounded-xl border border-border bg-surface py-1 text-foreground shadow-lg"
+                    >
+                      {menuItems.map((item, index) =>
+                        item.label === "divider" ? (
+                          <div key={`divider-${index}`} className="my-1 border-t border-border" />
+                        ) : (
+                          <button
+                            key={item.label}
+                            type="button"
+                            role="menuitem"
+                            className={`flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm hover:bg-surface-muted ${item.danger ? "text-destructive" : "text-foreground"}`}
+                            onClick={() => {
+                              setMenuOpen(false);
+                              item.onClick();
+                            }}
+                          >
+                            <span className={item.danger ? undefined : "text-muted-foreground"} aria-hidden="true">
+                              {item.icon}
+                            </span>
+                            {item.label}
+                          </button>
+                        ),
+                      )}
+                    </div>,
+                    document.body,
+                  )
+                : null}
+            </div>
           </div>
-
-          <dl className="grid grid-cols-2 gap-x-4 gap-y-4 border-t border-border pt-4 lg:grid-cols-4">
-            {[
-              { label: "Status", value: statusLabel, hint: statusHint, tone: statusColor },
-              { label: "Time left", value: online ? timeLeft : "—", hint: online ? "On the live session" : "No open session" },
-              {
-                label: "Data used",
-                value: bytes(detail.usage.bytesIn + detail.usage.bytesOut),
-                hint: `${detail.usage.sessions} session${detail.usage.sessions === 1 ? "" : "s"}`,
-              },
-              { label: "Paid", value: money(client.amount), hint: client.mpesaCode || client.status },
-            ].map((stat) => (
-              <div key={stat.label} className="min-w-0">
-                <dt className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{stat.label}</dt>
-                <dd className={cn("mt-1 truncate text-lg font-semibold tracking-tight", stat.tone)}>{stat.value}</dd>
-                <p className="truncate text-xs text-muted-foreground" title={stat.hint}>{stat.hint}</p>
-              </div>
-            ))}
-          </dl>
         </div>
       </section>
 
-      <div className="mt-4 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
-        <section className="card min-w-0 overflow-hidden">
-          <div className="overflow-x-auto border-b border-border px-2 sm:px-4">
-            <div className="flex min-w-max gap-1" role="tablist" aria-label="Guest activity">
-              {historyTabs.map((item) => (
-                <button
-                  key={item.id}
-                  type="button"
-                  role="tab"
-                  aria-selected={tab === item.id}
-                  onClick={() => setTab(item.id)}
-                  className={cn(
-                    "-mb-px inline-flex items-center gap-1.5 border-b-2 px-3 py-3.5 text-sm font-medium transition",
-                    tab === item.id
-                      ? "border-primary text-foreground"
-                      : "border-transparent text-muted-foreground hover:text-foreground",
-                  )}
-                >
-                  {item.label}
-                  <span className="rounded-full bg-surface-muted px-1.5 text-[11px] tabular-nums text-muted-foreground">
-                    {item.count}
-                  </span>
-                </button>
-              ))}
-            </div>
-          </div>
+      <div className="mt-4 grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
+        <StatTile
+          label="Connection"
+          value={statusLabel}
+          hint={statusHint}
+          tone={statusColor}
+          icon={online ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
+        />
+        <StatTile
+          label="Time left"
+          value={online ? timeLeft : "—"}
+          hint={online ? "On the live session" : "No open session"}
+          icon={<TimerOff className="h-3.5 w-3.5" />}
+        />
+        <StatTile
+          label="Data used"
+          value={bytes(detail.usage.bytesIn + detail.usage.bytesOut)}
+          hint={`${detail.usage.sessions} session${detail.usage.sessions === 1 ? "" : "s"}`}
+          icon={<History className="h-3.5 w-3.5" />}
+        />
+        <StatTile
+          label="Paid"
+          value={money(client.amount)}
+          hint={client.mpesaCode || client.status}
+          icon={<Wallet className="h-3.5 w-3.5" />}
+        />
+      </div>
 
-          <div className="p-4 sm:p-5" role="tabpanel">
-            {tab === "journey" ? (
-              <GenerationTree
-                paid={{
-                  amount: client.amount,
-                  packageName: client.packageName,
-                  paidAt: client.paidAt,
-                  receipt: client.mpesaCode,
-                  phone: client.phone,
-                }}
-                events={detail.connectionLog ?? []}
-                vouchers={detail.vouchers}
-                live={!ended && !client.deleted}
-              />
-            ) : tab === "devices" ? (
-              <div className="grid gap-4">
-                {!detail.routerReachable ? (
-                  <p className="notice text-sm">
-                    {client.routerName || "The router"} did not answer, so live status may be out of date.
-                  </p>
-                ) : null}
-                {detail.devices.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">Devices appear here once the payment is confirmed.</p>
-                ) : (
-                  <ul className="divide-y divide-border">
-                    {detail.devices.map((device, index) => {
-                      const state = deviceState(device);
-                      const left = device.sessionTimeLeft
-                        ? device.sessionTimeLeft
-                        : device.secondsLeft != null && device.secondsLeft > 0
-                          ? duration(device.secondsLeft)
-                          : device.status === "issued"
-                            ? `Up to ${duration(device.seconds)}`
-                            : "—";
-                      return (
-                        <li key={device.id || device.mac || index} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
-                          <span
-                            className={cn(
-                              "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
-                              device.online ? "bg-emerald-500/10 text-emerald-600" : "bg-primary/10 text-primary",
-                            )}
-                            aria-hidden="true"
-                          >
-                            {device.payer ? <UserRound className="h-4 w-4" /> : <Ticket className="h-4 w-4" />}
-                          </span>
-                          <div className="min-w-0 flex-1">
-                            <div className="flex flex-wrap items-center gap-2">
-                              <span className="text-sm font-medium">{device.payer ? "Paying device" : `Device ${index + 1}`}</span>
-                              <StatusBadge tone={state.tone}>{state.label}</StatusBadge>
-                            </div>
-                            <p className="truncate text-xs text-muted-foreground">
-                              {device.mac || "No device yet"}
-                              {device.ip ? ` · ${device.ip}` : ""}
-                            </p>
-                          </div>
-                          <div className="shrink-0 text-right">
-                            {device.code ? (
-                              <button
-                                type="button"
-                                aria-label={`Copy voucher ${device.code}`}
-                                className="inline-flex items-center gap-1 font-mono text-xs font-semibold text-primary"
-                                onClick={() => copyCode(device.code)}
-                              >
-                                {device.code}
-                                {copiedCode === device.code ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
-                              </button>
-                            ) : null}
-                            <p className="text-xs tabular-nums text-muted-foreground">{left}</p>
-                          </div>
-                        </li>
-                      );
-                    })}
-                  </ul>
-                )}
-                {(detail.hosts?.length ?? 0) ? (
-                  <div className="border-t border-border pt-3">
-                    <p className="text-xs font-semibold text-warning">On the Wi-Fi, not surfing</p>
-                    <ul className="mt-2 grid gap-1.5">
-                      {(detail.hosts ?? []).map((host) => (
-                        <li key={host.mac} className="flex flex-wrap justify-between gap-x-3 text-xs">
-                          <span className="font-medium">{host.label || host.mac}</span>
-                          <span className="text-muted-foreground">
-                            {host.ip || "—"} · on for {host.uptime || "—"}
-                          </span>
-                        </li>
-                      ))}
-                    </ul>
-                  </div>
-                ) : null}
+      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(20rem,0.85fr)]">
+        <div className="grid min-w-0 gap-4 content-start">
+          <section className="card overflow-hidden">
+            <header className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3 sm:px-5">
+              <div>
+                <h2 className="text-sm font-semibold">Devices</h2>
+                <p className="text-xs text-muted-foreground">
+                  {detail.devices.length} device{detail.devices.length === 1 ? "" : "s"} on this purchase
+                </p>
               </div>
-            ) : tab === "payments" ? (
-              detail.transactions.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No payments recorded for this device yet.</p>
+              <span className="rounded-full bg-surface-muted px-2 py-0.5 text-[11px] font-semibold tabular-nums text-muted-foreground">
+                {detail.devices.filter((device) => device.online).length} online
+              </span>
+            </header>
+            <div className="px-4 py-2 sm:px-5">
+              {!detail.routerReachable ? (
+                <p className="notice mb-3 text-sm">
+                  {client.routerName || "The router"} did not answer, so live status may be out of date.
+                </p>
+              ) : null}
+              {detail.devices.length === 0 ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">Devices appear here once the payment is confirmed.</p>
               ) : (
                 <ul className="divide-y divide-border">
-                  {detail.transactions.map((tx) => (
-                    <li key={tx.id} className="flex items-center gap-3 py-3 first:pt-0 last:pb-0">
-                      <span
-                        className={cn(
-                          "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
-                          tx.status === "paid"
-                            ? "bg-emerald-500/10 text-emerald-600"
-                            : tx.status === "failed"
-                              ? "bg-red-500/10 text-red-600"
-                              : "bg-amber-500/10 text-amber-600",
-                        )}
-                        aria-hidden="true"
-                      >
-                        <Wallet className="h-4 w-4" />
-                      </span>
-                      <div className="min-w-0 flex-1">
-                        <div className="flex flex-wrap items-center gap-2">
-                          <span className="text-sm font-semibold tabular-nums">{money(tx.amount)}</span>
-                          <span className="text-sm text-muted-foreground">{tx.packageName}</span>
-                          <StatusBadge tone={statusTone[tx.status] ?? "neutral"}>{tx.status}</StatusBadge>
-                        </div>
-                        <p className="truncate text-xs text-muted-foreground">
-                          {tx.paidAt ?? tx.createdAt ?? "—"}
-                          {tx.mpesaCode ? ` · ${tx.mpesaCode}` : ""}
-                          {` · ${tx.devices} device${tx.devices === 1 ? "" : "s"}`}
-                        </p>
-                      </div>
-                      {tx.current ? (
-                        <span className="shrink-0 text-xs text-muted-foreground">Viewing</span>
-                      ) : (
-                        <Link to={home(`/hotspot/${tx.id}`)} className="shrink-0 text-xs font-semibold text-primary hover:underline">
-                          Open
-                        </Link>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              )
-            ) : (
-              <div className="grid gap-4">
-                <div>
-                  <p className="text-xs tabular-nums text-muted-foreground">
-                    {bytes(detail.usage.bytesIn)} down · {bytes(detail.usage.bytesOut)} up · last 14 days
-                  </p>
-                  <TrendChart
-                    data={(detail.usage.days ?? []).map((day) => ({ x: day.day.slice(5), y: day.bytesIn + day.bytesOut }))}
-                    formatY={bytes}
-                    emptyText="No usage recorded yet."
-                    ariaLabel="Hotspot guest usage for the last 14 days"
-                  />
-                </div>
-                {detail.sessions.length ? (
-                  <ul className="divide-y divide-border border-t border-border">
-                    {detail.sessions.map((session, index) => (
-                      <li key={index} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2.5 text-sm">
-                        <span className="min-w-0">
-                          <span className="font-medium">{session.label}</span>
-                          <span className="block text-xs text-muted-foreground">
-                            {session.start ?? "—"} → {session.live ? "now" : session.stop ?? "—"}
-                          </span>
+                  {detail.devices.map((device, index) => {
+                    const state = deviceState(device);
+                    const left = device.sessionTimeLeft
+                      ? device.sessionTimeLeft
+                      : device.secondsLeft != null && device.secondsLeft > 0
+                        ? duration(device.secondsLeft)
+                        : device.status === "issued"
+                          ? `Up to ${duration(device.seconds)}`
+                          : "—";
+                    return (
+                      <li key={device.id || device.mac || index} className="flex items-center gap-3 py-3">
+                        <span
+                          className={cn(
+                            "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
+                            device.online ? "bg-emerald-500/10 text-emerald-600" : "bg-primary/10 text-primary",
+                          )}
+                          aria-hidden="true"
+                        >
+                          {device.payer ? <UserRound className="h-4 w-4" /> : <Ticket className="h-4 w-4" />}
                         </span>
-                        <span className="text-right text-xs tabular-nums text-muted-foreground">
-                          {session.live ? <StatusBadge tone="active">Live</StatusBadge> : duration(session.seconds)}
-                          <span className="block">{bytes(session.bytesIn + session.bytesOut)}</span>
+                        <div className="min-w-0 flex-1">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="text-sm font-medium">{device.payer ? "Paying device" : `Device ${index + 1}`}</span>
+                            <StatusBadge tone={state.tone}>{state.label}</StatusBadge>
+                          </div>
+                          <p className="truncate text-xs text-muted-foreground">
+                            {device.mac || "No device yet"}
+                            {device.ip ? ` · ${device.ip}` : ""}
+                          </p>
+                        </div>
+                        <div className="shrink-0 text-right">
+                          {device.code ? (
+                            <button
+                              type="button"
+                              aria-label={`Copy voucher ${device.code}`}
+                              className="inline-flex items-center gap-1 font-mono text-xs font-semibold text-primary"
+                              onClick={() => copyCode(device.code)}
+                            >
+                              {device.code}
+                              {copiedCode === device.code ? <Check className="h-3 w-3 text-success" /> : <Copy className="h-3 w-3" />}
+                            </button>
+                          ) : null}
+                          <p className="text-xs tabular-nums text-muted-foreground">{left}</p>
+                        </div>
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+              {(detail.hosts?.length ?? 0) ? (
+                <div className="border-t border-border py-3">
+                  <p className="text-xs font-semibold text-warning">On the Wi-Fi, not surfing</p>
+                  <ul className="mt-2 grid gap-1.5">
+                    {(detail.hosts ?? []).map((host) => (
+                      <li key={host.mac} className="flex flex-wrap justify-between gap-x-3 text-xs">
+                        <span className="font-medium">{host.label || host.mac}</span>
+                        <span className="text-muted-foreground">
+                          {host.ip || "—"} · on for {host.uptime || "—"}
                         </span>
                       </li>
                     ))}
                   </ul>
-                ) : null}
-              </div>
-            )}
-          </div>
-        </section>
+                </div>
+              ) : null}
+            </div>
+          </section>
 
-        <section className="card min-w-0 px-5 py-4">
-          <h2 className="text-sm font-semibold">Details</h2>
-          <dl className="mt-2">
-            <InfoRow label="IP">{firstLive?.ip || firstHost?.ip || client.ip || "—"}</InfoRow>
-            <InfoRow label="MAC">{firstLive?.mac || firstHost?.mac || client.mac || "—"}</InfoRow>
-            <InfoRow label="Last seen">{detail.usage.lastSeen ?? "Never"}</InfoRow>
-            <InfoRow label="Paid at">{client.paidAt ?? "—"}</InfoRow>
-            <InfoRow label="Covers">
-              {client.devices} device{client.devices === 1 ? "" : "s"} × {client.periods}
-            </InfoRow>
-            {client.endedAt ? <InfoRow label="Ended">{client.endedAt}</InfoRow> : null}
-          </dl>
+          <section className="card overflow-hidden">
+            <header className="border-b border-border px-4 py-3 sm:px-5">
+              <h2 className="text-sm font-semibold">Usage</h2>
+              <p className="text-xs tabular-nums text-muted-foreground">
+                {bytes(detail.usage.bytesIn)} down · {bytes(detail.usage.bytesOut)} up · last 14 days
+              </p>
+            </header>
+            <div className="grid gap-4 p-4 sm:p-5">
+              <TrendChart
+                data={(detail.usage.days ?? []).map((day) => ({ x: day.day.slice(5), y: day.bytesIn + day.bytesOut }))}
+                formatY={bytes}
+                emptyText="No usage recorded yet."
+                ariaLabel="Hotspot guest usage for the last 14 days"
+              />
+              {detail.sessions.length ? (
+                <ul className="divide-y divide-border border-t border-border">
+                  {detail.sessions.map((session, index) => (
+                    <li key={index} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-2.5 text-sm">
+                      <span className="min-w-0">
+                        <span className="font-medium">{session.label}</span>
+                        <span className="block text-xs text-muted-foreground">
+                          {session.start ?? "—"} → {session.live ? "now" : session.stop ?? "—"}
+                        </span>
+                      </span>
+                      <span className="text-right text-xs tabular-nums text-muted-foreground">
+                        {session.live ? <StatusBadge tone="active">Live</StatusBadge> : duration(session.seconds)}
+                        <span className="block">{bytes(session.bytesIn + session.bytesOut)}</span>
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </div>
+          </section>
+
+          {detail.transactions.length ? (
+            <section className="card overflow-hidden">
+              <header className="border-b border-border px-4 py-3 sm:px-5">
+                <h2 className="text-sm font-semibold">Payments</h2>
+                <p className="text-xs text-muted-foreground">
+                  {detail.transactions.length} payment{detail.transactions.length === 1 ? "" : "s"} for this guest
+                </p>
+              </header>
+              <ul className="divide-y divide-border px-4 sm:px-5">
+                {detail.transactions.map((tx) => (
+                  <li key={tx.id} className="flex items-center gap-3 py-3">
+                    <span
+                      className={cn(
+                        "flex h-9 w-9 shrink-0 items-center justify-center rounded-full",
+                        tx.status === "paid"
+                          ? "bg-emerald-500/10 text-emerald-600"
+                          : tx.status === "failed"
+                            ? "bg-red-500/10 text-red-600"
+                            : "bg-amber-500/10 text-amber-600",
+                      )}
+                      aria-hidden="true"
+                    >
+                      <Wallet className="h-4 w-4" />
+                    </span>
+                    <div className="min-w-0 flex-1">
+                      <div className="flex flex-wrap items-center gap-2">
+                        <span className="text-sm font-semibold tabular-nums">{money(tx.amount)}</span>
+                        <span className="text-sm text-muted-foreground">{tx.packageName}</span>
+                        <StatusBadge tone={statusTone[tx.status] ?? "neutral"}>{tx.status}</StatusBadge>
+                      </div>
+                      <p className="truncate text-xs text-muted-foreground">
+                        {tx.paidAt ?? tx.createdAt ?? "—"}
+                        {tx.mpesaCode ? ` · ${tx.mpesaCode}` : ""}
+                        {` · ${tx.devices} device${tx.devices === 1 ? "" : "s"}`}
+                      </p>
+                    </div>
+                    {tx.current ? (
+                      <span className="shrink-0 text-xs text-muted-foreground">Viewing</span>
+                    ) : (
+                      <Link to={home(`/hotspot/${tx.id}`)} className="shrink-0 text-xs font-semibold text-primary hover:underline">
+                        Open
+                      </Link>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </section>
+          ) : null}
+        </div>
+
+        <section className="card flex min-h-[22rem] min-w-0 flex-col overflow-hidden xl:max-h-[44rem]">
+          <header className="border-b border-border px-4 py-3 sm:px-5">
+            <h2 className="text-sm font-semibold">History</h2>
+            <p className="text-xs text-muted-foreground">{journeyCount} events</p>
+          </header>
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 sm:px-5">
+            <GenerationTree
+              paid={{
+                amount: client.amount,
+                packageName: client.packageName,
+                paidAt: client.paidAt,
+                receipt: client.mpesaCode,
+                phone: client.phone,
+              }}
+              events={detail.connectionLog ?? []}
+              vouchers={detail.vouchers}
+              live={!ended && !client.deleted}
+            />
+          </div>
         </section>
       </div>
 

@@ -17,17 +17,16 @@ import {
   Loader2,
   LogIn,
   LogOut,
-  MapPin,
   Pause,
   Pencil,
-  Phone,
   Play,
   Power,
   ReceiptText,
-  Router,
   Trash2,
   Unplug,
   Wallet,
+  Wifi,
+  WifiOff,
   X,
   type LucideIcon,
 } from "lucide-react";
@@ -170,6 +169,8 @@ function ActionDialog({
   description,
   confirmLabel,
   destructive,
+  confirmDisabled,
+  error,
   onConfirm,
   children,
 }: {
@@ -179,6 +180,8 @@ function ActionDialog({
   description: string;
   confirmLabel: string;
   destructive?: boolean;
+  confirmDisabled?: boolean;
+  error?: string;
   onConfirm: () => Promise<void> | void;
   children?: ReactNode;
 }) {
@@ -193,20 +196,20 @@ function ActionDialog({
             <Dialog.Description className="mt-2 text-sm text-muted-foreground">{description}</Dialog.Description>
           </div>
           {children}
+          {error ? <p className="text-sm text-destructive">{error}</p> : null}
           <div className="flex flex-wrap justify-end gap-2">
             <SecondaryButton type="button" onClick={onClose} disabled={busy}>Cancel</SecondaryButton>
             <PrimaryButton
               type="button"
-              disabled={busy}
+              disabled={busy || confirmDisabled}
               className={destructive ? "bg-destructive text-destructive-foreground hover:bg-destructive/90" : undefined}
               onClick={() => {
                 setBusy(true);
                 void Promise.resolve()
                   .then(() => onConfirm())
-                  .finally(() => {
-                    setBusy(false);
-                    onClose();
-                  });
+                  .then(() => onClose())
+                  .catch(() => undefined)
+                  .finally(() => setBusy(false));
               }}
             >
               {busy ? (
@@ -284,6 +287,35 @@ function InfoRow({ label, children }: { label: string; children: ReactNode }) {
   );
 }
 
+function StatTile({
+  label,
+  value,
+  hint,
+  tone,
+  icon,
+}: {
+  label: string;
+  value: ReactNode;
+  hint?: ReactNode;
+  tone?: string;
+  icon: ReactNode;
+}) {
+  return (
+    <div className="rounded-xl border border-border bg-surface p-3 shadow-xs sm:rounded-2xl sm:p-4">
+      <div className="flex items-center justify-between gap-2">
+        <p className="truncate text-[10px] font-semibold uppercase tracking-wide text-muted-foreground sm:text-[11px]">
+          {label}
+        </p>
+        <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-lg bg-surface-muted text-muted-foreground" aria-hidden="true">
+          {icon}
+        </span>
+      </div>
+      <div className={cn("mt-2 truncate text-base font-semibold tracking-tight sm:text-lg", tone)}>{value}</div>
+      {hint != null && hint !== "" ? <p className="mt-0.5 truncate text-[11px] text-muted-foreground sm:text-xs">{hint}</p> : null}
+    </div>
+  );
+}
+
 export function PppoeCustomerPage() {
   const { subscriberId = "" } = useParams();
   const [search] = useSearchParams();
@@ -296,7 +328,6 @@ export function PppoeCustomerPage() {
   const [routers, setRouters] = useState<RouterOption[]>([]);
   const [packageId, setPackageId] = useState("");
   const [routerId, setRouterId] = useState("");
-  const [tab, setTab] = useState<"history" | "devices" | "usage">("history");
   const [detailsOpen, setDetailsOpen] = useState(false);
   const [dialog, setDialog] = useState<DialogKind | null>(search.get("edit") === "1" ? "edit" : null);
   const [busyAction, setBusyAction] = useState(false);
@@ -434,6 +465,10 @@ export function PppoeCustomerPage() {
     setDialog(null);
     setNewPassword("");
     setReason("");
+    if (subscriber) {
+      setRouterId(subscriber.routerId);
+      setPackageId(subscriber.packageId);
+    }
   }
 
   async function post(action: string, body: Record<string, unknown>) {
@@ -446,30 +481,46 @@ export function PppoeCustomerPage() {
       });
       if (response.password) setPassword(response.password);
       if (response.subscriber?.password) setPassword(response.subscriber.password);
-      if (response.subscriber) setSubscriber(response.subscriber);
-      else load();
+      if (response.subscriber) {
+        setSubscriber(response.subscriber);
+        setPackageId(response.subscriber.packageId);
+        setRouterId(response.subscriber.routerId);
+      } else load();
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "That action could not be completed.");
+      throw error;
     } finally {
       setBusyAction(false);
     }
   }
 
+  function openMigrate() {
+    const targets = routers.filter((item) => item.id !== subscriber?.routerId);
+    setRouterId(targets[0]?.id || "");
+    setPackageId(subscriber?.packageId || "");
+    setMessage("");
+    setDialog("migrate");
+  }
+
   async function saveEdit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     const data = new FormData(event.currentTarget);
-    await post("edit", {
-      firstName: data.get("firstName"),
-      lastName: data.get("lastName"),
-      phone: data.get("phone"),
-      email: data.get("email"),
-      buildingName: data.get("buildingName"),
-      houseNumber: data.get("houseNumber"),
-      serial: data.get("serial"),
-      username: data.get("username"),
-      password: data.get("password"),
-    });
-    closeDialog();
+    try {
+      await post("edit", {
+        firstName: data.get("firstName"),
+        lastName: data.get("lastName"),
+        phone: data.get("phone"),
+        email: data.get("email"),
+        buildingName: data.get("buildingName"),
+        houseNumber: data.get("houseNumber"),
+        serial: data.get("serial"),
+        username: data.get("username"),
+        password: data.get("password"),
+      });
+      closeDialog();
+    } catch {
+      // Message already set by post().
+    }
   }
 
   function copyPhoneInto(form: HTMLFormElement | null, field: "username" | "password") {
@@ -486,6 +537,7 @@ export function PppoeCustomerPage() {
       navigate(home("/clients"));
     } catch (error) {
       setMessage(error instanceof Error ? error.message : "That customer could not be deleted.");
+      throw error;
     }
   }
 
@@ -606,24 +658,30 @@ export function PppoeCustomerPage() {
         : []),
     ]),
   ].sort((a, b) => (stampMs(b.at) ?? 0) - (stampMs(a.at) ?? 0));
-  const pageTabs: { id: typeof tab; label: string; count?: number }[] = [
-    { id: "history", label: "History", count: history.length },
-    { id: "devices", label: "Devices", count: devices.length },
-    { id: "usage", label: "Usage" },
-  ];
-
   const openFromDetails = (kind: DialogKind) => {
     setDetailsOpen(false);
     setDialog(kind);
   };
 
   const menuItems: { label: string; icon?: ReactNode; danger?: boolean; onClick: () => void }[] = [
+    { label: "Details", icon: <Eye className="h-4 w-4" />, onClick: () => setDetailsOpen(true) },
     { label: "Transactions", icon: <ReceiptText className="h-4 w-4" />, onClick: () => navigate(home(`/pppoe/${subscriberId}/transactions`)) },
+    ...(pendingApproval
+      ? [{ label: "Approve", icon: <BadgeCheck className="h-4 w-4" />, onClick: () => void post("activate", {}) }]
+      : ended || subscriber.status === "expired"
+        ? []
+        : [
+            {
+              label: suspended ? "Continue" : "Suspend",
+              icon: suspended ? <Play className="h-4 w-4" /> : <Pause className="h-4 w-4" />,
+              onClick: () => setDialog("suspend"),
+            },
+          ]),
     ...(ended
       ? []
       : [
           { label: "Change package", icon: <ArrowUpDown className="h-4 w-4" />, onClick: () => setDialog("package") },
-          { label: "Move to another router", icon: <ArrowRightLeft className="h-4 w-4" />, onClick: () => setDialog("migrate") },
+          { label: "Transfer to another MikroTik", icon: <ArrowRightLeft className="h-4 w-4" />, onClick: openMigrate },
         ]),
     ...(sessionOpen ? [{ label: "Disconnect current session", icon: <Unplug className="h-4 w-4" />, onClick: () => setDialog("disconnect") }] : []),
     { label: "Reset password", icon: <KeyRound className="h-4 w-4" />, onClick: () => setDialog("password") },
@@ -643,92 +701,23 @@ export function PppoeCustomerPage() {
 
   return (
     <div className="page-shell py-6 sm:py-8">
-      <div className="page-header">
-        <Link
-          to={home("/clients")}
-          className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground transition hover:text-foreground"
-        >
-          <ArrowLeft className="h-4 w-4" />
-          PPPoE clients
-        </Link>
-        <div className="page-header-actions flex-nowrap">
-          <PrimaryButton to={`${home(`/pppoe/${subscriberId}/transactions`)}?pay=1`} className="min-h-10 flex-1 whitespace-nowrap px-3 sm:flex-none sm:px-4">
-            <Wallet className="hidden h-4 w-4 sm:block" aria-hidden="true" />
-            Record payment
-          </PrimaryButton>
-          {pendingApproval ? (
-            <SecondaryButton className="min-h-10 flex-1 whitespace-nowrap px-3 sm:flex-none sm:px-4" onClick={() => void post("activate", {})}>
-              <BadgeCheck className="hidden h-4 w-4 sm:block" aria-hidden="true" />
-              Approve
-            </SecondaryButton>
-          ) : ended || subscriber.status === "expired" ? null : (
-            <SecondaryButton className="min-h-10 flex-1 whitespace-nowrap px-3 sm:flex-none sm:px-4" onClick={() => setDialog("suspend")}>
-              {suspended ? (
-                <Play className="hidden h-4 w-4 sm:block" aria-hidden="true" />
-              ) : (
-                <Pause className="hidden h-4 w-4 sm:block" aria-hidden="true" />
-              )}
-              {suspended ? "Continue" : "Suspend"}
-            </SecondaryButton>
-          )}
-          <div>
-            <SecondaryButton
-              ref={menuButtonRef}
-              aria-haspopup="menu"
-              aria-expanded={menuOpen}
-              className="min-h-10 flex-1 whitespace-nowrap px-3 sm:flex-none sm:px-4"
-              onClick={() => setMenuOpen((open) => !open)}
-            >
-              More
-              <ChevronDown className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
-            </SecondaryButton>
-            {menuOpen && menuPos
-              ? createPortal(
-                  <div
-                    role="menu"
-                    ref={menuListRef}
-                    style={{ top: menuPos.top, left: menuPos.left }}
-                    className="fixed z-50 w-60 overflow-hidden rounded-xl border border-border bg-surface py-1 text-foreground shadow-lg"
-                  >
-                    {menuItems.map((item, index) =>
-                      item.label === "divider" ? (
-                        <div key={`divider-${index}`} className="my-1 border-t border-border" />
-                      ) : (
-                        <button
-                          key={item.label}
-                          type="button"
-                          role="menuitem"
-                          className={`flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm hover:bg-surface-muted ${item.danger ? "text-destructive" : "text-foreground"}`}
-                          onClick={() => {
-                            setMenuOpen(false);
-                            item.onClick();
-                          }}
-                        >
-                          <span className={item.danger ? undefined : "text-muted-foreground"} aria-hidden="true">
-                            {item.icon}
-                          </span>
-                          {item.label}
-                        </button>
-                      ),
-                    )}
-                  </div>,
-                  document.body,
-                )
-              : null}
-          </div>
-        </div>
-      </div>
+      <Link
+        to={home("/clients")}
+        className="inline-flex items-center gap-1.5 text-sm font-medium text-muted-foreground transition hover:text-foreground"
+      >
+        <ArrowLeft className="h-4 w-4" />
+        PPPoE clients
+      </Link>
 
-      <section className="card mt-5 overflow-hidden">
-        <div className="h-1 bg-gradient-brand" aria-hidden="true" />
-        <div className="flex flex-wrap items-center gap-x-6 gap-y-4 px-5 py-5 sm:px-6">
-          <div className="flex min-w-0 items-start gap-4 sm:items-center">
+      <section className="mt-4 overflow-hidden rounded-2xl bg-gradient-to-br from-primary via-primary/90 to-primary/65 text-primary-foreground shadow-card sm:rounded-3xl">
+        <div className="flex flex-col gap-4 px-4 py-5 sm:px-7 sm:py-6 lg:flex-row lg:items-center lg:justify-between">
+          <div className="flex min-w-0 items-center gap-3.5 sm:gap-4">
             <div
-              className="relative flex h-14 w-14 shrink-0 items-center justify-center rounded-2xl bg-gradient-brand text-lg font-semibold text-primary-foreground shadow-sm"
+              className="relative flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl bg-primary-foreground/15 text-base font-semibold text-primary-foreground ring-1 ring-primary-foreground/20 sm:h-14 sm:w-14 sm:text-lg"
               aria-hidden="true"
             >
               {initials}
-              <span className={`absolute -bottom-1 -right-1 h-4 w-4 rounded-full border-2 border-surface ${connectionDot}`} />
+              <span className={`absolute -bottom-0.5 -right-0.5 h-3.5 w-3.5 rounded-full border-2 border-primary ${connectionDot}`} />
             </div>
             <div className="min-w-0">
               <div className="flex flex-wrap items-center gap-2">
@@ -736,222 +725,246 @@ export function PppoeCustomerPage() {
                   {subscriber.firstName} {subscriber.lastName}
                 </h1>
                 <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
-                <StatusBadge tone={billing.tone}>{billing.label}</StatusBadge>
               </div>
-              <div className="mt-1.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
-                <span className="inline-flex items-center gap-1.5">
-                  <Phone className="h-3.5 w-3.5" aria-hidden="true" />
-                  {subscriber.phone || "—"}
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <Router className="h-3.5 w-3.5" aria-hidden="true" />
-                  {subscriber.routerName}
-                </span>
-                <span className="inline-flex items-center gap-1.5">
-                  <Gauge className="h-3.5 w-3.5" aria-hidden="true" />
-                  {subscriber.packageName}
-                </span>
-                {subscriber.buildingName || subscriber.houseNumber ? (
-                  <span className="inline-flex items-center gap-1.5">
-                    <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
-                    {[subscriber.buildingName, subscriber.houseNumber].filter(Boolean).join(" · ")}
-                  </span>
-                ) : null}
-              </div>
+              <p className="mt-1.5 truncate text-sm text-primary-foreground/80">
+                {subscriber.phone || "—"}
+                <span className="mx-1.5 opacity-50">·</span>
+                <code className="font-medium text-primary-foreground">{subscriber.username}</code>
+                <span className="mx-1.5 opacity-50">·</span>
+                {subscriber.packageName || "No package"}
+              </p>
             </div>
           </div>
-          <div className="ml-auto flex items-center gap-2">
-            <div className="flex items-center gap-2 px-1 py-1">
-              <KeyRound className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
-              <code className="min-w-0 truncate text-sm font-medium">{subscriber.username}</code>
-              <button
-                type="button"
-                aria-label="Copy username"
-                title="Copy username"
-                className="shrink-0 text-muted-foreground transition hover:text-foreground"
-                onClick={() => void navigator.clipboard.writeText(subscriber.username)}
+
+          <div className="flex flex-wrap items-center gap-2 lg:justify-end">
+            <Link
+              to={`${home(`/pppoe/${subscriberId}/transactions`)}?pay=1`}
+              className="inline-flex min-h-10 flex-1 items-center justify-center gap-2 rounded-lg bg-white px-4 text-sm font-semibold text-slate-900 shadow-sm transition hover:bg-white/90 sm:flex-none"
+            >
+              <Wallet className="h-4 w-4" aria-hidden="true" />
+              Recharge
+            </Link>
+            <div>
+              <SecondaryButton
+                ref={menuButtonRef}
+                aria-haspopup="menu"
+                aria-expanded={menuOpen}
+                className="min-h-10 border-primary-foreground/25 bg-primary-foreground/10 text-primary-foreground hover:bg-primary-foreground/15"
+                onClick={() => setMenuOpen((open) => !open)}
               >
-                <Copy className="h-3.5 w-3.5" />
-              </button>
+                More
+                <ChevronDown className={`h-4 w-4 transition-transform ${menuOpen ? "rotate-180" : ""}`} />
+              </SecondaryButton>
+              {menuOpen && menuPos
+                ? createPortal(
+                    <div
+                      role="menu"
+                      ref={menuListRef}
+                      style={{ top: menuPos.top, left: menuPos.left }}
+                      className="fixed z-50 w-60 overflow-hidden rounded-xl border border-border bg-surface py-1 text-foreground shadow-lg"
+                    >
+                      {menuItems.map((item, index) =>
+                        item.label === "divider" ? (
+                          <div key={`divider-${index}`} className="my-1 border-t border-border" />
+                        ) : (
+                          <button
+                            key={item.label}
+                            type="button"
+                            role="menuitem"
+                            className={`flex w-full items-center gap-2.5 px-4 py-2 text-left text-sm hover:bg-surface-muted ${item.danger ? "text-destructive" : "text-foreground"}`}
+                            onClick={() => {
+                              setMenuOpen(false);
+                              item.onClick();
+                            }}
+                          >
+                            <span className={item.danger ? undefined : "text-muted-foreground"} aria-hidden="true">
+                              {item.icon}
+                            </span>
+                            {item.label}
+                          </button>
+                        ),
+                      )}
+                    </div>,
+                    document.body,
+                  )
+                : null}
             </div>
-            <SecondaryButton className="min-h-9 px-3" onClick={() => setDetailsOpen(true)}>
-              <Eye className="h-4 w-4" aria-hidden="true" />
-              View details
-            </SecondaryButton>
           </div>
         </div>
-              <dl className="mx-5 grid grid-cols-2 gap-4 border-t border-border py-4 sm:mx-6 md:grid-cols-4">
-          {[
-            { label: "Connection", value: statusLabel, hint: statusHint, tone: statusTone },
-            {
-              label: "Live speed",
-              value: liveSpeed,
-              hint: `Plan ${subscriber.downloadMbps ?? "—"}↓ ${subscriber.uploadMbps ?? "—"}↑ Mbps`,
-            },
-            {
-              label: "Outstanding",
-              value: outstandingDue ? `KSh ${subscriber.billing.outstanding}` : "KSh 0",
-              hint: `Due ${subscriber.billing.nextDueDate ?? "—"}`,
-              tone: outstandingDue ? "text-destructive" : "text-success",
-            },
-            { label: "Access expires", value: subscriber.billing.expiry ?? "—", hint: billing.label },
-          ].map((stat) => (
-            <div key={stat.label} className="min-w-0">
-              <dt className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{stat.label}</dt>
-              <dd className={cn("mt-1 truncate text-lg font-semibold tracking-tight", stat.tone)}>{stat.value}</dd>
-              {stat.hint ? <dd className="truncate text-xs text-muted-foreground">{stat.hint}</dd> : null}
-            </div>
-          ))}
-        </dl>
       </section>
 
-      <div className="mt-4">
-        <section className="card min-w-0 overflow-hidden">
-          <div className="flex items-center gap-2 overflow-x-auto border-b border-border px-2 sm:px-4" role="tablist">
-            {pageTabs.map((item) => (
-              <button
-                key={item.id}
-                type="button"
-                role="tab"
-                aria-selected={tab === item.id}
-                onClick={() => setTab(item.id)}
-                className={cn(
-                  "-mb-px inline-flex shrink-0 items-center gap-2 border-b-2 px-3 py-3 text-sm transition",
-                  tab === item.id
-                    ? "border-primary font-medium text-foreground"
-                    : "border-transparent text-muted-foreground hover:text-foreground",
-                )}
-              >
-                {item.label}
-                {item.count !== undefined ? (
-                  <span className="rounded-full bg-surface-muted px-1.5 text-[11px] tabular-nums text-muted-foreground">{item.count}</span>
-                ) : null}
-              </button>
-            ))}
-          </div>
-          <div className="p-4 sm:p-5" role="tabpanel">
-            {tab === "history" ? (
-              <div className="mb-3 flex justify-end">
-                <button type="button" className={cardActionClass} onClick={() => void exportSessions()}>
-                  Export CSV
-                </button>
+      <div className="mt-4 grid grid-cols-2 gap-2 sm:gap-3 lg:grid-cols-4">
+        <StatTile
+          label="Connection"
+          value={statusLabel}
+          hint={statusHint}
+          tone={statusTone}
+          icon={subscriber.connection === "online" ? <Wifi className="h-3.5 w-3.5" /> : <WifiOff className="h-3.5 w-3.5" />}
+        />
+        <StatTile
+          label="Live speed"
+          value={liveSpeed}
+          hint={subscriber.routerName || "—"}
+          icon={<Gauge className="h-3.5 w-3.5" />}
+        />
+        <StatTile
+          label="Outstanding"
+          value={outstandingDue ? `KSh ${subscriber.billing.outstanding}` : "KSh 0"}
+          hint={billing.label}
+          tone={outstandingDue ? "text-destructive" : "text-success"}
+          icon={<Wallet className="h-3.5 w-3.5" />}
+        />
+        <StatTile
+          label="Expires"
+          value={subscriber.billing.expiry ?? "—"}
+          hint={subscriber.billing.nextDueDate ? `Due ${subscriber.billing.nextDueDate}` : "No due date"}
+          icon={<ReceiptText className="h-3.5 w-3.5" />}
+        />
+      </div>
+
+      <div className="mt-4 grid gap-4 xl:grid-cols-[minmax(0,1.35fr)_minmax(20rem,0.85fr)]">
+        <div className="grid min-w-0 gap-4 content-start">
+          <section className="card overflow-hidden">
+            <header className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3 sm:px-5">
+              <div>
+                <h2 className="text-sm font-semibold">Devices</h2>
+                <p className="text-xs text-muted-foreground">
+                  {devices.length} device{devices.length === 1 ? "" : "s"} on this account
+                </p>
               </div>
-            ) : null}
-            {tab === "history" ? (
-              history.length === 0 ? (
-                <p className="text-sm text-muted-foreground">No activity yet.</p>
+              <span className="rounded-full bg-surface-muted px-2 py-0.5 text-[11px] font-semibold tabular-nums text-muted-foreground">
+                {devices.filter((device) => device.online).length} online
+              </span>
+            </header>
+            <div className="px-4 py-2 sm:px-5">
+              {devices.length === 0 ? (
+                <p className="py-8 text-center text-sm text-muted-foreground">No devices have connected yet.</p>
               ) : (
-                <ol>
-                  {history.map((entry, index) => {
-                    const Icon = entry.icon;
-                    return (
-                      <li key={`${entry.at}-${entry.title}-${index}`} className="relative flex gap-3 pb-4 last:pb-0">
-                        {index < history.length - 1 ? (
-                          <span className="absolute bottom-0 left-[11px] top-6 w-px bg-border" aria-hidden="true" />
-                        ) : null}
-                        <span
-                          className={cn("relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full", entry.tone)}
-                          aria-hidden="true"
-                        >
-                          <Icon className="h-3.5 w-3.5" />
-                        </span>
-                        <div className="min-w-0 flex-1">
-                          <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-                            <p className="text-sm font-medium">{entry.title}</p>
-                            <time className="text-xs tabular-nums text-muted-foreground">{entry.at ?? "—"}</time>
-                          </div>
-                          {entry.detail ? <p className="text-xs leading-5 text-muted-foreground">{entry.detail}</p> : null}
-                        </div>
-                      </li>
-                    );
-                  })}
-                </ol>
-              )
-            ) : null}
+                <ul className="divide-y divide-border">
+                  {devices.map((device) => (
+                    <li key={device.mac} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-3">
+                      <div className="min-w-0">
+                        <p className="flex items-center gap-2 text-sm font-medium">
+                          <span className={cn("h-2 w-2 shrink-0 rounded-full", device.online ? "bg-success" : "bg-border")} aria-hidden="true" />
+                          {device.name || (device.kind === "router" ? "Customer router" : "Unknown device")}
+                          {device.kind === "router" ? (
+                            <span className="rounded-full bg-primary/10 px-1.5 py-px text-[10px] font-semibold text-primary">Router</span>
+                          ) : null}
+                        </p>
+                        <p className="truncate text-xs text-muted-foreground">
+                          <code>{device.mac}</code>
+                          {viaLabel(device.via) ? ` · ${viaLabel(device.via)}` : ""}
+                          {device.online && device.ip ? ` · ${device.ip}` : ""}
+                        </p>
+                      </div>
+                      <div className="text-left text-xs tabular-nums text-muted-foreground sm:text-right">
+                        <p className={device.online ? "font-medium text-success" : ""}>
+                          {device.online ? `Online ${device.onlineFor || ""}`.trim() : `Last seen ${device.lastSeen ?? "never"}`}
+                        </p>
+                        <p>
+                          {bytes(device.bytesIn)}↓ {bytes(device.bytesOut)}↑ · {device.sessions} session{device.sessions === 1 ? "" : "s"}
+                        </p>
+                      </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {!subscriber.accessInterface ? (
+                <p className="border-t border-border py-3 text-xs text-muted-foreground">
+                  Online sessions show gadgets on this client&apos;s port automatically. Save a VLAN / access interface on the
+                  customer to keep listing them when they are offline.
+                </p>
+              ) : null}
+            </div>
+          </section>
 
-            {tab === "devices" ? (
-              <>
-                {devices.length === 0 ? (
-                  <p className="text-sm text-muted-foreground">No devices have connected yet.</p>
-                ) : (
-                  <ul className="divide-y divide-border">
-                    {devices.map((device) => (
-                      <li key={device.mac} className="flex flex-wrap items-center justify-between gap-x-4 gap-y-1 py-3 first:pt-0 last:pb-0">
-                        <div className="min-w-0">
-                          <p className="flex items-center gap-2 text-sm font-medium">
-                            <span className={cn("h-2 w-2 shrink-0 rounded-full", device.online ? "bg-success" : "bg-border")} aria-hidden="true" />
-                            {device.name || (device.kind === "router" ? "Customer router" : "Unknown device")}
-                            {device.kind === "router" ? (
-                              <span className="rounded-full bg-primary/10 px-1.5 py-px text-[10px] font-semibold text-primary">Router</span>
-                            ) : null}
-                          </p>
-                          <p className="truncate text-xs text-muted-foreground">
-                            <code>{device.mac}</code>
-                            {viaLabel(device.via) ? ` · ${viaLabel(device.via)}` : ""}
-                            {device.online && device.ip ? ` · ${device.ip}` : ""}
-                          </p>
-                        </div>
-                        <div className="text-left text-xs tabular-nums text-muted-foreground sm:text-right">
-                          <p className={device.online ? "font-medium text-success" : ""}>
-                            {device.online ? `Online ${device.onlineFor || ""}`.trim() : `Last seen ${device.lastSeen ?? "never"}`}
-                          </p>
-                          <p>
-                            {bytes(device.bytesIn)}↓ {bytes(device.bytesOut)}↑ · {device.sessions} session{device.sessions === 1 ? "" : "s"}
-                          </p>
-                        </div>
-                      </li>
-                    ))}
-                  </ul>
-                )}
-                {!subscriber.accessInterface ? (
-                  <p className="mt-4 text-xs text-muted-foreground">
-                    Only devices that sign in on this account are listed. Save a VLAN / access interface when registering the
-                    customer to also see the gadgets behind their router.
-                  </p>
-                ) : null}
-              </>
-            ) : null}
-
-            {tab === "usage" ? (
-              <div className="grid gap-6">
+          <section className="card overflow-hidden">
+            <header className="flex flex-wrap items-baseline justify-between gap-2 border-b border-border px-4 py-3 sm:px-5">
+              <div>
+                <h2 className="text-sm font-semibold">Usage</h2>
                 <p className="text-xs tabular-nums text-muted-foreground">
-                  Last 30 days: {bytes(subscriber.usage.monthBytesIn + subscriber.usage.monthBytesOut)} ({bytes(subscriber.usage.monthBytesIn)}↓{" "}
+                  Last 30 days · {bytes(subscriber.usage.monthBytesIn + subscriber.usage.monthBytesOut)} ({bytes(subscriber.usage.monthBytesIn)}↓{" "}
                   {bytes(subscriber.usage.monthBytesOut)}↑)
                 </p>
-                <div>
-                  <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-                    <p className="text-sm font-medium">Online activity</p>
-                    <p className="text-xs tabular-nums text-muted-foreground">Last 3 hours · {totalOnline} min online</p>
-                  </div>
-                  {usageTrend === null ? (
-                    <p className="mt-3 text-sm text-muted-foreground">Reading activity…</p>
-                  ) : (
-                    <TrendChart
-                      ariaLabel="Online activity"
-                      emptyText="No activity in the last 3 hours."
-                      formatY={(value) => `${value} min`}
-                      data={usageTrend.map((point) => ({ x: point.label, y: point.minutes }))}
-                    />
-                  )}
-                </div>
-                <div>
-                  <div className="flex flex-wrap items-baseline justify-between gap-x-3">
-                    <p className="text-sm font-medium">Router health · {subscriber.routerName}</p>
-                    <p className="text-xs tabular-nums text-muted-foreground">Last 3 hours · {totalDown} min down</p>
-                  </div>
-                  {healthTrend === null ? (
-                    <p className="mt-3 text-sm text-muted-foreground">Reading router health…</p>
-                  ) : (
-                    <TrendChart
-                      ariaLabel="Router downtime"
-                      emptyText="No downtime recorded."
-                      formatY={(value) => `${value} min`}
-                      data={healthTrend.map((point) => ({ x: point.label, y: point.minutes }))}
-                    />
-                  )}
-                </div>
               </div>
-            ) : null}
+            </header>
+            <div className="grid gap-5 p-4 sm:p-5">
+              <div>
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                  <p className="text-sm font-medium">Online activity</p>
+                  <p className="text-xs tabular-nums text-muted-foreground">Last 3 hours · {totalOnline} min online</p>
+                </div>
+                {usageTrend === null ? (
+                  <p className="mt-3 text-sm text-muted-foreground">Reading activity…</p>
+                ) : (
+                  <TrendChart
+                    ariaLabel="Online activity"
+                    emptyText="No activity in the last 3 hours."
+                    formatY={(value) => `${value} min`}
+                    data={usageTrend.map((point) => ({ x: point.label, y: point.minutes }))}
+                  />
+                )}
+              </div>
+              <div className="border-t border-border pt-5">
+                <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                  <p className="text-sm font-medium">Router health · {subscriber.routerName}</p>
+                  <p className="text-xs tabular-nums text-muted-foreground">Last 3 hours · {totalDown} min down</p>
+                </div>
+                {healthTrend === null ? (
+                  <p className="mt-3 text-sm text-muted-foreground">Reading router health…</p>
+                ) : (
+                  <TrendChart
+                    ariaLabel="Router downtime"
+                    emptyText="No downtime recorded."
+                    formatY={(value) => `${value} min`}
+                    data={healthTrend.map((point) => ({ x: point.label, y: point.minutes }))}
+                  />
+                )}
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <section className="card flex min-h-[22rem] min-w-0 flex-col overflow-hidden xl:max-h-[44rem]">
+          <header className="flex flex-wrap items-center justify-between gap-2 border-b border-border px-4 py-3 sm:px-5">
+            <div>
+              <h2 className="text-sm font-semibold">History</h2>
+              <p className="text-xs text-muted-foreground">{history.length} events</p>
+            </div>
+            <button type="button" className={cardActionClass} onClick={() => void exportSessions()}>
+              Export CSV
+            </button>
+          </header>
+          <div className="min-h-0 flex-1 overflow-y-auto px-4 py-3 sm:px-5">
+            {history.length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">No activity yet.</p>
+            ) : (
+              <ol>
+                {history.map((entry, index) => {
+                  const Icon = entry.icon;
+                  return (
+                    <li key={`${entry.at}-${entry.title}-${index}`} className="relative flex gap-3 pb-4 last:pb-0">
+                      {index < history.length - 1 ? (
+                        <span className="absolute bottom-0 left-[11px] top-6 w-px bg-border" aria-hidden="true" />
+                      ) : null}
+                      <span
+                        className={cn("relative z-10 flex h-6 w-6 shrink-0 items-center justify-center rounded-full", entry.tone)}
+                        aria-hidden="true"
+                      >
+                        <Icon className="h-3.5 w-3.5" />
+                      </span>
+                      <div className="min-w-0 flex-1">
+                        <div className="flex flex-wrap items-baseline justify-between gap-x-3">
+                          <p className="text-sm font-medium">{entry.title}</p>
+                          <time className="text-xs tabular-nums text-muted-foreground">{entry.at ?? "—"}</time>
+                        </div>
+                        {entry.detail ? <p className="text-xs leading-5 text-muted-foreground">{entry.detail}</p> : null}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+            )}
           </div>
         </section>
       </div>
@@ -1044,12 +1057,18 @@ export function PppoeCustomerPage() {
               <div className="flex items-center justify-between gap-2">
                 <h2 className="text-sm font-semibold">Subscription</h2>
                 {ended ? null : (
-                  <button type="button" className={cardActionClass} onClick={() => openFromDetails("package")}>
-                    Change package
-                  </button>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button type="button" className={cardActionClass} onClick={() => { setDetailsOpen(false); openMigrate(); }}>
+                      Transfer MikroTik
+                    </button>
+                    <button type="button" className={cardActionClass} onClick={() => openFromDetails("package")}>
+                      Change package
+                    </button>
+                  </div>
                 )}
               </div>
               <dl className="mt-2">
+                <InfoRow label="MikroTik">{subscriber.routerName || "—"}</InfoRow>
                 <InfoRow label="Package">{subscriber.packageName || "—"}</InfoRow>
                 <InfoRow label="Price">
                   {subscriber.billing.price ? `KSh ${subscriber.billing.price} / ${subscriber.billing.billingCycle || "cycle"}` : "—"}
@@ -1086,6 +1105,7 @@ export function PppoeCustomerPage() {
         title={suspended ? "Continue access" : "Suspend access"}
         description={suspended ? "Access is restored and the current billing status is kept." : "The customer will lose internet immediately."}
         confirmLabel={suspended ? "Continue" : "Suspend"}
+        error={dialog === "suspend" ? message : ""}
         onConfirm={() => post(suspended ? "reactivate" : "suspend", { reason, override: true })}
       >
         <FormField id="suspend-reason" label={suspended ? "Reason" : "Reason (optional)"}>
@@ -1099,6 +1119,7 @@ export function PppoeCustomerPage() {
         title="Change package"
         description="The new speed is sent to the router right away and the price difference is prorated."
         confirmLabel="Change package"
+        error={dialog === "package" ? message : ""}
         onConfirm={() => post("upgrade", { packageId, prorate: true })}
       >
         <FormField id="package-select" label="New package">
@@ -1111,21 +1132,44 @@ export function PppoeCustomerPage() {
       <ActionDialog
         open={dialog === "migrate"}
         onClose={closeDialog}
-        title="Move to another router"
-        description="The customer reconnects on the new router with the same username and password."
-        confirmLabel="Move"
-        onConfirm={() => post("migrate", { routerId, packageId })}
+        title="Transfer to another MikroTik"
+        description="Keeps the same package, username, and password. The customer reconnects on the new MikroTik."
+        confirmLabel="Transfer"
+        confirmDisabled={!routerId || routerId === subscriber.routerId}
+        error={dialog === "migrate" ? message : ""}
+        onConfirm={() => post("migrate", { routerId })}
       >
-        <FormField id="migrate-router" label="Router">
-          <select id="migrate-router" className="field" value={routerId} onChange={(event) => setRouterId(event.target.value)}>
-            {routers.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}
-          </select>
-        </FormField>
-        <FormField id="migrate-package" label="Package on that router">
-          <select id="migrate-package" className="field" value={packageId} onChange={(event) => setPackageId(event.target.value)}>
-            {packages.map((item) => <option key={item.id} value={item.id}>{item.name} · KSh {item.price}</option>)}
-          </select>
-        </FormField>
+        <div className="grid gap-3">
+          <p className="rounded-lg border border-border bg-surface-muted/60 px-3 py-2 text-sm text-muted-foreground">
+            Now on <span className="font-medium text-foreground">{subscriber.routerName || "—"}</span>
+            {subscriber.packageName ? (
+              <>
+                {" "}
+                · package <span className="font-medium text-foreground">{subscriber.packageName}</span>
+              </>
+            ) : null}
+          </p>
+          <FormField id="migrate-router" label="Destination MikroTik">
+            <select
+              id="migrate-router"
+              className="field"
+              value={routerId}
+              onChange={(event) => setRouterId(event.target.value)}
+            >
+              {routers.filter((item) => item.id !== subscriber.routerId).length === 0 ? (
+                <option value="">No other MikroTik available</option>
+              ) : (
+                routers
+                  .filter((item) => item.id !== subscriber.routerId)
+                  .map((item) => (
+                    <option key={item.id} value={item.id}>
+                      {item.name}
+                    </option>
+                  ))
+              )}
+            </select>
+          </FormField>
+        </div>
       </ActionDialog>
 
       <ActionDialog
@@ -1134,6 +1178,7 @@ export function PppoeCustomerPage() {
         title="Disconnect current session"
         description="The customer is dropped now and can reconnect immediately. Nothing else changes."
         confirmLabel="Disconnect"
+        error={dialog === "disconnect" ? message : ""}
         onConfirm={() => post("disconnect", { mode: "session" })}
       />
 
@@ -1144,6 +1189,7 @@ export function PppoeCustomerPage() {
         description="This revokes the login permanently. Use Suspend if the customer may come back."
         confirmLabel="End service"
         destructive
+        error={dialog === "terminate" ? message : ""}
         onConfirm={() => post("disconnect", { mode: "terminate", reason })}
       >
         <FormField id="terminate-reason" label="Why is the service ending?">
@@ -1158,6 +1204,7 @@ export function PppoeCustomerPage() {
         description="Access is revoked, live sessions are dropped, and the customer leaves the clients list. Payment and usage history is kept."
         confirmLabel="Delete customer"
         destructive
+        error={dialog === "delete" ? message : ""}
         onConfirm={removeCustomer}
       />
 

@@ -833,6 +833,48 @@ class PortalIdentifyTests(unittest.TestCase):
         self.assertIn("amina-home", cursor.asked)
 
 
+class PayPageImageTests(unittest.TestCase):
+    def test_package_thumb_uses_versioned_pkg_img(self):
+        offer = {"id": "pkg-img-1", "has_image": 1, "image_sig": "abcdef0123456789deadbeef"}
+        html = portal_server.package_thumb(offer, eager=True)
+        self.assertIn('src="/pkg-img?id=pkg-img-1&v=abcdef0123456789"', html)
+        self.assertIn('loading="eager"', html)
+        self.assertIn('fetchpriority="high"', html)
+        self.assertIn('width="58"', html)
+        lazy = portal_server.package_thumb(offer)
+        self.assertIn('loading="lazy"', lazy)
+        self.assertNotIn("fetchpriority", lazy)
+
+    def test_pay_page_preloads_first_package_image(self):
+        row = {
+            "first_name": "Amina",
+            "last_name": "Wanjiku",
+            "phone": "0712345678",
+            "package_id": "pkg-1",
+            "package_name": "Home 10",
+            "pppoe_username": "0712345678",
+            "price": "500.00",
+            "cycle_days": 30,
+        }
+        offers = [
+            {
+                "id": "pkg-1",
+                "name": "Home 10",
+                "price": "500.00",
+                "download_mbps": 10,
+                "upload_mbps": 5,
+                "simultaneous_devices": 1,
+                "has_image": 1,
+                "image_sig": "feedface01234567",
+                "period": "1 month",
+            }
+        ]
+        html = portal_server.pay_page(row, offers, {"account_type": "paybill", "short_code": "123456"}).decode()
+        self.assertIn('<link rel=preload as=image href="/pkg-img?id=pkg-1&v=feedface01234567">', html)
+        self.assertIn('src="/pkg-img?id=pkg-1&v=feedface01234567"', html)
+        self.assertNotIn("data:image/", html)
+
+
 class PayPageMissingRowsTests(unittest.TestCase):
     def test_pay_page_renders_without_subscription_or_package(self):
         row = captive_row(price=None, cycle_days=None, package_name=None)

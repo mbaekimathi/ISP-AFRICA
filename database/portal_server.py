@@ -65,6 +65,27 @@ HOTSPOT_CONNECT_DELAY = int(os.environ.get("ISP_HOTSPOT_CONNECT_DELAY") or 8)
 PROBE_RESTART = int(os.environ.get("ISP_PROBE_RESTART") or 900)
 PROBE_SEEN = {}
 PROBE_LOCK = threading.Lock()
+# Decoded package thumbs — captive clients pull several /pkg-img requests
+# right after the HTML, and each used to open MySQL and base64-decode the
+# same MEDIUMTEXT blob again. A short in-process cache keeps those hits
+# off the database while the versioned URL still busts the browser cache
+# when a package image is replaced.
+PKG_IMG_CACHE = {}
+PKG_IMG_LOCK = threading.Lock()
+PKG_IMG_CACHE_MAX = 96
+PKG_IMG_TTL = 600
+# Presence + content fingerprint only — the offer list never pulls the
+# full data-URL into Python, which is what made the pay HTML itself slow.
+# %% so PyMySQL's param formatting leaves a single % for LIKE.
+PACKAGE_IMAGE_META = (
+    "CASE WHEN COALESCE(p.image_data_url, c.image_data_url) LIKE 'data:image/%%' "
+    "THEN 1 ELSE 0 END AS has_image, "
+    "MD5(COALESCE(p.image_data_url, c.image_data_url)) AS image_sig"
+)
+COMPANY_IMAGE_META = (
+    "CASE WHEN image_data_url LIKE 'data:image/%%' THEN 1 ELSE 0 END AS has_image, "
+    "MD5(image_data_url) AS image_sig"
+)
 
 def rate_ok(key, limit, window=60):
     now = time.time()
@@ -87,8 +108,8 @@ PAGE_CSS = """
 *{box-sizing:border-box;margin:0;padding:0}
 body{font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;color:#0b1220;min-height:100vh;display:flex;align-items:center;justify-content:center;padding:18px;background:#0b1220;background-image:radial-gradient(900px 480px at 12% -8%,rgba(37,99,235,.42),transparent 62%),radial-gradient(760px 420px at 92% 4%,rgba(6,182,212,.26),transparent 60%),linear-gradient(180deg,#0b1220 0%,#101c38 55%,#0b1220 100%);-webkit-font-smoothing:antialiased}
 .wrap{width:100%;max-width:432px}
-.card{background:#fff;border-radius:22px;padding:26px 24px;box-shadow:0 24px 70px rgba(2,8,26,.55);animation:rise .45s cubic-bezier(.22,1,.36,1)}
-@keyframes rise{from{opacity:0;transform:translateY(14px) scale(.985)}to{opacity:1;transform:none}}
+.card{background:#fff;border-radius:22px;padding:26px 24px;box-shadow:0 24px 70px rgba(2,8,26,.55);animation:rise .28s cubic-bezier(.22,1,.36,1)}
+@keyframes rise{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:none}}
 .brand{display:flex;align-items:center;gap:11px;margin-bottom:20px}
 .logo{width:38px;height:38px;flex-shrink:0;border-radius:12px;display:flex;align-items:center;justify-content:center;color:#fff;background:linear-gradient(135deg,#1d4ed8,#0891b2);box-shadow:0 6px 16px rgba(29,78,216,.35)}
 .logo svg{width:20px;height:20px}
@@ -482,13 +503,13 @@ def stk_state(result):
 
 def pppoe_packages(cursor, client_id, router_id):
     cursor.execute(
-        """
+        f"""
         SELECT p.id, p.name, p.price, p.download_mbps, p.upload_mbps, p.availability_routers,
                p.simultaneous_devices,
                COALESCE(p.service_type, c.service_type, 'pppoe') AS service_type,
                COALESCE(p.validity_amount, c.validity_amount, 1) AS validity_amount,
                COALESCE(p.validity_unit, c.validity_unit, 'months') AS validity_unit,
-               COALESCE(p.image_data_url, c.image_data_url) AS image_data_url
+               {PACKAGE_IMAGE_META}
         FROM isp_packages p
         LEFT JOIN company_packages c ON c.id = p.company_package_id
         WHERE p.client_id = %s AND p.status = 'active'
@@ -528,7 +549,8 @@ def pppoe_offers(cursor, row):
                 "download_mbps": row["download_mbps"],
                 "upload_mbps": row["upload_mbps"],
                 "simultaneous_devices": row.get("package_devices"),
-                "image_data_url": None,
+                "has_image": 0,
+                "image_sig": None,
                 "validity_amount": cycle,
                 "validity_unit": "days",
                 "period": f"{cycle} days",
@@ -543,22 +565,49 @@ IMG_FALLBACK = (
 )
 
 
-def package_thumb(offer):
+def has_package_image(offer):
+    if int(offer.get("has_image") or 0):
+        return True
+    return str(offer.get("image_data_url") or "").startswith("data:image/")
+
+
+def package_img_src(offer):
+    """Versioned /pkg-img URL so browsers can cache thumbs hard until the
+    package image itself changes (image_sig is an MD5 of the stored blob)."""
+    src = f'/pkg-img?id={esc(offer["id"])}'
+    sig = str(offer.get("image_sig") or "").strip()
+    if sig:
+        src += f"&v={esc(sig[:16])}"
+    return src
+
+
+def package_preload(offers):
+    """Hint the first package thumb early — captive HTML arrives first and
+    thumbs used to wait until the parser reached each <img>."""
+    for offer in offers:
+        if has_package_image(offer):
+            return f'<link rel=preload as=image href="{package_img_src(offer)}">'
+    return ""
+
+
+def package_thumb(offer, eager=False):
     """Package art is served by id from /pkg-img instead of being inlined —
     a few 60 KB+ data URLs made the captive page weigh hundreds of KB, which
     takes tens of seconds to pull over the throttled blocked-subscriber
     link and looked like the page never finished loading."""
-    if str(offer.get("image_data_url") or "").startswith("data:image/"):
-        return (
-            f'<img class=pi src="/pkg-img?id={esc(offer["id"])}" alt="" '
-            f'loading="lazy" onerror="{IMG_FALLBACK}">'
-        )
-    return '<span class="pi noimg">Wi-Fi</span>'
+    if not has_package_image(offer):
+        return '<span class="pi noimg">Wi-Fi</span>'
+    loading = "eager" if eager else "lazy"
+    priority = ' fetchpriority="high"' if eager else ""
+    return (
+        f'<img class=pi src="{package_img_src(offer)}" alt="" width="58" height="44" '
+        f'loading="{loading}" decoding="async"{priority} onerror="{IMG_FALLBACK}">'
+    )
 
 
 def pppoe_pick(offer, checked):
     price = Decimal(offer["price"] or 0)
-    thumb = package_thumb(offer)
+    thumb = package_thumb(offer, eager=checked)
     devices = int(offer.get("simultaneous_devices") or 0)
     device_text = "Unlimited devices" if devices <= 0 else f"Up to {devices} device{'s' if devices != 1 else ''}"
     return f"""<label class="pick">
@@ -764,6 +813,7 @@ refresh();
 <p class=sect>Choose a package</p>
 {picks}
 {stk}{manual}""",
+        head=package_preload(offers),
     ).replace(b"</style>", HOTSPOT_CSS.encode() + b"</style>")
 
 
@@ -1082,7 +1132,7 @@ def hotspot_packages(cursor, client_id, device_id):
                COALESCE(p.simultaneous_devices, c.simultaneous_devices, 1) AS devices,
                COALESCE(p.extra_device_price, c.extra_device_price) AS extra_device_price,
                COALESCE(p.extra_period_price, c.extra_period_price) AS extra_period_price,
-               COALESCE(p.image_data_url, c.image_data_url) AS image_data_url,
+               {PACKAGE_IMAGE_META},
                {pppoe_store.HOTSPOT_LIMIT_COLUMNS}
         FROM isp_packages p
         LEFT JOIN company_packages c ON c.id = p.company_package_id
@@ -1117,11 +1167,12 @@ def _company_offer_for(row, client_id, router_id):
 def company_hotspot_packages(cursor, client_id, device_id):
     """Active hotspot packages from the system catalog (employee side)."""
     cursor.execute(
-        """
+        f"""
         SELECT id, name, price, download_mbps, upload_mbps, availability_routers,
                validity_amount, validity_unit,
                simultaneous_devices AS devices,
-               extra_device_price, extra_period_price, image_data_url,
+               extra_device_price, extra_period_price,
+               {COMPANY_IMAGE_META},
                availability_clients, applies_to_all
         FROM company_packages
         WHERE status = 'active' AND service_type = 'hotspot'
@@ -1134,10 +1185,11 @@ def company_hotspot_packages(cursor, client_id, device_id):
 def company_pppoe_packages(cursor, client_id, router_id):
     """Active PPPoE packages from the system catalog (employee side)."""
     cursor.execute(
-        """
+        f"""
         SELECT id, name, price, download_mbps, upload_mbps, availability_routers,
                validity_amount, validity_unit, simultaneous_devices,
-               extra_device_price, extra_period_price, image_data_url,
+               extra_device_price, extra_period_price,
+               {COMPANY_IMAGE_META},
                availability_clients, applies_to_all
         FROM company_packages
         WHERE status = 'active' AND service_type = 'pppoe'
@@ -1164,11 +1216,46 @@ def offers_signature(offers, extra=""):
                 for key in (
                     "id", "name", "price", "download_mbps", "upload_mbps", "period",
                     "simultaneous_devices", "devices", "validity_amount", "validity_unit",
-                    "extra_device_price", "extra_period_price", "image_data_url",
+                    "extra_device_price", "extra_period_price", "has_image", "image_sig",
                 )
             )
         )
     return hashlib.sha1("\x00".join(parts).encode()).hexdigest()
+
+
+def package_image_map(cursor, package_ids):
+    """Stored data-URLs keyed by package id — used by admin portal previews
+    that cannot fetch /pkg-img from the captive origin."""
+    ids = []
+    seen = set()
+    for package_id in package_ids:
+        key = str(package_id or "")
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        ids.append(key)
+    if not ids:
+        return {}
+    out = {}
+    placeholders = ",".join(["%s"] * len(ids))
+    cursor.execute(
+        f"SELECT id, image_data_url FROM isp_packages WHERE id IN ({placeholders})",
+        ids,
+    )
+    for row in cursor.fetchall():
+        if row.get("image_data_url"):
+            out[str(row["id"])] = str(row["image_data_url"])
+    missing = [package_id for package_id in ids if package_id not in out]
+    if missing:
+        placeholders = ",".join(["%s"] * len(missing))
+        cursor.execute(
+            f"SELECT id, image_data_url FROM company_packages WHERE id IN ({placeholders})",
+            missing,
+        )
+        for row in cursor.fetchall():
+            if row.get("image_data_url"):
+                out[str(row["id"])] = str(row["image_data_url"])
+    return out
 
 
 def pay_signature(row, offers, payment):
@@ -1225,7 +1312,7 @@ def support_phone(cursor, client_id):
 
 def hotspot_pick(offer, checked, customize):
     price = Decimal(offer["price"] or 0)
-    thumb = package_thumb(offer)
+    thumb = package_thumb(offer, eager=checked)
     row = f"""<label class="pick">
 <input type="radio" name="pkg" value="{esc(offer['id'])}"{' checked' if checked else ''}>
 <span class=tick></span>
@@ -1506,7 +1593,9 @@ refresh();
 {redeem}
 {care}
 {script}"""
-    return page("Get online", body).replace(b"</style>", HOTSPOT_CSS.encode() + b"</style>")
+    return page("Get online", body, head=package_preload(offers)).replace(
+        b"</style>", HOTSPOT_CSS.encode() + b"</style>"
+    )
 
 
 def _hotspot_pending_rows(cursor, where, params):
@@ -1583,7 +1672,7 @@ def hotspot_pending_from_row(row):
     }
 
 
-def hotspot_payment_sms_text(pending, vouchers):
+def hotspot_payment_sms_text(pending, vouchers, template=None):
     """Payment-received SMS body — always includes every issued voucher code."""
     codes = [str(voucher.get("code") or "").strip() for voucher in (vouchers or []) if str(voucher.get("code") or "").strip()]
     package = str(pending.get("package_name") or "").strip() or "hotspot package"
@@ -1592,11 +1681,37 @@ def hotspot_payment_sms_text(pending, vouchers):
     except (InvalidOperation, TypeError, ValueError):
         amount = str(pending.get("amount") or "").strip() or "0.00"
     if len(codes) == 1:
+        voucher = codes[0]
+        vouchers_text = codes[0]
         voucher_line = f"Voucher: {codes[0]}"
     elif codes:
-        voucher_line = "Vouchers: " + ", ".join(codes)
+        voucher = codes[0]
+        vouchers_text = ", ".join(codes)
+        voucher_line = "Vouchers: " + vouchers_text
     else:
+        voucher = ""
+        vouchers_text = ""
         voucher_line = "Your hotspot access is ready."
+    values = {
+        "package": package,
+        "amount": amount,
+        "voucher": voucher or vouchers_text or "ready",
+        "vouchers": vouchers_text or voucher or "ready",
+        "name": str(pending.get("customer_name") or pending.get("name") or "").strip() or "customer",
+        "phone": str(pending.get("phone") or "").strip(),
+    }
+    if template:
+        try:
+            import api as api_mod
+
+            filled = api_mod.fill_notification_message(template, values).strip()
+            if filled:
+                # Keep voucher codes in the SMS even if the custom template omitted them.
+                if codes and not any(code in filled for code in codes):
+                    return f"{filled} {voucher_line}."
+                return filled
+        except Exception:
+            pass
     return (
         f"Payment received for {package} (KSh {amount}). {voucher_line}. "
         "Enter a voucher under Have a voucher? to connect."
@@ -1645,7 +1760,14 @@ def notify_hotspot_payment_received(cursor, pending, vouchers):
     details = api_mod.communication_details(sms.get("details"))
     if details.get("enabled") is False:
         return False
-    result = api_mod.send_sms(sms, phone, hotspot_payment_sms_text(pending, vouchers))
+    template = api_mod.resolve_notification_message(
+        cursor,
+        api_mod.ISP_HOTSPOT_NOTIFICATION_DEFAULT_MESSAGES,
+        "paymentReceived",
+        client_id=client_id,
+        audience="hotspot",
+    )
+    result = api_mod.send_sms(sms, phone, hotspot_payment_sms_text(pending, vouchers, template=template))
     return bool(result.get("ok"))
 
 
@@ -2302,36 +2424,75 @@ class PortalHandler(BaseHTTPRequestHandler):
         package_id = str(package_id or "")
         if not re.fullmatch(r"[0-9A-Za-z][0-9A-Za-z-]{0,63}", package_id):
             return self._send(b"not found", 404, "text/plain")
-        db = self.server.connect()
-        try:
-            with db.cursor() as cursor:
-                cursor.execute("SELECT image_data_url FROM isp_packages WHERE id = %s", (package_id,))
-                row = cursor.fetchone()
-                if row is None:
-                    cursor.execute("SELECT image_data_url FROM company_packages WHERE id = %s", (package_id,))
+        query = parse_qs(urlparse(self.path).query)
+        version = str((query.get("v") or [""])[0] or "")[:32]
+        now = time.time()
+        cached = None
+        with PKG_IMG_LOCK:
+            entry = PKG_IMG_CACHE.get(package_id)
+            if entry and entry[0] > now:
+                cached = entry
+        if cached is None:
+            db = self.server.connect()
+            try:
+                with db.cursor() as cursor:
+                    cursor.execute("SELECT image_data_url FROM isp_packages WHERE id = %s", (package_id,))
                     row = cursor.fetchone()
-        finally:
-            db.close()
-        match = re.match(
-            r"^data:(image/(?:png|jpe?g|gif|webp|svg\+xml|x-icon));base64,(.*)$",
-            str((row or {}).get("image_data_url") or ""),
-            re.S,
-        )
-        if not match:
-            return self._send(b"not found", 404, "text/plain")
-        try:
-            raw = base64.b64decode(match.group(2), validate=True)
-        except ValueError:
-            return self._send(b"not found", 404, "text/plain")
-        if not raw or len(raw) > 4_000_000:
-            return self._send(b"not found", 404, "text/plain")
+                    if row is None:
+                        cursor.execute(
+                            "SELECT image_data_url FROM company_packages WHERE id = %s",
+                            (package_id,),
+                        )
+                        row = cursor.fetchone()
+            finally:
+                db.close()
+            match = re.match(
+                r"^data:(image/(?:png|jpe?g|gif|webp|svg\+xml|x-icon));base64,(.*)$",
+                str((row or {}).get("image_data_url") or ""),
+                re.S,
+            )
+            if not match:
+                return self._send(b"not found", 404, "text/plain")
+            try:
+                raw = base64.b64decode(match.group(2), validate=True)
+            except ValueError:
+                return self._send(b"not found", 404, "text/plain")
+            if not raw or len(raw) > 4_000_000:
+                return self._send(b"not found", 404, "text/plain")
+            kind = match.group(1)
+            etag = '"' + hashlib.sha1(raw).hexdigest()[:24] + '"'
+            cached = (now + PKG_IMG_TTL, kind, raw, etag)
+            with PKG_IMG_LOCK:
+                PKG_IMG_CACHE[package_id] = cached
+                if len(PKG_IMG_CACHE) > PKG_IMG_CACHE_MAX:
+                    # Drop the oldest entries — captive traffic is bursty and
+                    # we only need the packages currently on sale.
+                    for stale in sorted(PKG_IMG_CACHE, key=lambda key: PKG_IMG_CACHE[key][0])[
+                        : max(1, len(PKG_IMG_CACHE) - PKG_IMG_CACHE_MAX)
+                    ]:
+                        PKG_IMG_CACHE.pop(stale, None)
+        _, kind, raw, etag = cached
+        inm = self.headers.get("If-None-Match")
+        if inm and inm == etag:
+            self.send_response(304)
+            self.send_header("ETag", etag)
+            self.send_header(
+                "Cache-Control",
+                "public, max-age=604800, immutable" if version else "private, max-age=600",
+            )
+            self.end_headers()
+            return
         self.send_response(200)
-        self.send_header("Content-Type", match.group(1))
+        self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(raw)))
-        # Package art changes rarely; a short cache saves refetching every
-        # image on each portal reload while the offer signature still forces
-        # a fresh page when a package is actually edited.
-        self.send_header("Cache-Control", "private, max-age=300")
+        self.send_header("ETag", etag)
+        # Versioned URLs (image_sig in ?v=) are immutable — browsers keep them
+        # across portal reloads. Unversioned hits still get a short private
+        # cache so a package edit shows up within a few minutes.
+        self.send_header(
+            "Cache-Control",
+            "public, max-age=604800, immutable" if version else "private, max-age=600",
+        )
         self.send_header("X-Content-Type-Options", "nosniff")
         self.end_headers()
         self.wfile.write(raw)
@@ -2513,6 +2674,25 @@ class PortalHandler(BaseHTTPRequestHandler):
                         phone,
                         subscriber_id=row["subscriber_id"],
                     )
+            try:
+                import pppoe_notify
+
+                pppoe_notify.notify_stk_pushed(
+                    cursor,
+                    {
+                        "id": row["subscriber_id"],
+                        "client_id": row["client_id"],
+                        "first_name": row.get("first_name"),
+                        "last_name": row.get("last_name"),
+                        "phone": phone,
+                        "pppoe_username": row.get("pppoe_username"),
+                        "package_name": offer.get("name") or row.get("package_name"),
+                        "price": price,
+                    },
+                    amount,
+                )
+            except Exception as error:
+                print(f"event=pppoe-stk-sms checkout={checkout} error={error}", flush=True)
             db.commit()
         except Exception:
             db.rollback()

@@ -359,7 +359,15 @@ export function WifiPaymentPage({ kind }: { kind: keyof typeof copy }) {
                     onChange={() => setSelected(offer.id)}
                   />
                   {offer.imageDataUrl ? (
-                    <img src={offer.imageDataUrl} alt="" className="h-12 w-14 rounded-lg object-cover" />
+                    <img
+                      src={offer.imageDataUrl}
+                      alt=""
+                      width={56}
+                      height={48}
+                      loading="lazy"
+                      decoding="async"
+                      className="h-12 w-14 rounded-lg object-cover"
+                    />
                   ) : (
                     <span className="flex h-12 w-14 items-center justify-center rounded-lg bg-primary/10 text-primary">
                       <Wifi className="h-5 w-5" aria-hidden="true" />

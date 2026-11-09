@@ -7,7 +7,7 @@ import { PageHeader } from "@/components/ui/DetailGrid";
 import { FormField } from "@/components/ui/FormField";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
-import { fileToPackageImage } from "@/lib/accounts";
+import { ADVERT_IMAGE_OPTIONS, fileToPackageImage } from "@/lib/accounts";
 import { apiRequest } from "@/lib/api";
 import { useEmployeeAuth } from "@/providers/EmployeeAuthProvider";
 
@@ -239,7 +239,7 @@ export function CompanyAdvertsPage() {
                 onChange={(event) => {
                   const file = event.target.files?.[0];
                   if (!file) return;
-                  void fileToPackageImage(file)
+                  void fileToPackageImage(file, ADVERT_IMAGE_OPTIONS)
                     .then((image) => update("imageDataUrl", image))
                     .catch((cause: unknown) => {
                       setError(cause instanceof Error ? cause.message : "Could not use that image.");

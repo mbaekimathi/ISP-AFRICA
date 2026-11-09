@@ -308,6 +308,8 @@ def throttle_pair(download, upload, cap_down, cap_up, required, message):
 
 def clean_package_image(value):
     image = str(value or "")
+    # New uploads are compressed to ~320×180 on the client; keep the higher
+    # ceiling so older 640×360 package art can still be saved on edit.
     if not image.startswith("data:image/jpeg") or ";base64," not in image or len(image) > 200_000:
         raise ApiError(400, "Upload a package image.")
     return image
@@ -1184,11 +1186,169 @@ ISP_HOTSPOT_NOTIFICATION_TOGGLES = {
 }
 
 
+COMPANY_NOTIFICATION_DEFAULT_MESSAGES = {
+    "serverUnreachable": "The company portal lost contact with the account service.",
+    "mikrotikUnreachable": "{router} ({isp}) is unreachable: {reason}.",
+    "mikrotikAdded": "{isp} onboarded router {router} at {site}.",
+    "ispRegistered": "New ISP client {isp} registered and is waiting for review.",
+    "systemPerformance": "Host {metric} is at {percent}% — check System performance.",
+    "communicationsFailed": "The company communications API stopped working. Check company Communications settings.",
+    "paymentsFailed": "The company payments API stopped working. Check company payment settings.",
+}
+
+
+ISP_NOTIFICATION_DEFAULT_MESSAGES = {
+    "mikrotikOnboarded": "Router {router} at {site} was onboarded and is under management.",
+    "mikrotikUnreachable": "{router} is unreachable: {reason}.",
+    "mikrotikNoInternet": "{router} is online but has no internet on its uplinks.",
+    "clientCannotSurf": "{name} on {router} is connected but cannot surf.",
+    "subscriptionEnding": "{name}'s {package} package ends on {expiry}.",
+    "communicationsFailed": "The communications API for this account stopped working. Check Communications settings.",
+    "paymentsFailed": "The payments API for this account stopped working. Check payment settings.",
+    "serverUnreachable": "This portal lost contact with the account service. Check connectivity and try again.",
+}
+
+
+ISP_CLIENT_NOTIFICATION_DEFAULT_MESSAGES = {
+    "subscriptionEnding": (
+        "Hi {name}, your {package} subscription ends on {expiry}. "
+        "Pay now to renew before service stops: {link}"
+    ),
+    "subscriptionExpired": (
+        "Hi {name}, your {package} subscription has expired and service has stopped. "
+        "Pay here to reconnect: {link}"
+    ),
+    "stkPushed": (
+        "Hi {name}, an M-Pesa prompt of KSh {amount} was sent. "
+        "If you missed it, pay here: {link}"
+    ),
+    "paymentReceived": (
+        "Hi {name}, payment of KSh {amount} received. Your {package} package is active until {expiry}."
+    ),
+    "accountActivated": "Welcome {name}. Your {package} account is now active until {expiry}.",
+    "accountPaused": (
+        "Hi {name}, your internet account has been paused. Contact support if you need it restored."
+    ),
+    "maintenance": (
+        "Hi {name}, maintenance is affecting service on {router}. "
+        "Surfing may be unavailable until work is finished."
+    ),
+}
+
+
+ISP_HOTSPOT_NOTIFICATION_DEFAULT_MESSAGES = {
+    "sessionEnding": "Hi {name}, your hotspot session ends at {expiry}. Buy more time to stay online.",
+    "sessionExpired": "Hi {name}, your hotspot session has expired. Purchase a new voucher to reconnect.",
+    "paymentReceived": (
+        "Payment received for {package} (KSh {amount}). Voucher: {voucher}. "
+        "Enter a voucher under Have a voucher? to connect."
+    ),
+    "voucherActivated": "Hi {name}, voucher {voucher} for {package} is active until {expiry}. Enjoy your session.",
+    "maintenance": (
+        "Hi {name}, maintenance is affecting hotspot service on {router}. "
+        "Surfing may be unavailable until work is finished."
+    ),
+}
+
+
+ISP_NOTIFICATION_MESSAGE_DEFAULTS = {
+    "me": ISP_NOTIFICATION_DEFAULT_MESSAGES,
+    "client": ISP_CLIENT_NOTIFICATION_DEFAULT_MESSAGES,
+    "hotspot": ISP_HOTSPOT_NOTIFICATION_DEFAULT_MESSAGES,
+}
+
+
 def public_notification_settings(row, toggles):
     return {
         key: bool(row[column]) if row and column in row else True
         for key, column in toggles.items()
     }
+
+
+def fill_notification_message(template, values=None):
+    """Replace {placeholders} in a notification template; unknown keys stay put."""
+    values = values or {}
+
+    def replace(match):
+        key = match.group(1)
+        if key in values and values[key] is not None:
+            return str(values[key])
+        return match.group(0)
+
+    return re.sub(r"\{([a-zA-Z0-9_]+)\}", replace, str(template or ""))
+
+
+def clean_notification_message(value, maximum=640):
+    message = str(value or "").strip()
+    if not message:
+        raise ApiError(400, "Enter a notification message.")
+    if len(message) > maximum:
+        raise ApiError(400, f"Keep the notification message under {maximum} characters.")
+    return message
+
+
+def load_notification_messages(cursor, defaults, client_id=None, audience=None):
+    """Custom overrides only — missing keys mean the default message is in use."""
+    if client_id is None:
+        cursor.execute("SELECT event_key, message FROM company_notification_messages")
+    else:
+        cursor.execute(
+            """
+            SELECT event_key, message
+            FROM isp_notification_messages
+            WHERE client_id = %s AND audience = %s
+            """,
+            (client_id, audience),
+        )
+    rows = {row["event_key"]: str(row["message"] or "") for row in cursor.fetchall()}
+    messages = {}
+    for key, default in defaults.items():
+        custom = rows.get(key, "").strip()
+        if custom and custom != default.strip():
+            messages[key] = custom
+    return messages
+
+
+def resolve_notification_message(cursor, defaults, key, client_id=None, audience=None):
+    messages = load_notification_messages(cursor, defaults, client_id=client_id, audience=audience)
+    return messages.get(key) or defaults.get(key) or ""
+
+
+def save_notification_message_row(cursor, key, message, defaults, client_id=None, audience=None):
+    default = defaults.get(key)
+    if default is None:
+        raise ApiError(400, "That notification event was not found.")
+    if message is None or str(message).strip() == "" or str(message).strip() == default.strip():
+        if client_id is None:
+            cursor.execute("DELETE FROM company_notification_messages WHERE event_key = %s", (key,))
+        else:
+            cursor.execute(
+                """
+                DELETE FROM isp_notification_messages
+                WHERE client_id = %s AND audience = %s AND event_key = %s
+                """,
+                (client_id, audience, key),
+            )
+        return
+    cleaned = clean_notification_message(message)
+    if client_id is None:
+        cursor.execute(
+            """
+            INSERT INTO company_notification_messages (event_key, message)
+            VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE message = VALUES(message)
+            """,
+            (key, cleaned),
+        )
+    else:
+        cursor.execute(
+            """
+            INSERT INTO isp_notification_messages (client_id, audience, event_key, message)
+            VALUES (%s, %s, %s, %s)
+            ON DUPLICATE KEY UPDATE message = VALUES(message)
+            """,
+            (client_id, audience, key, cleaned),
+        )
 
 
 def clean_company(payload):
@@ -2137,6 +2297,15 @@ def ensure_schema():
                 )
             cursor.execute(
                 """
+                CREATE TABLE IF NOT EXISTS company_notification_messages (
+                  event_key VARCHAR(64) NOT NULL PRIMARY KEY,
+                  message TEXT NOT NULL,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
                 CREATE TABLE IF NOT EXISTS company_push_settings (
                   id TINYINT NOT NULL PRIMARY KEY,
                   vapid_public VARCHAR(255) NOT NULL,
@@ -2404,6 +2573,18 @@ def ensure_schema():
                   voucher_activated TINYINT NOT NULL DEFAULT 1,
                   maintenance TINYINT NOT NULL DEFAULT 1,
                   updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_notification_messages (
+                  client_id CHAR(36) NOT NULL,
+                  audience VARCHAR(16) NOT NULL,
+                  event_key VARCHAR(64) NOT NULL,
+                  message TEXT NOT NULL,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                  PRIMARY KEY (client_id, audience, event_key)
                 )
                 """
             )
@@ -3387,9 +3568,14 @@ def portal_preview_html(body, sig="", interactive=False, images=None):
     # Live pages fetch package art from the portal's /pkg-img endpoint; the
     # preview has no portal origin, so the stored data URLs are swapped back
     # in — preview weight does not matter the way the captive pages' does.
+    # URLs may include &v=<image_sig> for browser caching on the live portal.
     for package_id, data_url in (images or {}).items():
         if data_url:
-            html = html.replace(f'src="/pkg-img?id={package_id}"', f'src="{data_url}"')
+            html = re.sub(
+                rf'src="/pkg-img\?id={re.escape(str(package_id))}(?:&amp;v=[^"]*|&v=[^"]*)?"',
+                f'src="{data_url}"',
+                html,
+            )
     if interactive:
         stub = PREVIEW_STUB.replace("__SIG__", json.dumps(sig))
         html = html.replace("<div class=card>", PREVIEW_BANNER, 1).replace("</body>", stub + "</body>")
@@ -3809,6 +3995,8 @@ class Handler(BaseHTTPRequestHandler):
             print(f"event=request method={method} path={path} status={status} ms={elapsed}", flush=True)
 
     def dispatch(self, cursor, method, path, payload, token, query):
+        if path.startswith("/api/public/pay/"):
+            return self.public_pay(cursor, method, path, payload, query), None
         handled = pppoe_store.dispatch(cursor, method, path, payload, token, query)
         if handled is not None:
             return handled
@@ -3933,6 +4121,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.read_company_notifications(cursor, token.get("isp_employee_session")), None
         if method == "POST" and path == "/api/employee/company/notifications":
             return self.save_company_notifications(cursor, payload, token.get("isp_employee_session")), None
+        if method == "POST" and path == "/api/employee/company/notifications/messages":
+            return self.save_company_notification_message(cursor, payload, token.get("isp_employee_session")), None
         if method == "GET" and path == "/api/employee/company/notifications/feed":
             return self.company_notification_feed(cursor, token.get("isp_employee_session")), None
         if method == "GET" and path == "/api/employee/company/notifications/push":
@@ -4117,6 +4307,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.read_notifications(cursor, token.get("isp_client_session")), None
         if method == "POST" and path == "/api/notifications":
             return self.save_notifications(cursor, payload, token.get("isp_client_session")), None
+        if method == "POST" and path == "/api/notifications/messages":
+            return self.save_notification_message(cursor, payload, token.get("isp_client_session")), None
         if method == "GET" and path == "/api/notifications/message-recipients":
             return self.message_recipients(cursor, token.get("isp_client_session")), None
         if method == "POST" and path == "/api/notifications/message":
@@ -4134,6 +4326,150 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST" and path == "/api/notifications/push/test":
             return self.test_client_push(cursor, payload, token.get("isp_client_session")), None
         raise ApiError(404, "That account request was not found.")
+
+    def public_pay_row(self, cursor, token):
+        token = str(token or "").strip()
+        if not token or len(token) < 12:
+            raise ApiError(404, "That payment link was not found.")
+        cursor.execute(
+            """
+            SELECT s.id, s.client_id, s.first_name, s.last_name, s.phone, s.pppoe_username, s.status,
+                   s.package_id, s.pay_token, sub.expiry_date, sub.price, sub.cycle_days,
+                   p.name AS package_name, p.price AS package_price
+            FROM pppoe_subscribers s
+            LEFT JOIN pppoe_subscriptions sub ON sub.subscriber_id = s.id
+            LEFT JOIN isp_packages p ON p.id = s.package_id
+            WHERE s.pay_token = %s AND s.deleted = 0 AND s.service = 'pppoe'
+            LIMIT 1
+            """,
+            (token,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise ApiError(404, "That payment link was not found.")
+        return row
+
+    def public_pay_page(self, row, link):
+        from html import escape as esc
+
+        name = f"{row.get('first_name') or ''} {row.get('last_name') or ''}".strip() or "Customer"
+        package = str(row.get("package_name") or "Internet package").strip()
+        try:
+            amount = format(Decimal(row.get("price") or row.get("package_price") or 0), ".2f")
+        except (InvalidOperation, TypeError, ValueError):
+            amount = "0.00"
+        phone = str(row.get("phone") or "")
+        expiry = row.get("expiry_date")
+        expiry_text = expiry.strftime("%d %b %Y") if hasattr(expiry, "strftime") else str(expiry or "")
+        status = str(row.get("status") or "")
+        return f"""<!doctype html>
+<html lang="en"><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Pay for internet</title>
+<style>
+body{{margin:0;min-height:100vh;display:flex;align-items:center;justify-content:center;
+background:radial-gradient(1000px 640px at 50% -20%,#1e3a5f,#0b1220);color:#e2e8f0;
+font:15px/1.5 -apple-system,"Segoe UI",Roboto,sans-serif;padding:20px}}
+.card{{width:100%;max-width:420px;background:rgba(15,23,42,.92);border:1px solid #243b63;border-radius:18px;
+padding:22px;box-shadow:0 24px 60px rgba(0,0,0,.45)}}
+h1{{margin:0 0 6px;font-size:1.35rem}} .sub{{color:#94a3b8;margin:0 0 18px}}
+label{{display:block;font-size:.78rem;font-weight:700;letter-spacing:.04em;text-transform:uppercase;color:#94a3b8;margin:12px 0 6px}}
+input{{width:100%;box-sizing:border-box;border-radius:10px;border:1px solid #334155;background:#0f172a;color:#f8fafc;
+padding:12px 14px;font:inherit}} button{{width:100%;margin-top:16px;border:0;border-radius:12px;padding:13px 16px;
+font:inherit;font-weight:700;background:#22c55e;color:#052e16;cursor:pointer}}
+button:disabled{{opacity:.6;cursor:wait}} .meta{{display:grid;gap:8px;margin:0 0 8px}}
+.row{{display:flex;justify-content:space-between;gap:12px;padding:10px 12px;border-radius:10px;background:#111827;border:1px solid #1f2937}}
+.row span:last-child{{font-weight:700;color:#f8fafc}} .err{{margin-top:12px;color:#fecaca;background:#7f1d1d55;
+border:1px solid #991b1b;border-radius:10px;padding:10px 12px}} .ok{{margin-top:12px;color:#bbf7d0}}
+.hint{{color:#94a3b8;font-size:.9rem;margin-top:12px}}
+</style></head><body><div class="card">
+<h1>Hi {esc(name)}</h1>
+<p class="sub">Pay for your account — an M-Pesa prompt will open on your phone.</p>
+<div class="meta">
+<div class="row"><span>Package</span><span>{esc(package)}</span></div>
+{"<div class='row'><span>Expires</span><span>" + esc(expiry_text) + "</span></div>" if expiry_text else ""}
+<div class="row"><span>Status</span><span>{esc(status or "unknown")}</span></div>
+</div>
+<label for="phone">M-Pesa phone</label>
+<input id="phone" inputmode="tel" autocomplete="tel" value="{esc(phone)}">
+<label for="amount">Amount (KSh)</label>
+<input id="amount" inputmode="decimal" value="{esc(amount)}">
+<button id="pay" type="button">Pay with M-Pesa</button>
+<div id="msg" aria-live="polite"></div>
+<p class="hint">Keep this page open after you approve the prompt. Your line reconnects once payment is confirmed.</p>
+<script>
+const BASE={json.dumps(link)};
+let cid=null,paying=false;
+async function poll(){{
+ if(!cid)return;
+ try{{
+  const r=await fetch(BASE+'/status?id='+encodeURIComponent(cid));
+  const b=await r.json();
+  if(b.state==='paid'){{document.getElementById('msg').innerHTML='<div class=ok>Payment received. Your internet will reconnect shortly.</div>';cid=null;return;}}
+  if(b.state==='failed'){{document.getElementById('msg').innerHTML='<div class=err>'+(b.reason||'Payment was not completed.')+'</div>';cid=null;paying=false;document.getElementById('pay').disabled=false;return;}}
+ }}catch(e){{}}
+ setTimeout(poll,2500);
+}}
+document.getElementById('pay').onclick=async function(){{
+ if(paying)return; paying=true; this.disabled=true; this.textContent='Sending M-Pesa prompt…';
+ document.getElementById('msg').innerHTML='';
+ try{{
+  const r=await fetch(BASE+'/stk',{{method:'POST',headers:{{'Content-Type':'application/json'}},
+   body:JSON.stringify({{phone:document.getElementById('phone').value,amount:document.getElementById('amount').value}})}});
+  const b=await r.json();
+  if(b.checkoutId){{cid=b.checkoutId;document.getElementById('msg').innerHTML='<div class=ok>Approve the M-Pesa prompt on your phone.</div>';poll();return;}}
+  document.getElementById('msg').innerHTML='<div class=err>'+(b.error||'Could not start the payment.')+'</div>';
+ }}catch(e){{document.getElementById('msg').innerHTML='<div class=err>Could not reach the payment service.</div>';}}
+ paying=false; this.disabled=false; this.textContent='Pay with M-Pesa';
+}};
+</script></div></body></html>"""
+
+    def public_pay(self, cursor, method, path, payload, query):
+        parts = [part for part in path.strip("/").split("/") if part]
+        # /api/public/pay/{token}[/stk|/status]
+        if len(parts) < 4 or parts[0] != "api" or parts[1] != "public" or parts[2] != "pay":
+            raise ApiError(404, "That payment link was not found.")
+        token = parts[3]
+        action = parts[4] if len(parts) > 4 else ""
+        row = self.public_pay_row(cursor, token)
+        import pppoe_notify
+
+        link = pppoe_notify.payment_link(cursor, row["id"]) or f"/api/public/pay/{token}"
+        if method == "GET" and not action:
+            return PreviewPage(self.public_pay_page(row, link))
+        if method == "POST" and action == "stk":
+            started = pppoe_store.start_subscriber_stk(
+                cursor,
+                row["client_id"],
+                row["id"],
+                payload.get("amount") or row.get("price") or row.get("package_price"),
+                phone=payload.get("phone") or row.get("phone"),
+                package_id=row.get("package_id"),
+            )
+            return started
+        if method == "GET" and action == "status":
+            checkout = str((query.get("id") or [""])[0] or "").strip()
+            if not checkout:
+                raise ApiError(400, "Missing payment id.")
+            cursor.execute(
+                """
+                SELECT status, last_error
+                FROM pppoe_stk_requests
+                WHERE checkout_id = %s AND subscriber_id = %s
+                LIMIT 1
+                """,
+                (checkout, row["id"]),
+            )
+            request = cursor.fetchone()
+            if not request:
+                raise ApiError(404, "That payment was not found.")
+            status = str(request.get("status") or "")
+            if status == "paid":
+                return {"state": "paid"}
+            if status == "failed":
+                return {"state": "failed", "reason": request.get("last_error") or "Payment was not completed."}
+            return {"state": "pending"}
+        raise ApiError(404, "That payment link was not found.")
 
     def login(self, cursor, kind, payload):
         code = str(payload.get("loginCode", "")).strip()
@@ -6300,7 +6636,7 @@ class Handler(BaseHTTPRequestHandler):
             ),
         ]
         sig = portal_server.hotspot_signature(offers, payment)
-        images = {str(offer["id"]): str(offer.get("image_data_url") or "") for offer in offers}
+        images = portal_server.package_image_map(cursor, [offer["id"] for offer in offers])
         return [
             {
                 "id": slug,
@@ -6393,7 +6729,7 @@ class Handler(BaseHTTPRequestHandler):
             ),
         ]
         sig = portal_server.pay_signature(subscriber, offers, payment)
-        images = {str(offer["id"]): str(offer.get("image_data_url") or "") for offer in offers}
+        images = portal_server.package_image_map(cursor, [offer["id"] for offer in offers])
         return [
             {
                 "id": slug,
@@ -7149,7 +7485,33 @@ class Handler(BaseHTTPRequestHandler):
             "hotspotNotifications": public_notification_settings(
                 self.isp_hotspot_notification_row(cursor, client_id), ISP_HOTSPOT_NOTIFICATION_TOGGLES
             ),
+            "notificationMessages": load_notification_messages(
+                cursor, ISP_NOTIFICATION_DEFAULT_MESSAGES, client_id=client_id, audience="me"
+            ),
+            "clientNotificationMessages": load_notification_messages(
+                cursor, ISP_CLIENT_NOTIFICATION_DEFAULT_MESSAGES, client_id=client_id, audience="client"
+            ),
+            "hotspotNotificationMessages": load_notification_messages(
+                cursor, ISP_HOTSPOT_NOTIFICATION_DEFAULT_MESSAGES, client_id=client_id, audience="hotspot"
+            ),
         }
+
+    def save_notification_message(self, cursor, payload, token):
+        client_id = self.require_notification_client(cursor, token)
+        audience = str(payload.get("audience") or "").strip()
+        key = str(payload.get("key") or "").strip()
+        defaults = ISP_NOTIFICATION_MESSAGE_DEFAULTS.get(audience)
+        if defaults is None:
+            raise ApiError(400, "Choose the me, client, or hotspot notification audience.")
+        save_notification_message_row(
+            cursor,
+            key,
+            payload.get("message"),
+            defaults,
+            client_id=client_id,
+            audience=audience,
+        )
+        return self.read_notifications(cursor, token)
 
     def save_notifications(self, cursor, payload, token):
         client_id = self.require_notification_client(cursor, token)
@@ -8448,7 +8810,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def read_company_notifications(self, cursor, token):
         self.require_company_employee(cursor, token, "company notifications")
-        return {"notifications": public_notification_settings(self.company_notification_row(cursor), NOTIFICATION_TOGGLES)}
+        return {
+            "notifications": public_notification_settings(self.company_notification_row(cursor), NOTIFICATION_TOGGLES),
+            "notificationMessages": load_notification_messages(cursor, COMPANY_NOTIFICATION_DEFAULT_MESSAGES),
+        }
 
     def save_company_notifications(self, cursor, payload, token):
         self.require_company_employee(cursor, token, "company notifications", write=True)
@@ -8479,6 +8844,17 @@ class Handler(BaseHTTPRequestHandler):
                 fields["communicationsFailed"],
                 fields["paymentsFailed"],
             ),
+        )
+        return self.read_company_notifications(cursor, token)
+
+    def save_company_notification_message(self, cursor, payload, token):
+        self.require_company_employee(cursor, token, "company notifications", write=True)
+        key = str(payload.get("key") or "").strip()
+        save_notification_message_row(
+            cursor,
+            key,
+            payload.get("message"),
+            COMPANY_NOTIFICATION_DEFAULT_MESSAGES,
         )
         return self.read_company_notifications(cursor, token)
 
