@@ -332,7 +332,7 @@ export function MikrotiksPage() {
                   </p>
                 </div>
               </div>
-              <ul className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+              <ul className="-mx-1 flex snap-x snap-mandatory gap-4 overflow-x-auto px-1 pb-2">
                 {group.devices.map((device) => {
                   const suspended = device.status === "suspended";
                   const busy = busyId === device.id;
@@ -340,7 +340,7 @@ export function MikrotiksPage() {
                   const StatusIcon = connection.Icon;
                   const healthPercent = typeof device.healthPercent === "number" ? device.healthPercent : 100;
                   return (
-                    <li key={device.id}>
+                    <li key={device.id} className="w-[min(100%,22rem)] shrink-0 snap-start">
                       <article className="card flex h-full flex-col p-5 transition-transform duration-fast ease-out hover:-translate-y-0.5">
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
