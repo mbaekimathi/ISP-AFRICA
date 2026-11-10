@@ -1057,16 +1057,17 @@ def sms_destination(phone):
     return normalized if normalized.startswith("254") else normalized
 
 
-def load_active_sms(cursor, client_id):
-    """Resolve the SMS gateway this ISP account currently uses (own or company)."""
+def load_active_channel(cursor, client_id, channel):
+    """Resolve the SMS/WhatsApp/email gateway this ISP account currently uses."""
     cursor.execute(
-        "SELECT mode FROM isp_communication_preferences WHERE client_id = %s AND channel = 'sms'",
-        (client_id,),
+        "SELECT mode FROM isp_communication_preferences WHERE client_id = %s AND channel = %s",
+        (client_id, channel),
     )
     mode = ((cursor.fetchone() or {}).get("mode") or "own").strip()
     if mode == "company":
         cursor.execute(
-            "SELECT channel, endpoint, sender, api_key, details FROM company_communication_settings WHERE channel = 'sms'"
+            "SELECT channel, endpoint, sender, api_key, details FROM company_communication_settings WHERE channel = %s",
+            (channel,),
         )
         row = cursor.fetchone()
     else:
@@ -1074,18 +1075,96 @@ def load_active_sms(cursor, client_id):
             """
             SELECT channel, endpoint, sender, api_key, details
             FROM isp_communication_settings
-            WHERE client_id = %s AND channel = 'sms'
+            WHERE client_id = %s AND channel = %s
             """,
-            (client_id,),
+            (client_id, channel),
         )
         row = cursor.fetchone()
         if not row:
             cursor.execute(
-                "SELECT channel, endpoint, sender, api_key, details FROM company_communication_settings WHERE channel = 'sms'"
+                "SELECT channel, endpoint, sender, api_key, details FROM company_communication_settings WHERE channel = %s",
+                (channel,),
             )
             row = cursor.fetchone()
             mode = "company" if row else mode
     return mode, row
+
+
+def load_active_sms(cursor, client_id):
+    """Resolve the SMS gateway this ISP account currently uses (own or company)."""
+    return load_active_channel(cursor, client_id, "sms")
+
+
+def load_active_email(cursor, client_id):
+    """Resolve the SMTP settings this ISP account currently uses (own or company)."""
+    return load_active_channel(cursor, client_id, "email")
+
+
+def send_email(row, to_address, subject, text_body, html_body=""):
+    """Deliver one email through the saved company/ISP SMTP settings."""
+    import smtplib
+    from email.message import EmailMessage
+
+    row = row or {}
+    details = communication_details(row.get("details"))
+    if details.get("enabled") is False:
+        return {"ok": False, "reason": "The email channel is turned off."}
+    host = str(row.get("endpoint") or "").strip()
+    sender = str(row.get("sender") or "").strip()
+    password = open_secret(row.get("api_key") or "")
+    username = str(details.get("username") or sender or "").strip()
+    from_name = str(details.get("fromName") or "ISP CENTRIC").strip() or "ISP CENTRIC"
+    port = int(details.get("port") or 465)
+    use_tls = bool(details.get("useTls", True))
+    to_address = str(to_address or "").strip()
+    subject = str(subject or "").strip()
+    text_body = str(text_body or "").strip()
+    if not host:
+        return {"ok": False, "reason": "Save an SMTP host in Communications → Email first."}
+    if not sender:
+        return {"ok": False, "reason": "Save the from email address in Communications → Email first."}
+    if not to_address or "@" not in to_address:
+        return {"ok": False, "reason": "That account has no valid email address."}
+    if not subject or not text_body:
+        return {"ok": False, "reason": "The confirmation email could not be composed."}
+
+    message = EmailMessage()
+    message["Subject"] = subject
+    message["From"] = f"{from_name} <{sender}>"
+    message["To"] = to_address
+    message.set_content(text_body)
+    if html_body:
+        message.add_alternative(html_body, subtype="html")
+
+    try:
+        if port == 465:
+            server = smtplib.SMTP_SSL(host, port, timeout=20)
+        else:
+            server = smtplib.SMTP(host, port, timeout=20)
+    except (OSError, smtplib.SMTPException) as error:
+        return {"ok": False, "reason": f"The SMTP server could not be reached: {error}."}
+    try:
+        server.ehlo()
+        if use_tls and port != 465:
+            server.starttls()
+            server.ehlo()
+        if username or password:
+            server.login(username or "", password or "")
+        server.send_message(message)
+        return {"ok": True}
+    except smtplib.SMTPAuthenticationError:
+        return {"ok": False, "reason": "The SMTP server rejected the username or password."}
+    except smtplib.SMTPException as error:
+        return {"ok": False, "reason": f"The confirmation email could not be sent: {error}."}
+    finally:
+        try:
+            server.quit()
+        except (OSError, smtplib.SMTPException):
+            pass
+
+
+def mikrotik_action_token_hash(raw_token):
+    return hashlib.sha256(str(raw_token or "").encode("utf-8")).hexdigest()
 
 
 def send_sms(row, phone, message):
@@ -2133,6 +2212,29 @@ def ensure_schema():
                   started_at DATETIME NOT NULL,
                   ended_at DATETIME NULL,
                   KEY idx_health_device (client_id, device_id, started_at)
+                )
+                """
+            )
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_mikrotik_action_confirms (
+                  id CHAR(36) NOT NULL PRIMARY KEY,
+                  client_id CHAR(36) NOT NULL,
+                  device_id CHAR(36) NOT NULL,
+                  action ENUM('suspend', 'delete') NOT NULL,
+                  token_hash CHAR(64) NOT NULL,
+                  status ENUM('pending', 'confirmed', 'cancelled', 'expired') NOT NULL DEFAULT 'pending',
+                  requested_by CHAR(36) NULL,
+                  requester_label VARCHAR(120) NOT NULL DEFAULT '',
+                  device_name VARCHAR(80) NOT NULL,
+                  device_site VARCHAR(80) NOT NULL DEFAULT '',
+                  notify_email VARCHAR(120) NOT NULL,
+                  expires_at DATETIME NOT NULL,
+                  confirmed_at DATETIME NULL,
+                  created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                  UNIQUE KEY uq_mikrotik_action_token (token_hash),
+                  KEY idx_mikrotik_action_device (client_id, device_id, status),
+                  KEY idx_mikrotik_action_expires (status, expires_at)
                 )
                 """
             )
@@ -4589,6 +4691,8 @@ class Handler(BaseHTTPRequestHandler):
     def dispatch(self, cursor, method, path, payload, token, query):
         if path.startswith("/api/public/pay/"):
             return self.public_pay(cursor, method, path, payload, query), None
+        if path.startswith("/api/public/mikrotik-action/"):
+            return self.public_mikrotik_action(cursor, method, path, payload), None
         handled = pppoe_store.dispatch(cursor, method, path, payload, token, query)
         if handled is not None:
             return handled
@@ -4870,13 +4974,20 @@ class Handler(BaseHTTPRequestHandler):
             return {"device": self.record_stage_test(cursor, device_id, token.get("isp_client_session"), payload)}, None
         if method == "POST" and path.startswith("/api/mikrotiks/") and path.endswith("/delete"):
             device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/delete").strip("/")
-            return self.delete_mikrotik(cursor, device_id, token.get("isp_client_session")), None
+            return self.request_mikrotik_action(
+                cursor, device_id, token.get("isp_client_session"), "delete", self.request_public_base(cursor)
+            ), None
         if method == "POST" and path.startswith("/api/mikrotiks/") and path.endswith("/suspend"):
             device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/suspend").strip("/")
-            return {"device": self.set_mikrotik_suspended(cursor, device_id, token.get("isp_client_session"), True)}, None
+            return self.request_mikrotik_action(
+                cursor, device_id, token.get("isp_client_session"), "suspend", self.request_public_base(cursor)
+            ), None
         if method == "POST" and path.startswith("/api/mikrotiks/") and path.endswith("/unsuspend"):
             device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/unsuspend").strip("/")
             return {"device": self.set_mikrotik_suspended(cursor, device_id, token.get("isp_client_session"), False)}, None
+        if method == "POST" and path.startswith("/api/mikrotiks/") and path.endswith("/cancel-action"):
+            device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/cancel-action").strip("/")
+            return self.cancel_mikrotik_action(cursor, device_id, token.get("isp_client_session")), None
         if method == "POST" and path.startswith("/api/mikrotiks/") and path.endswith("/reboot"):
             device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/reboot").strip("/")
             return self.reboot_mikrotik(cursor, device_id, token.get("isp_client_session")), None
@@ -6433,6 +6544,7 @@ document.getElementById('pay').onclick=async function(){{
         # so polling the list cannot drop PPPoE clients.
         probe_mikrotik_tunnels(cursor, client_id, rows)
         health = mikrotik_health_percents(cursor, client_id, [row["id"] for row in rows])
+        pending = self.pending_mikrotik_actions(cursor, client_id, [row["id"] for row in rows])
         devices = []
         for row in rows:
             device_id = row["id"]
@@ -6448,6 +6560,7 @@ document.getElementById('pay').onclick=async function(){{
                     "status": row["status"],
                     "tunnelStatus": row["tunnel_status"] or "unknown",
                     "healthPercent": health.get(device_id, 100),
+                    "pendingAction": pending.get(device_id),
                     "lastSeen": row["last_seen_at"].isoformat(sep=" ") if row["last_seen_at"] else None,
                     "lastApi": row["last_api_at"].isoformat(sep=" ") if row["last_api_at"] else None,
                     "apiReady": bool(row["api_ready"]),
@@ -7121,11 +7234,258 @@ document.getElementById('pay').onclick=async function(){{
         self.observe_tunnel(cursor, device_id, client_id)
         return self.mikrotik_row(cursor, device_id, client_id)
 
-    def delete_mikrotik(self, cursor, device_id, token):
+    def pending_mikrotik_actions(self, cursor, client_id, device_ids):
+        if not device_ids:
+            return {}
+        placeholders = ", ".join(["%s"] * len(device_ids))
+        cursor.execute(
+            f"""
+            SELECT device_id, action, notify_email, expires_at, created_at
+            FROM isp_mikrotik_action_confirms
+            WHERE client_id = %s
+              AND device_id IN ({placeholders})
+              AND status = 'pending'
+              AND expires_at > NOW()
+            ORDER BY created_at DESC
+            """,
+            (client_id, *device_ids),
+        )
+        pending = {}
+        for row in cursor.fetchall():
+            device_id = row["device_id"]
+            if device_id in pending:
+                continue
+            pending[device_id] = {
+                "action": row["action"],
+                "email": row["notify_email"],
+                "expiresAt": row["expires_at"].isoformat(sep=" ") if row["expires_at"] else None,
+                "requestedAt": row["created_at"].isoformat(sep=" ") if row["created_at"] else None,
+            }
+        return pending
+
+    def request_mikrotik_action(self, cursor, device_id, token, action, public_base):
+        if action not in {"suspend", "delete"}:
+            raise ApiError(400, "Choose suspend or delete.")
         client_id = self.require_client(cursor, token)
         router = self.mikrotik_row(cursor, device_id, client_id)
+        if action == "suspend" and router.get("status") == "suspended":
+            raise ApiError(400, "That router is already suspended.")
+        cursor.execute(
+            "SELECT id, first_name, last_name, email, login_code FROM isp_clients WHERE id = %s",
+            (client_id,),
+        )
+        owner = cursor.fetchone()
+        if not owner or not str(owner.get("email") or "").strip():
+            raise ApiError(400, "Add an email address on the ISP account before confirming router changes.")
+        _, mail = load_active_email(cursor, client_id)
+        if not mail:
+            raise ApiError(
+                400,
+                "Save SMTP settings under Account → Communications → Email before suspending or deleting a router.",
+            )
+
+        opened_by = session_opened_by(cursor, token)
+        requester_label = f"{owner['first_name']} {owner['last_name']}".strip() or "Account owner"
+        if opened_by:
+            cursor.execute(
+                "SELECT first_name, last_name, email FROM isp_client_employees WHERE id = %s AND client_id = %s",
+                (opened_by, client_id),
+            )
+            staff = cursor.fetchone()
+            if staff:
+                requester_label = f"{staff['first_name']} {staff['last_name']}".strip() or "Staff"
+
+        cursor.execute(
+            """
+            UPDATE isp_mikrotik_action_confirms
+            SET status = 'cancelled'
+            WHERE client_id = %s AND device_id = %s AND status = 'pending'
+            """,
+            (client_id, device_id),
+        )
+
+        raw_token = secrets.token_urlsafe(32)
+        confirm_id = str(uuid.uuid4())
+        expires_at = datetime.now().replace(microsecond=0) + timedelta(minutes=30)
+        notify_email = str(owner["email"]).strip()
+        cursor.execute(
+            """
+            INSERT INTO isp_mikrotik_action_confirms
+              (id, client_id, device_id, action, token_hash, status, requested_by, requester_label,
+               device_name, device_site, notify_email, expires_at)
+            VALUES (%s, %s, %s, %s, %s, 'pending', %s, %s, %s, %s, %s, %s)
+            """,
+            (
+                confirm_id,
+                client_id,
+                device_id,
+                action,
+                mikrotik_action_token_hash(raw_token),
+                opened_by,
+                requester_label[:120],
+                router["name"],
+                router.get("site") or "",
+                notify_email[:120],
+                expires_at,
+            ),
+        )
+
+        base = (public_base or "").rstrip("/")
+        if not base:
+            raise ApiError(
+                400,
+                "Open the dashboard over the public HTTPS domain once so confirmation links can be emailed.",
+            )
+        confirm_url = f"{base}/confirm/mikrotik/{raw_token}"
+        action_label = "suspend" if action == "suspend" else "delete"
+        subject = f"Confirm MikroTik {action_label}: {router['name']}"
+        site_line = f" at {router['site']}" if router.get("site") else ""
+        text_body = (
+            f"{requester_label} asked to {action_label} MikroTik {router['name']}{site_line}.\n\n"
+            f"Open this link within 30 minutes to confirm. The change runs as soon as you confirm:\n"
+            f"{confirm_url}\n\n"
+            f"If you did not request this, ignore the email — nothing changes until you confirm."
+        )
+        import html as html_lib
+
+        safe_requester = html_lib.escape(requester_label)
+        safe_name = html_lib.escape(str(router["name"]))
+        safe_site = html_lib.escape(site_line)
+        safe_url = html_lib.escape(confirm_url, quote=True)
+        html_body = f"""<!doctype html>
+<html><body style="font-family:Segoe UI,Arial,sans-serif;line-height:1.5;color:#0f172a">
+  <p><strong>{safe_requester}</strong> asked to <strong>{action_label}</strong> MikroTik
+  <strong>{safe_name}</strong>{safe_site}.</p>
+  <p>Confirm within 30 minutes. The change runs as soon as you confirm.</p>
+  <p><a href="{safe_url}" style="display:inline-block;padding:12px 18px;background:#5b21b6;color:#fff;border-radius:10px;text-decoration:none;font-weight:600">
+    Confirm {action_label}
+  </a></p>
+  <p style="font-size:13px;color:#64748b">Or open:<br>{safe_url}</p>
+  <p style="font-size:13px;color:#64748b">If you did not request this, ignore the email — nothing changes until you confirm.</p>
+</body></html>"""
+        delivered = send_email(mail, notify_email, subject, text_body, html_body)
+        if not delivered.get("ok"):
+            cursor.execute(
+                "UPDATE isp_mikrotik_action_confirms SET status = 'cancelled' WHERE id = %s",
+                (confirm_id,),
+            )
+            raise ApiError(400, delivered.get("reason") or "The confirmation email could not be sent.")
+        return {
+            "pending": True,
+            "action": action,
+            "email": notify_email,
+            "expiresAt": expires_at.isoformat(sep=" "),
+            "message": f"A confirmation email was sent to {notify_email}. Confirm there to {action_label} this router.",
+        }
+
+    def cancel_mikrotik_action(self, cursor, device_id, token):
+        client_id = self.require_client(cursor, token)
+        self.mikrotik_row(cursor, device_id, client_id)
+        cursor.execute(
+            """
+            UPDATE isp_mikrotik_action_confirms
+            SET status = 'cancelled'
+            WHERE client_id = %s AND device_id = %s AND status = 'pending'
+            """,
+            (client_id, device_id),
+        )
+        return {"ok": True, "cancelled": cursor.rowcount > 0}
+
+    def mikrotik_action_by_token(self, cursor, raw_token):
+        token_hash = mikrotik_action_token_hash(raw_token)
+        if not raw_token or len(token_hash) != 64:
+            raise ApiError(404, "That confirmation link was not found.")
+        cursor.execute(
+            """
+            SELECT *
+            FROM isp_mikrotik_action_confirms
+            WHERE token_hash = %s
+            LIMIT 1
+            """,
+            (token_hash,),
+        )
+        row = cursor.fetchone()
+        if not row:
+            raise ApiError(404, "That confirmation link was not found.")
+        if row["status"] == "pending" and row["expires_at"] and row["expires_at"] < datetime.now():
+            cursor.execute(
+                "UPDATE isp_mikrotik_action_confirms SET status = 'expired' WHERE id = %s AND status = 'pending'",
+                (row["id"],),
+            )
+            row["status"] = "expired"
+        return row
+
+    def public_mikrotik_action(self, cursor, method, path, payload):
+        parts = [part for part in path.strip("/").split("/") if part]
+        # /api/public/mikrotik-action/{token}[/confirm]
+        if len(parts) < 4 or parts[0] != "api" or parts[1] != "public" or parts[2] != "mikrotik-action":
+            raise ApiError(404, "That confirmation link was not found.")
+        raw_token = parts[3]
+        action_leaf = parts[4] if len(parts) > 4 else ""
+        row = self.mikrotik_action_by_token(cursor, raw_token)
+        summary = {
+            "action": row["action"],
+            "status": row["status"],
+            "deviceName": row["device_name"],
+            "deviceSite": row["device_site"] or "",
+            "requester": row["requester_label"] or "",
+            "email": row["notify_email"],
+            "expiresAt": row["expires_at"].isoformat(sep=" ") if row["expires_at"] else None,
+            "confirmedAt": row["confirmed_at"].isoformat(sep=" ") if row.get("confirmed_at") else None,
+        }
+        if method == "GET" and not action_leaf:
+            return summary
+        if method == "POST" and action_leaf == "confirm":
+            return self.confirm_mikrotik_action(cursor, row)
+        raise ApiError(404, "That confirmation link was not found.")
+
+    def confirm_mikrotik_action(self, cursor, row):
+        if row["status"] == "confirmed":
+            return {
+                "ok": True,
+                "already": True,
+                "action": row["action"],
+                "deviceName": row["device_name"],
+                "message": f"{row['device_name']} was already confirmed.",
+            }
+        if row["status"] != "pending":
+            raise ApiError(400, f"That confirmation is {row['status']}. Request a new one from Mikrotiks.")
+        client_id = row["client_id"]
+        device_id = row["device_id"]
+        action = row["action"]
+        cursor.execute(
+            """
+            UPDATE isp_mikrotik_action_confirms
+            SET status = 'confirmed', confirmed_at = CURRENT_TIMESTAMP
+            WHERE id = %s AND status = 'pending'
+            """,
+            (row["id"],),
+        )
+        if cursor.rowcount != 1:
+            raise ApiError(409, "That confirmation was already used.")
+        if action == "suspend":
+            self.apply_mikrotik_suspend(cursor, client_id, device_id)
+            message = f"{row['device_name']} is now suspended."
+        else:
+            self.apply_mikrotik_delete(cursor, client_id, device_id, row["device_name"])
+            message = f"{row['device_name']} was deleted."
+        return {"ok": True, "action": action, "deviceName": row["device_name"], "message": message}
+
+    def apply_mikrotik_suspend(self, cursor, client_id, device_id):
+        router = self.mikrotik_row(cursor, device_id, client_id)
+        if router.get("status") == "suspended":
+            return router
+        cursor.execute(
+            "UPDATE isp_mikrotik_devices SET status = 'suspended' WHERE id = %s AND client_id = %s",
+            (device_id, client_id),
+        )
+        return self.mikrotik_row(cursor, device_id, client_id)
+
+    def apply_mikrotik_delete(self, cursor, client_id, device_id, router_name=""):
+        router = self.mikrotik_row(cursor, device_id, client_id)
+        name = router_name or router["name"]
         pppoe_store.disconnect_router_clients(
-            cursor, client_id, device_id, client_id, f"Router {router['name']} was deleted."
+            cursor, client_id, device_id, client_id, f"Router {name} was deleted."
         )
         cursor.execute("SELECT nasname FROM isp_radius_nas WHERE router_id = %s", (device_id,))
         nas = cursor.fetchone()
@@ -7141,6 +7501,10 @@ document.getElementById('pay').onclick=async function(){{
         cursor.execute("DELETE FROM isp_wan_audit WHERE device_id = %s AND client_id = %s", (device_id, client_id))
         cursor.execute("DELETE FROM isp_wan_settings WHERE device_id = %s AND client_id = %s", (device_id, client_id))
         cursor.execute("DELETE FROM isp_router_jobs WHERE device_id = %s AND client_id = %s", (device_id, client_id))
+        cursor.execute(
+            "DELETE FROM isp_mikrotik_action_confirms WHERE device_id = %s AND client_id = %s",
+            (device_id, client_id),
+        )
         cursor.execute(
             "SELECT id, availability_routers FROM isp_packages WHERE client_id = %s",
             (client_id,),
@@ -7161,23 +7525,22 @@ document.getElementById('pay').onclick=async function(){{
         publish_tunnel_peers(cursor)
         return {"ok": True}
 
+    def delete_mikrotik(self, cursor, device_id, token):
+        client_id = self.require_client(cursor, token)
+        router = self.mikrotik_row(cursor, device_id, client_id)
+        return self.apply_mikrotik_delete(cursor, client_id, device_id, router["name"])
+
     def set_mikrotik_suspended(self, cursor, device_id, token, suspended):
         client_id = self.require_client(cursor, token)
         current = self.mikrotik_row(cursor, device_id, client_id)
         if suspended:
-            if current["status"] == "suspended":
-                return current
-            cursor.execute(
-                "UPDATE isp_mikrotik_devices SET status = 'suspended' WHERE id = %s AND client_id = %s",
-                (device_id, client_id),
-            )
-        else:
-            if current["status"] != "suspended":
-                raise ApiError(400, "That router is not suspended.")
-            cursor.execute(
-                "UPDATE isp_mikrotik_devices SET status = 'active' WHERE id = %s AND client_id = %s",
-                (device_id, client_id),
-            )
+            return self.apply_mikrotik_suspend(cursor, client_id, device_id)
+        if current["status"] != "suspended":
+            raise ApiError(400, "That router is not suspended.")
+        cursor.execute(
+            "UPDATE isp_mikrotik_devices SET status = 'active' WHERE id = %s AND client_id = %s",
+            (device_id, client_id),
+        )
         return self.mikrotik_row(cursor, device_id, client_id)
 
     def observe_tunnel(self, cursor, device_id, client_id):
@@ -10382,6 +10745,25 @@ document.getElementById('pay').onclick=async function(){{
         ):
             return ""
         return f"https://{host}"
+
+    def request_public_base(self, cursor):
+        """Origin used in emailed confirmation links."""
+        learned = self.learned_public_base()
+        if learned:
+            gateway_store.remember_public_base(cursor, learned)
+            return learned
+        remembered = gateway_store.public_base(cursor)
+        if remembered:
+            return remembered
+        env_base = (os.environ.get("ISP_PUBLIC_URL") or os.environ.get("ISP_GATEWAY_PUBLIC_URL") or "").strip().rstrip("/")
+        if env_base:
+            return env_base
+        # Last resort: current request host (covers local/dev without a public URL).
+        host = (self.headers.get("Host") or "").strip()
+        if host and len(host) <= 253:
+            scheme = "https" if self.secure_transport() else "http"
+            return f"{scheme}://{host}"
+        return ""
 
     def send_json(self, status, body, cookie=None):
         encoded = json.dumps(body, default=jsonable).encode("utf-8")

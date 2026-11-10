@@ -10,6 +10,13 @@ import { clientPage } from "@/lib/accounts";
 import { useAuth } from "@/providers/AuthProvider";
 import { cn } from "@/lib/cn";
 
+type PendingAction = {
+  action: "suspend" | "delete";
+  email: string;
+  expiresAt: string | null;
+  requestedAt: string | null;
+};
+
 type Device = {
   id: string;
   name: string;
@@ -17,6 +24,7 @@ type Device = {
   status: string;
   tunnelStatus: "up" | "down" | "unknown" | string;
   healthPercent?: number;
+  pendingAction?: PendingAction | null;
   routerosVersion?: string;
   role?: string;
   latitude?: number | null;
@@ -256,8 +264,8 @@ export function MikrotiksPage() {
   const saved = useSavedQuery<DevicePage>(`/api/mikrotiks?limit=50&offset=${offset}&reload=${reload}`);
   const page = saved.data;
   const [actionError, setActionError] = useState("");
+  const [actionNote, setActionNote] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
-  const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const [healthTick, setHealthTick] = useState(0);
   const [healthChecking, setHealthChecking] = useState(false);
   const lastHealthAt = useRef("");
@@ -292,12 +300,23 @@ export function MikrotiksPage() {
 
   async function setSuspended(device: Device, suspended: boolean) {
     setActionError("");
+    setActionNote("");
     setBusyId(device.id);
     try {
-      await apiRequest(`/api/mikrotiks/${device.id}/${suspended ? "suspend" : "unsuspend"}`, {
+      if (!suspended) {
+        await apiRequest(`/api/mikrotiks/${device.id}/unsuspend`, {
+          method: "POST",
+          body: "{}",
+        });
+        setActionNote(`${device.name} was unsuspended.`);
+        setReload((current) => current + 1);
+        return;
+      }
+      const body = await apiRequest<{ message?: string; email?: string }>(`/api/mikrotiks/${device.id}/suspend`, {
         method: "POST",
         body: "{}",
       });
+      setActionNote(body.message || `A confirmation email was sent${body.email ? ` to ${body.email}` : ""}.`);
       setReload((current) => current + 1);
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "The router status could not be changed.");
@@ -306,16 +325,34 @@ export function MikrotiksPage() {
     }
   }
 
-  async function remove(deviceId: string) {
+  async function requestDelete(device: Device) {
     setActionError("");
-    setBusyId(deviceId);
+    setActionNote("");
+    setBusyId(device.id);
     try {
-      await apiRequest(`/api/mikrotiks/${deviceId}/delete`, { method: "POST", body: "{}" });
-      setConfirmingId(null);
-      if (page && page.devices.length === 1 && offset > 0) setOffset(Math.max(0, offset - page.limit));
+      const body = await apiRequest<{ message?: string; email?: string }>(`/api/mikrotiks/${device.id}/delete`, {
+        method: "POST",
+        body: "{}",
+      });
+      setActionNote(body.message || `A confirmation email was sent${body.email ? ` to ${body.email}` : ""}.`);
       setReload((current) => current + 1);
     } catch (cause) {
       setActionError(cause instanceof Error ? cause.message : "The router could not be deleted.");
+    } finally {
+      setBusyId(null);
+    }
+  }
+
+  async function cancelPending(device: Device) {
+    setActionError("");
+    setActionNote("");
+    setBusyId(device.id);
+    try {
+      await apiRequest(`/api/mikrotiks/${device.id}/cancel-action`, { method: "POST", body: "{}" });
+      setActionNote(`The pending ${device.pendingAction?.action || "action"} confirmation was cancelled.`);
+      setReload((current) => current + 1);
+    } catch (cause) {
+      setActionError(cause instanceof Error ? cause.message : "The pending confirmation could not be cancelled.");
     } finally {
       setBusyId(null);
     }
@@ -327,6 +364,11 @@ export function MikrotiksPage() {
       {saved.error || actionError ? (
         <p className="notice mt-4" role="alert">
           {saved.error || actionError}
+        </p>
+      ) : null}
+      {actionNote ? (
+        <p className="mt-4 rounded-xl border border-success-border/60 bg-success-soft/70 px-4 py-3 text-sm text-success" role="status">
+          {actionNote}
         </p>
       ) : null}
 
@@ -445,6 +487,11 @@ export function MikrotiksPage() {
                             </div>
                             <div className="mt-3 flex flex-wrap items-center gap-2">
                               {suspended ? <StatusBadge tone="suspended">Suspended</StatusBadge> : null}
+                              {device.pendingAction ? (
+                                <StatusBadge tone="pending">
+                                  {device.pendingAction.action === "delete" ? "Delete emailed" : "Suspend emailed"}
+                                </StatusBadge>
+                              ) : null}
                               {device.routerosVersion ? (
                                 <span className="text-xs text-muted-foreground">RouterOS {device.routerosVersion}</span>
                               ) : null}
@@ -485,19 +532,28 @@ export function MikrotiksPage() {
                           </div>
                         </div>
 
+                        {device.pendingAction ? (
+                          <p className="mt-4 rounded-xl border border-info-border/60 bg-info-soft/70 px-3 py-2 text-xs text-info">
+                            Confirm {device.pendingAction.action} in the email sent to {device.pendingAction.email}
+                            {device.pendingAction.expiresAt ? ` · expires ${device.pendingAction.expiresAt}` : ""}.
+                          </p>
+                        ) : null}
+
                         <div className="mt-auto flex flex-wrap gap-2 pt-5">
                           <PrimaryButton to={href(`/mikrotiks/${device.id}`)}>View live</PrimaryButton>
-                          <SecondaryButton type="button" disabled={busy} onClick={() => void setSuspended(device, !suspended)}>
-                            {suspended ? "Unsuspend" : "Suspend"}
-                          </SecondaryButton>
-                          {confirmingId === device.id ? (
-                            <SecondaryButton type="button" disabled={busy} onClick={() => void remove(device.id)}>
-                              {busy ? "Deleting" : "Confirm delete"}
+                          {device.pendingAction ? (
+                            <SecondaryButton type="button" disabled={busy} onClick={() => void cancelPending(device)}>
+                              {busy ? "Cancelling…" : "Cancel email"}
                             </SecondaryButton>
                           ) : (
-                            <SecondaryButton type="button" disabled={busyId !== null} onClick={() => setConfirmingId(device.id)}>
-                              Delete
-                            </SecondaryButton>
+                            <>
+                              <SecondaryButton type="button" disabled={busy} onClick={() => void setSuspended(device, !suspended)}>
+                                {suspended ? "Unsuspend" : busy ? "Emailing…" : "Suspend"}
+                              </SecondaryButton>
+                              <SecondaryButton type="button" disabled={busy || busyId !== null} onClick={() => void requestDelete(device)}>
+                                {busy ? "Emailing…" : "Delete"}
+                              </SecondaryButton>
+                            </>
                           )}
                         </div>
                       </article>

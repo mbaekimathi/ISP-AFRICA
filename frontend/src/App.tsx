@@ -50,6 +50,7 @@ import { DashboardPage, LegacyDashboardRedirect } from "@/pages/DashboardPage";
 import { MikrotikLivePage } from "@/pages/MikrotikLivePage";
 import { MikrotikHotspotPage, MikrotikPortPage, MikrotikPppoePage, MikrotikRecoveryPage, MikrotikRouterSetupPage } from "@/pages/MikrotikSetupPages";
 import { MikrotiksPage } from "@/pages/MikrotiksPage";
+import { MikrotikActionConfirmPage } from "@/pages/MikrotikActionConfirmPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { OnboardMikrotikPage } from "@/pages/OnboardMikrotikPage";
 import { ReviewsPage } from "@/pages/ReviewsPage";
@@ -138,6 +139,7 @@ export function App() {
             <Route path="/privacy" element={<PrivacyPage />} />
             <Route path="/terms" element={<TermsPage />} />
           </Route>
+          <Route path="/confirm/mikrotik/:token" element={<MikrotikActionConfirmPage />} />
           <Route element={<ClientLayout />}>
             <Route path="/dashboard/:code" element={<LegacyDashboardRedirect />} />
             {clientPages}
