@@ -1,5 +1,5 @@
 import { useEffect, useState, type ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { Clock, Search, Users, Wifi, WifiOff } from "lucide-react";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -128,33 +128,72 @@ type Filters = { router: string; package: string; status: string; billing: strin
 
 const EMPTY_FILTERS: Filters = { router: "", package: "", status: "", billing: "", search: "" };
 
+const STATUS_FILTERS = new Set([
+  "surfing",
+  "connected",
+  "not_surfing",
+  "expired",
+  "suspended",
+  "disconnecting",
+  "disconnected",
+  "pending_activation",
+]);
+
+function filtersFromSearch(params: URLSearchParams): Filters {
+  const status = params.get("status")?.trim() || "";
+  return {
+    router: params.get("router")?.trim() || "",
+    package: params.get("package")?.trim() || "",
+    status: STATUS_FILTERS.has(status) ? status : "",
+    billing: params.get("billing")?.trim() || "",
+    search: params.get("q")?.trim() || "",
+  };
+}
+
+function sameFilters(left: Filters, right: Filters) {
+  return (
+    left.router === right.router &&
+    left.package === right.package &&
+    left.status === right.status &&
+    left.billing === right.billing &&
+    left.search === right.search
+  );
+}
+
+function writeFilterParams(active: Filters) {
+  const params = new URLSearchParams();
+  if (active.router) params.set("router", active.router);
+  if (active.package) params.set("package", active.package);
+  if (active.status) params.set("status", active.status);
+  if (active.billing) params.set("billing", active.billing);
+  if (active.search.trim()) params.set("q", active.search.trim());
+  return params;
+}
+
 const desktopRowClass =
   "hidden items-center gap-x-4 px-5 py-3.5 md:grid md:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)_minmax(7.5rem,0.85fr)_minmax(8rem,1fr)_7.75rem_5.75rem] lg:grid-cols-[minmax(0,1.25fr)_minmax(0,0.95fr)_minmax(5.5rem,0.7fr)_minmax(7.5rem,0.8fr)_minmax(8rem,1fr)_7.75rem_5.75rem]";
 
 export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
   usePageMeta(kind === "pppoe" ? "PPPoE-clients — ISP CENTRIC" : "Hotspot-clients — ISP CENTRIC", "ISP subscriber records.");
   const { user } = useAuth();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [page, setPage] = useState<ListPage | null>(null);
   const [options, setOptions] = useState<Pick<ListPage, "routers" | "packages">>({ routers: [], packages: [] });
   const [message, setMessage] = useState("");
-  const [filters, setFilters] = useState<Filters>(EMPTY_FILTERS);
-  const [applied, setApplied] = useState<Filters>(EMPTY_FILTERS);
+  const [filters, setFilters] = useState<Filters>(() => filtersFromSearch(searchParams));
+  const [applied, setApplied] = useState<Filters>(() => filtersFromSearch(searchParams));
   const label = kind === "pppoe" ? "PPPoE" : "Hotspot";
 
   const setField = (key: keyof Filters, value: string) => setFilters((current) => ({ ...current, [key]: value }));
-  const resetFilters = () => {
-    setFilters(EMPTY_FILTERS);
-    setApplied(EMPTY_FILTERS);
+  const applyFilters = (next: Filters) => {
+    setFilters(next);
+    setSearchParams(writeFilterParams(next), { replace: true });
   };
+  const resetFilters = () => applyFilters(EMPTY_FILTERS);
   const filtered = Boolean(applied.router || applied.package || applied.status || applied.billing || applied.search.trim());
 
   function load(active: Filters) {
-    const params = new URLSearchParams();
-    if (active.router) params.set("router", active.router);
-    if (active.package) params.set("package", active.package);
-    if (active.status) params.set("status", active.status);
-    if (active.billing) params.set("billing", active.billing);
-    if (active.search.trim()) params.set("q", active.search.trim());
+    const params = writeFilterParams(active);
     params.set("limit", "1000");
     const path = kind === "pppoe" ? "/api/pppoe/subscribers" : "/api/hotspot/subscribers";
     apiRequest<ListPage>(`${path}?${params.toString()}`)
@@ -167,6 +206,12 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
         setMessage(error instanceof Error ? error.message : `${label} clients could not be loaded.`);
       });
   }
+
+  useEffect(() => {
+    const next = filtersFromSearch(searchParams);
+    setFilters((current) => (sameFilters(current, next) ? current : next));
+    setApplied((current) => (sameFilters(current, next) ? current : next));
+  }, [kind, searchParams]);
 
   useEffect(() => {
     setPage(null);
@@ -234,7 +279,7 @@ export function ClientsPage({ kind }: { kind: "pppoe" | "hotspot" }) {
         className="toolbar mt-4 grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-[minmax(12rem,1.4fr)_repeat(4,minmax(0,1fr))_auto] xl:items-end"
         onSubmit={(event) => {
           event.preventDefault();
-          setApplied(filters);
+          applyFilters(filters);
         }}
       >
         <label className="grid gap-1.5 text-sm font-medium sm:col-span-2 lg:col-span-3 xl:col-span-1">

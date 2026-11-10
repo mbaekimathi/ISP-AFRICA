@@ -152,12 +152,13 @@ function Metric({
 function clientCards(counts: ClientCounts | undefined, home: (path: string) => string, base: string) {
   const ready = Boolean(counts);
   const show = (value: number | undefined) => (ready ? String(value ?? 0) : "—");
+  const filtered = (status: string) => `${home(base)}?status=${status}`;
   return [
     {
       label: "Surfing",
       value: show(counts?.surfing),
       detail: "Open session now",
-      to: home(base),
+      to: filtered("surfing"),
       tone: "good" as const,
       icon: Wifi,
       live: true,
@@ -166,7 +167,7 @@ function clientCards(counts: ClientCounts | undefined, home: (path: string) => s
       label: "Not surfing",
       value: show(counts?.notSurfing),
       detail: "Active, no session",
-      to: home(base),
+      to: filtered("not_surfing"),
       tone: "muted" as const,
       icon: WifiOff,
     },
@@ -174,7 +175,7 @@ function clientCards(counts: ClientCounts | undefined, home: (path: string) => s
       label: "Expired",
       value: show(counts?.expired),
       detail: "Package date passed",
-      to: home(base),
+      to: filtered("expired"),
       tone: "warn" as const,
       icon: CalendarX2,
     },
@@ -182,7 +183,7 @@ function clientCards(counts: ClientCounts | undefined, home: (path: string) => s
       label: "Disconnected",
       value: show(counts?.disconnected),
       detail: "Suspended or offline",
-      to: home(base),
+      to: filtered("disconnected"),
       tone: "critical" as const,
       icon: Unplug,
     },

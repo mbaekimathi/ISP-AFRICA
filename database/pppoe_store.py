@@ -1106,7 +1106,18 @@ def list_subscribers(cursor, client_id, query, service="pppoe"):
         rows.append(public)
     rows.sort(key=lambda row: (-1 if row["usedPercent"] is None else -row["usedPercent"], row["firstName"], row["lastName"]))
     if status in router_states:
-        wanted = {"expired", "expired_online"} if status == "expired" else {"suspended", "suspended_online"} if status == "suspended" else {status}
+        # Match dashboard cards: expired covers online/offline expiry, and
+        # disconnected covers suspended or offline (same as analysis_bucket).
+        if status == "expired":
+            wanted = {"expired", "expired_online"}
+        elif status == "suspended":
+            wanted = {"suspended", "suspended_online"}
+        elif status == "disconnected":
+            wanted = {"disconnecting", "disconnected", "suspended", "suspended_online"}
+        elif status == "not_surfing":
+            wanted = {"not_surfing", "pending_activation"}
+        else:
+            wanted = {status}
         rows = [row for row in rows if row["routerStatus"] in wanted]
     elif status in {"online", "offline", "unknown"}:
         rows = [row for row in rows if row["connection"] == status]
@@ -3657,7 +3668,13 @@ def list_hotspot_clients(cursor, client_id, query):
         )
     router_states = {"surfing", "connected", "not_surfing", "expired", "suspended", "disconnecting", "disconnected", "pending_activation"}
     if status in router_states:
-        rows = [row for row in rows if row["routerStatus"] == status]
+        # Match dashboard cards: not surfing = active with no open session
+        # (includes on-Wi‑Fi hosts and pending guests).
+        if status == "not_surfing":
+            wanted = {"not_surfing", "connected", "pending_activation"}
+        else:
+            wanted = {status}
+        rows = [row for row in rows if row["routerStatus"] in wanted]
     elif status in {"online", "offline"}:
         rows = [row for row in rows if row["connection"] == status]
     total = len(rows)
