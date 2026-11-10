@@ -6432,11 +6432,13 @@ document.getElementById('pay').onclick=async function(){{
         # Read-only TCP reachability on the page — never logs in or pushes config,
         # so polling the list cannot drop PPPoE clients.
         probe_mikrotik_tunnels(cursor, client_id, rows)
+        health = mikrotik_health_percents(cursor, client_id, [row["id"] for row in rows])
         devices = []
         for row in rows:
+            device_id = row["id"]
             devices.append(
                 {
-                    "id": row["id"],
+                    "id": device_id,
                     "name": row["name"],
                     "site": row["site"],
                     "role": row["role"],
@@ -6445,6 +6447,7 @@ document.getElementById('pay').onclick=async function(){{
                     "routerosVersion": row["routeros_version"] or "",
                     "status": row["status"],
                     "tunnelStatus": row["tunnel_status"] or "unknown",
+                    "healthPercent": health.get(device_id, 100),
                     "lastSeen": row["last_seen_at"].isoformat(sep=" ") if row["last_seen_at"] else None,
                     "lastApi": row["last_api_at"].isoformat(sep=" ") if row["last_api_at"] else None,
                     "apiReady": bool(row["api_ready"]),
@@ -10811,6 +10814,54 @@ def _tcp_reachable(host, port=8728, timeout=_LIST_PROBE_TIMEOUT):
             return True
     except OSError:
         return False
+
+
+def _merged_downtime_seconds(spans, since, now):
+    intervals = []
+    for started, ended in spans:
+        start = max(started, since)
+        finish = min(ended or now, now)
+        if finish > start:
+            intervals.append((start, finish))
+    if not intervals:
+        return 0
+    intervals.sort()
+    merged = [intervals[0]]
+    for start, finish in intervals[1:]:
+        last_start, last_end = merged[-1]
+        if start <= last_end:
+            merged[-1] = (last_start, max(last_end, finish))
+        else:
+            merged.append((start, finish))
+    return sum((finish - start).total_seconds() for start, finish in merged)
+
+
+def mikrotik_health_percents(cursor, client_id, device_ids, window_hours=24):
+    """Uptime share over the recent window, as a 0–100 health percentage."""
+    scores = {device_id: 100 for device_id in device_ids}
+    if not device_ids:
+        return scores
+    now = datetime.now().replace(microsecond=0)
+    since = now - timedelta(hours=window_hours)
+    window = max(1.0, (now - since).total_seconds())
+    placeholders = ", ".join(["%s"] * len(device_ids))
+    cursor.execute(
+        f"""
+        SELECT device_id, started_at, ended_at
+        FROM isp_mikrotik_health_events
+        WHERE client_id = %s
+          AND device_id IN ({placeholders})
+          AND (ended_at IS NULL OR ended_at >= %s OR started_at >= %s)
+        """,
+        (client_id, *device_ids, since, since),
+    )
+    spans = {}
+    for event in cursor.fetchall():
+        spans.setdefault(event["device_id"], []).append((event["started_at"], event["ended_at"]))
+    for device_id, events in spans.items():
+        down = min(window, _merged_downtime_seconds(events, since, now))
+        scores[device_id] = max(0, min(100, int(round(100 * (1 - down / window)))))
+    return scores
 
 
 def probe_mikrotik_tunnels(cursor, client_id, rows):

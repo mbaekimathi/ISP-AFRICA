@@ -1,12 +1,34 @@
 import * as Dialog from "@radix-ui/react-dialog";
-import { Cpu, MemoryStick, Network, Wifi, X } from "lucide-react";
+import {
+  Activity,
+  ArrowDownToLine,
+  ArrowUpFromLine,
+  Cable,
+  Cpu,
+  HardDrive,
+  MemoryStick,
+  Network,
+  Radio,
+  RefreshCw,
+  Router,
+  Timer,
+  Wifi,
+  WifiOff,
+  X,
+} from "lucide-react";
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { FormField } from "@/components/ui/FormField";
+import { StatusBadge, type StatusTone } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
+import { cn } from "@/lib/cn";
 import { useTunnelAlert } from "@/providers/TunnelAlertProvider";
+
+function LivePulse() {
+  return <span className="live-dot" aria-hidden="true" />;
+}
 
 type LiveInterface = {
   name: string;
@@ -132,7 +154,7 @@ function HealthTrend({
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <p className="text-xs font-medium text-muted-foreground">{caption}</p>
-          <p className="mt-0.5 text-xs tabular-nums text-muted-foreground">{total} min down</p>
+          <p className="mt-0.5 text-xs tabular text-muted-foreground">{total} min down</p>
         </div>
         <div className="grid grid-cols-5 gap-1 rounded-lg bg-surface-muted p-1" role="tablist" aria-label="Health range">
           {healthRanges.map((item) => (
@@ -141,7 +163,10 @@ function HealthTrend({
               type="button"
               role="tab"
               aria-selected={range === item.id}
-              className={`min-h-8 rounded-md px-2 text-xs font-medium ${range === item.id ? "bg-surface text-foreground shadow-sm" : "text-muted-foreground"}`}
+              className={cn(
+                "min-h-8 rounded-md px-2 text-xs font-medium transition-colors",
+                range === item.id ? "bg-surface text-foreground shadow-sm" : "text-muted-foreground hover:text-foreground",
+              )}
               onClick={() => onRange(item.id)}
             >
               {item.label}
@@ -198,29 +223,67 @@ function usedPercent(free?: string | null, total?: string | null) {
   return Math.max(0, Math.min(100, Math.round(((totalAmount - freeAmount) / totalAmount) * 100)));
 }
 
-function HeroStat({ label, value, icon, meter }: { label: string; value: string; icon: ReactNode; meter?: number }) {
+function CompareStat({
+  label,
+  value,
+  icon,
+  hint,
+  meter,
+  tone = "default",
+  live,
+}: {
+  label: string;
+  value: string;
+  icon: ReactNode;
+  hint?: string;
+  meter?: number;
+  tone?: "default" | "ok" | "warn" | "crit";
+  live?: boolean;
+}) {
+  const iconTone =
+    tone === "ok"
+      ? "bg-success-soft text-success"
+      : tone === "warn"
+        ? "bg-warning-soft text-warning"
+        : tone === "crit"
+          ? "bg-destructive-soft text-destructive"
+          : "bg-primary/10 text-primary";
   return (
-    <div className="flex items-center gap-3">
-      <span
-        className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary-foreground/15"
-        aria-hidden="true"
-      >
-        {icon}
-      </span>
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-xl font-semibold tracking-tight tabular-nums">{value}</p>
-        <p className="text-xs text-primary-foreground/70">{label}</p>
-        {meter != null ? (
-          <div className="mt-1.5 h-1 overflow-hidden rounded-full bg-primary-foreground/20">
-            <div
-              className="h-full rounded-full bg-primary-foreground/90 transition-[width] duration-500"
-              style={{ width: `${Math.min(100, Math.max(0, meter))}%` }}
-            />
-          </div>
-        ) : null}
+    <div className="rounded-2xl border border-border bg-surface p-4 shadow-card">
+      <div className="flex items-start justify-between gap-3">
+        <div className="min-w-0">
+          <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">{label}</p>
+          <p className="mt-1.5 truncate text-xl font-semibold tracking-tight tabular">{value}</p>
+          {hint ? <p className="mt-0.5 truncate text-xs text-muted-foreground">{hint}</p> : null}
+        </div>
+        <span className={cn("relative flex h-10 w-10 shrink-0 items-center justify-center rounded-xl", iconTone)} aria-hidden="true">
+          {live ? (
+            <span className="absolute -right-0.5 -top-0.5">
+              <LivePulse />
+            </span>
+          ) : null}
+          {icon}
+        </span>
       </div>
+      {meter != null ? (
+        <div className="live-meter mt-3" data-tone={tone === "default" ? undefined : tone}>
+          <span style={{ ["--meter" as string]: `${Math.min(100, Math.max(0, meter))}%` }} />
+        </div>
+      ) : null}
     </div>
   );
+}
+
+function loadTone(percent: number): "ok" | "warn" | "crit" {
+  if (percent >= 90) return "crit";
+  if (percent >= 70) return "warn";
+  return "ok";
+}
+
+function interfaceState(item: LiveInterface) {
+  if (item.disabled) return { label: "Disabled", tone: "paused" as StatusTone, Icon: Cable };
+  if (item.running) return { label: "Running", tone: "online" as StatusTone, Icon: Activity };
+  return { label: "Down", tone: "critical" as StatusTone, Icon: WifiOff };
 }
 
 export function MikrotikLivePage() {
@@ -247,6 +310,7 @@ export function MikrotikLivePage() {
   const [accountNote, setAccountNote] = useState("");
   const [resettingUsage, setResettingUsage] = useState(false);
   const [savingAlerts, setSavingAlerts] = useState(false);
+  const [alertsOpen, setAlertsOpen] = useState(false);
   const [usageNote, setUsageNote] = useState("");
   const [dailyAmount, setDailyAmount] = useState("");
   const [dailyUnit, setDailyUnit] = useState<"GB" | "TB">("GB");
@@ -513,11 +577,22 @@ export function MikrotikLivePage() {
       setUsage(body.usage);
       applyAlertDrafts(body.usage);
       setUsageNote("Usage alerts saved.");
+      setAlertsOpen(false);
     } catch (cause) {
       setUsageNote(cause instanceof Error ? cause.message : "Usage alerts could not be saved.");
     } finally {
       setSavingAlerts(false);
     }
+  }
+
+  function openUsageAlerts() {
+    if (usage) applyAlertDrafts(usage);
+    setUsageNote("");
+    setAlertsOpen(true);
+  }
+
+  function alertLabel(alert: UsageAlert) {
+    return alert ? `${alert.amount} ${alert.unit}` : "Off";
   }
 
   const title = live?.name || live?.identity || "MikroTik";
@@ -527,19 +602,22 @@ export function MikrotikLivePage() {
   const statusLabel = live?.sample
     ? "Sample"
     : live?.reachable
-      ? "Running"
+      ? "Live"
       : apiReady === null
         ? "Checking…"
         : apiReady
           ? "Not answering"
           : "Access not saved";
-  const statusTone = live?.sample
-    ? "bg-warning"
+  const StatusIcon = live?.reachable || live?.sample ? Wifi : apiReady === null ? RefreshCw : WifiOff;
+  const statusIconClass = live?.sample
+    ? "bg-warning-soft text-warning"
     : live?.reachable
-      ? "bg-success shadow-[0_0_8px_rgb(var(--success-rgb))]"
-      : apiReady
-        ? "bg-destructive"
-        : "bg-primary-foreground/50";
+      ? "bg-success-soft text-success"
+      : apiReady === null
+        ? "bg-info-soft text-info"
+        : apiReady
+          ? "bg-destructive-soft text-destructive"
+          : "bg-muted text-muted-foreground";
 
   const notice =
     live?.message &&
@@ -549,44 +627,89 @@ export function MikrotikLivePage() {
       : "";
   const sourceUplink = wan?.uplinks.find((item) => item.active) ?? wan?.uplinks[0];
   const uplinkDays = daysLeft(sourceUplink?.cycleEndsOn);
+  const runningInterfaces = live?.interfaces.filter((item) => item.running && !item.disabled).length ?? 0;
+  const interfaceTotal = live?.interfaceCount ?? live?.interfaces.length ?? 0;
 
   return (
     <div className="page-shell py-8">
-      <section className="relative overflow-hidden rounded-3xl bg-gradient-to-br from-primary via-primary/85 to-primary/60 text-primary-foreground shadow-card">
-        <div className="network-grid absolute inset-0 opacity-30" aria-hidden="true" />
-        <div className="relative flex flex-wrap items-center justify-between gap-4 px-5 pb-5 pt-6 sm:px-7">
+      <header className="flex flex-wrap items-start justify-between gap-4">
+        <div className="flex min-w-0 items-start gap-3">
+          <span className="flex h-12 w-12 shrink-0 items-center justify-center rounded-2xl border border-border bg-surface text-muted-foreground shadow-card" aria-hidden="true">
+            <Router className="h-5 w-5" />
+          </span>
           <div className="min-w-0">
-            <p className="text-xs font-semibold uppercase tracking-[0.14em] text-primary-foreground/70">MikroTik live</p>
+            <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">MikroTik live</p>
             <h1 className="mt-1 truncate text-2xl font-semibold tracking-tight sm:text-3xl">{title}</h1>
-            <p className="mt-1 text-sm text-primary-foreground/75">
-              {live?.site ? `${live.site} — live running state.` : "Live running state read from the router."}
+            <p className="mt-1 text-sm text-muted-foreground">
+              {live?.site ? live.site : "Live running state read from the router."}
+              {live?.board ? ` · ${live.board}` : ""}
+              {live?.version ? ` · RouterOS ${live.version}` : ""}
             </p>
           </div>
-          <span className="inline-flex items-center gap-2 rounded-full bg-primary-foreground/15 px-3.5 py-2 text-sm font-semibold backdrop-blur-sm">
-            <span className={`h-2 w-2 rounded-full ${statusTone}`} aria-hidden="true" />
-            {statusLabel}
-          </span>
         </div>
-        <div className="relative grid grid-cols-2 gap-x-6 gap-y-4 border-t border-primary-foreground/15 px-5 py-4 sm:grid-cols-4 sm:px-7">
-          <HeroStat label="CPU load" value={live ? `${cpu}%` : "—"} icon={<Cpu className="h-4 w-4" />} meter={live ? cpu : undefined} />
-          <HeroStat
-            label="Memory used"
-            value={live ? `${memory}%` : "—"}
-            icon={<MemoryStick className="h-4 w-4" />}
-            meter={live ? memory : undefined}
-          />
-          <HeroStat
-            label="Hotspot sessions"
-            value={live?.hotspotActive == null ? "—" : String(live.hotspotActive)}
-            icon={<Wifi className="h-4 w-4" />}
-          />
-          <HeroStat
-            label="Interfaces"
-            value={live ? String(live.interfaceCount ?? live.interfaces.length) : "—"}
-            icon={<Network className="h-4 w-4" />}
-          />
+        <div className="flex flex-wrap items-center gap-2">
+          <div className={cn("flex items-center gap-2 rounded-2xl px-3 py-2", statusIconClass)} title={statusLabel}>
+            <StatusIcon className={cn("h-4 w-4", apiReady === null && "animate-spin")} aria-hidden="true" />
+            <span className="text-xs font-semibold uppercase tracking-wide">{statusLabel}</span>
+            {live?.reachable ? <LivePulse /> : null}
+          </div>
+          {live?.checkedAt ? (
+            <span className="rounded-full border border-border bg-surface px-3 py-1 text-xs text-muted-foreground">
+              Checked {live.checkedAt}
+            </span>
+          ) : null}
         </div>
+      </header>
+
+      <section className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6" aria-label="Live comparison">
+        <CompareStat
+          label="CPU"
+          value={live ? `${cpu}%` : "—"}
+          hint={live?.cpu || "Load"}
+          icon={<Cpu className="h-4 w-4" />}
+          meter={live ? cpu : undefined}
+          tone={live ? loadTone(cpu) : "default"}
+          live={Boolean(live?.reachable)}
+        />
+        <CompareStat
+          label="Memory"
+          value={live ? `${memory}%` : "—"}
+          hint={live?.freeMemory && live?.totalMemory ? `${live.freeMemory} free` : "Used"}
+          icon={<MemoryStick className="h-4 w-4" />}
+          meter={live ? memory : undefined}
+          tone={live ? loadTone(memory) : "default"}
+          live={Boolean(live?.reachable)}
+        />
+        <CompareStat
+          label="Hotspot"
+          value={live?.hotspotActive == null ? "—" : String(live.hotspotActive)}
+          hint="Active sessions"
+          icon={<Wifi className="h-4 w-4" />}
+          live={Boolean(live?.reachable && (live.hotspotActive ?? 0) > 0)}
+        />
+        <CompareStat
+          label="PPPoE"
+          value={live?.pppoeActive == null ? "—" : String(live.pppoeActive)}
+          hint="Active sessions"
+          icon={<Radio className="h-4 w-4" />}
+          live={Boolean(live?.reachable && (live.pppoeActive ?? 0) > 0)}
+        />
+        <CompareStat
+          label="Interfaces"
+          value={live ? String(interfaceTotal) : "—"}
+          hint={live ? `${runningInterfaces} running` : "Ports"}
+          icon={<Network className="h-4 w-4" />}
+          live={Boolean(live?.reachable)}
+        />
+        <CompareStat
+          label="Uptime"
+          value={live?.uptime || "—"}
+          hint={live?.platform || live?.architecture || "Since last boot"}
+          icon={<Timer className="h-4 w-4" />}
+          live={Boolean(live?.reachable)}
+        />
       </section>
+
       {error ? (
         <p className="mt-4 notice" role="alert">
           {error}
@@ -594,7 +717,7 @@ export function MikrotikLivePage() {
       ) : null}
       {needsPassword ? (
         <form
-          className="mt-6 max-w-md rounded-xl border border-border bg-surface p-5"
+          className="mt-6 max-w-md rounded-2xl border border-border bg-surface p-5 shadow-card"
           onSubmit={(event) => {
             event.preventDefault();
             void saveAccess();
@@ -626,129 +749,104 @@ export function MikrotikLivePage() {
         </form>
       ) : null}
       {notice ? <p className="mt-4 text-sm text-muted-foreground">{notice}</p> : null}
+
       <div className="mt-6 grid gap-4 lg:grid-cols-2">
-        <section className="rounded-xl border border-border bg-surface p-5">
+        <section className="live-panel p-5">
           <div className="flex flex-wrap items-start justify-between gap-3">
             <div>
-              <h2 className="text-sm font-semibold">Data through this MikroTik</h2>
+              <h2 className="inline-flex items-center gap-2 text-sm font-semibold">
+                <HardDrive className="h-4 w-4 text-primary" aria-hidden="true" />
+                Data through this MikroTik
+              </h2>
               <p className="mt-1 text-sm text-muted-foreground">
-                Upload and download counted on the WAN uplink since the last reset.
+                Upload and download counted on the WAN uplink since the last reset. Click a figure to set usage alerts.
               </p>
             </div>
             <SecondaryButton type="button" disabled={resettingUsage || !deviceId} onClick={() => void resetUsage()}>
               {resettingUsage ? "Resetting…" : "Reset data used"}
             </SecondaryButton>
           </div>
-          <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
-            <div className="rounded-lg bg-surface-muted px-3 py-3">
-              <dt className="text-xs text-muted-foreground">Download</dt>
-              <dd className="mt-1 text-lg font-semibold tabular-nums">{usage ? formatBytes(usage.downloadBytes) : "—"}</dd>
-            </div>
-            <div className="rounded-lg bg-surface-muted px-3 py-3">
-              <dt className="text-xs text-muted-foreground">Upload</dt>
-              <dd className="mt-1 text-lg font-semibold tabular-nums">{usage ? formatBytes(usage.uploadBytes) : "—"}</dd>
-            </div>
-            <div className="rounded-lg bg-surface-muted px-3 py-3 sm:col-span-1 col-span-2">
-              <dt className="text-xs text-muted-foreground">Total</dt>
-              <dd className="mt-1 text-lg font-semibold tabular-nums">{usage ? formatBytes(usage.totalBytes) : "—"}</dd>
-            </div>
-          </dl>
+          <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+            {(
+              [
+                {
+                  key: "download",
+                  label: "Download",
+                  value: usage ? formatBytes(usage.downloadBytes) : "—",
+                  Icon: ArrowDownToLine,
+                },
+                {
+                  key: "upload",
+                  label: "Upload",
+                  value: usage ? formatBytes(usage.uploadBytes) : "—",
+                  Icon: ArrowUpFromLine,
+                },
+                {
+                  key: "total",
+                  label: "Total",
+                  value: usage ? formatBytes(usage.totalBytes) : "—",
+                  Icon: HardDrive,
+                },
+              ] as const
+            ).map((item) => (
+              <button
+                key={item.key}
+                type="button"
+                disabled={!deviceId}
+                onClick={openUsageAlerts}
+                className="rounded-xl bg-surface-muted px-3 py-3 text-left transition duration-fast ease-out hover:bg-surface-muted/80 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-60"
+              >
+                <p className="inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <item.Icon className="h-3.5 w-3.5" aria-hidden="true" />
+                  {item.label}
+                </p>
+                <p className="mt-1 text-lg font-semibold tabular">{item.value}</p>
+              </button>
+            ))}
+          </div>
           <p className="mt-3 text-xs text-muted-foreground">
-            Today {usage ? formatBytes(usage.dayDownloadBytes + usage.dayUploadBytes) : "—"} · This month{" "}
-            {usage ? formatBytes(usage.monthDownloadBytes + usage.monthUploadBytes) : "—"}
+            Today {usage ? formatBytes(usage.dayDownloadBytes + usage.dayUploadBytes) : "—"}
+            {" · "}
+            This month {usage ? formatBytes(usage.monthDownloadBytes + usage.monthUploadBytes) : "—"}
+            {usage ? ` · Alerts day ${alertLabel(usage.dailyAlert)} / month ${alertLabel(usage.monthlyAlert)}` : ""}
             {usage?.resetAt ? ` · Reset ${usage.resetAt}` : ""}
           </p>
-          <form
-            className="mt-4 grid gap-3 border-t border-border pt-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              void saveUsageAlerts();
-            }}
-          >
-            <h3 className="text-sm font-medium">Usage alerts</h3>
-            <p className="text-xs text-muted-foreground">
-              Notify this ISP account when traffic hits a daily or monthly limit. Leave blank to turn an alert off.
-            </p>
-            <div className="grid gap-3 sm:grid-cols-2">
-              <FormField id="daily-usage-alert" label="Per day">
-                <div className="flex gap-2">
-                  <input
-                    id="daily-usage-alert"
-                    className="field"
-                    type="number"
-                    min={0}
-                    step="0.001"
-                    placeholder="Off"
-                    value={dailyAmount}
-                    onChange={(event) => setDailyAmount(event.target.value)}
-                  />
-                  <select className="field w-24" value={dailyUnit} onChange={(event) => setDailyUnit(event.target.value as "GB" | "TB")}>
-                    <option value="GB">GB</option>
-                    <option value="TB">TB</option>
-                  </select>
-                </div>
-              </FormField>
-              <FormField id="monthly-usage-alert" label="Per month">
-                <div className="flex gap-2">
-                  <input
-                    id="monthly-usage-alert"
-                    className="field"
-                    type="number"
-                    min={0}
-                    step="0.001"
-                    placeholder="Off"
-                    value={monthlyAmount}
-                    onChange={(event) => setMonthlyAmount(event.target.value)}
-                  />
-                  <select className="field w-24" value={monthlyUnit} onChange={(event) => setMonthlyUnit(event.target.value as "GB" | "TB")}>
-                    <option value="GB">GB</option>
-                    <option value="TB">TB</option>
-                  </select>
-                </div>
-              </FormField>
-            </div>
-            <div>
-              <PrimaryButton type="submit" disabled={savingAlerts}>
-                {savingAlerts ? "Saving…" : "Save alerts"}
-              </PrimaryButton>
-            </div>
-          </form>
-          {usageNote ? <p className="mt-2 text-xs text-muted-foreground">{usageNote}</p> : null}
+          {usageNote && !alertsOpen ? <p className="mt-2 text-xs text-muted-foreground">{usageNote}</p> : null}
         </section>
 
-        <section className="rounded-xl border border-border bg-surface p-5">
-          <h2 className="text-sm font-semibold">Uplink account</h2>
+        <section className="live-panel p-5">
+          <h2 className="inline-flex items-center gap-2 text-sm font-semibold">
+            <Cable className="h-4 w-4 text-primary" aria-hidden="true" />
+            Uplink account
+            {sourceUplink?.active ? <LivePulse /> : null}
+          </h2>
           {sourceUplink ? (
             <>
               <p className="mt-1 text-sm text-muted-foreground">
                 {sourceUplink.provider || "Provider not set"} on {sourceUplink.interface}
                 {sourceUplink.active ? " supplies this router's internet." : " is the only saved uplink."}
               </p>
-              <dl className="mt-4 grid gap-3 text-sm">
-                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
-                  <dt className="text-muted-foreground">Account number</dt>
-                  <dd className="font-medium tabular-nums">{sourceUplink.accountNumber || "Not registered"}</dd>
-                </div>
-                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
-                  <dt className="text-muted-foreground">Started</dt>
-                  <dd className="font-medium tabular-nums">{sourceUplink.cycleStartedOn || "—"}</dd>
-                </div>
-                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
-                  <dt className="text-muted-foreground">Runs for</dt>
-                  <dd className="font-medium tabular-nums">
-                    {sourceUplink.cycleDays ? `${sourceUplink.cycleDays} day${sourceUplink.cycleDays === 1 ? "" : "s"}` : "—"}
-                  </dd>
-                </div>
-                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
-                  <dt className="text-muted-foreground">Renews</dt>
-                  <dd className="font-medium tabular-nums">
-                    {sourceUplink.cycleEndsOn
-                      ? `${sourceUplink.cycleEndsOn}${uplinkDays == null ? "" : uplinkDays < 0 ? " · overdue" : ` · ${uplinkDays} day${uplinkDays === 1 ? "" : "s"} left`}`
-                      : "—"}
-                  </dd>
-                </div>
+              <dl className="mt-4 grid gap-0 text-sm">
+                {[
+                  ["Account number", sourceUplink.accountNumber || "Not registered"],
+                  ["Started", sourceUplink.cycleStartedOn || "—"],
+                  ["Runs for", sourceUplink.cycleDays ? `${sourceUplink.cycleDays} day${sourceUplink.cycleDays === 1 ? "" : "s"}` : "—"],
+                  [
+                    "Renews",
+                    sourceUplink.cycleEndsOn
+                      ? `${sourceUplink.cycleEndsOn}${
+                          uplinkDays == null ? "" : uplinkDays < 0 ? " · overdue" : ` · ${uplinkDays} day${uplinkDays === 1 ? "" : "s"} left`
+                        }`
+                      : "—",
+                  ],
+                ].map(([label, value]) => (
+                  <div key={label} className="flex flex-wrap items-center justify-between gap-2 border-t border-border py-3">
+                    <dt className="text-muted-foreground">{label}</dt>
+                    <dd className="font-medium tabular">{value}</dd>
+                  </div>
+                ))}
               </dl>
-              <div className="mt-4">
+              <div className="mt-1">
                 <SecondaryButton
                   type="button"
                   onClick={() => {
@@ -843,103 +941,202 @@ export function MikrotikLivePage() {
           </Dialog.Content>
         </Dialog.Portal>
       </Dialog.Root>
+
+      <Dialog.Root open={alertsOpen} onOpenChange={(open) => !savingAlerts && setAlertsOpen(open)}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content max-w-lg">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <Dialog.Title className="text-base font-semibold text-foreground">Usage alerts</Dialog.Title>
+                <Dialog.Description className="mt-2 text-sm text-muted-foreground">
+                  Notify this ISP account when traffic hits a daily or monthly limit. Leave blank to turn an alert off.
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <button type="button" className="rounded-md p-1 text-muted-foreground hover:bg-surface-muted" aria-label="Close">
+                  <X className="h-4 w-4" />
+                </button>
+              </Dialog.Close>
+            </div>
+            <form
+              className="mt-4 grid gap-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveUsageAlerts();
+              }}
+            >
+              <FormField id="daily-usage-alert" label="Per day">
+                <div className="flex gap-2">
+                  <input
+                    id="daily-usage-alert"
+                    className="field"
+                    type="number"
+                    min={0}
+                    step="0.001"
+                    placeholder="Off"
+                    value={dailyAmount}
+                    onChange={(event) => setDailyAmount(event.target.value)}
+                  />
+                  <select className="field w-24" value={dailyUnit} onChange={(event) => setDailyUnit(event.target.value as "GB" | "TB")}>
+                    <option value="GB">GB</option>
+                    <option value="TB">TB</option>
+                  </select>
+                </div>
+              </FormField>
+              <FormField id="monthly-usage-alert" label="Per month">
+                <div className="flex gap-2">
+                  <input
+                    id="monthly-usage-alert"
+                    className="field"
+                    type="number"
+                    min={0}
+                    step="0.001"
+                    placeholder="Off"
+                    value={monthlyAmount}
+                    onChange={(event) => setMonthlyAmount(event.target.value)}
+                  />
+                  <select className="field w-24" value={monthlyUnit} onChange={(event) => setMonthlyUnit(event.target.value as "GB" | "TB")}>
+                    <option value="GB">GB</option>
+                    <option value="TB">TB</option>
+                  </select>
+                </div>
+              </FormField>
+              {usageNote && alertsOpen ? <p className="text-sm text-destructive">{usageNote}</p> : null}
+              <div className="flex flex-wrap justify-end gap-2">
+                <SecondaryButton type="button" disabled={savingAlerts} onClick={() => setAlertsOpen(false)}>
+                  Cancel
+                </SecondaryButton>
+                <PrimaryButton type="submit" disabled={savingAlerts}>
+                  {savingAlerts ? "Saving…" : "Save alerts"}
+                </PrimaryButton>
+              </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
       {live?.reachable ? (
         <div className="mt-6 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
           <div className="order-2 grid min-w-0 gap-4 lg:order-1">
-          <section className="live-panel overflow-x-auto">
-            <div className="live-panel-header">
-              <h2>
-                <span className="live-dot" aria-hidden="true" />
-                Interfaces
-              </h2>
-              <p className="text-caption tabular text-muted-foreground">{live.interfaces.length}</p>
-            </div>
-            <table className="data-table min-w-[36rem]">
-              <thead className="text-xs text-muted-foreground">
-                <tr>
-                  <th className="px-5 py-2.5 font-medium">Name</th>
-                  <th className="px-5 py-2.5 font-medium">Type</th>
-                  <th className="px-5 py-2.5 font-medium">State</th>
-                  <th className="px-5 py-2.5 font-medium">Received</th>
-                  <th className="px-5 py-2.5 font-medium">Sent</th>
-                </tr>
-              </thead>
-              <tbody>
-                {live.interfaces.length === 0 ? (
+            <section className="live-panel overflow-x-auto">
+              <div className="live-panel-header">
+                <h2>
+                  <LivePulse />
+                  Interfaces
+                </h2>
+                <p className="text-caption tabular text-muted-foreground">
+                  {runningInterfaces}/{live.interfaces.length} up
+                </p>
+              </div>
+              <table className="data-table min-w-[36rem]">
+                <thead className="text-xs text-muted-foreground">
                   <tr>
-                    <td className="px-5 py-4 text-muted-foreground" colSpan={5}>
-                      No interfaces were returned.
-                    </td>
+                    <th className="px-5 py-2.5 font-medium">Name</th>
+                    <th className="px-5 py-2.5 font-medium">Type</th>
+                    <th className="px-5 py-2.5 font-medium">State</th>
+                    <th className="px-5 py-2.5 font-medium">Received</th>
+                    <th className="px-5 py-2.5 font-medium">Sent</th>
                   </tr>
-                ) : (
-                  live.interfaces.map((item) => (
-                    <tr key={item.name} className="border-t border-border">
-                      <td className="px-5 py-3">
-                        <span className="font-medium">{item.name}</span>
-                        {item.comment ? <span className="mt-0.5 block text-xs text-muted-foreground">{item.comment}</span> : null}
+                </thead>
+                <tbody>
+                  {live.interfaces.length === 0 ? (
+                    <tr>
+                      <td className="px-5 py-4 text-muted-foreground" colSpan={5}>
+                        No interfaces were returned.
                       </td>
-                      <td className="px-5 py-3 text-muted-foreground">{item.type || "—"}</td>
-                      <td className="px-5 py-3">
-                        <span className="inline-flex items-center gap-2">
-                          <span className={`h-1.5 w-1.5 rounded-full ${item.disabled ? "bg-muted-foreground" : item.running ? "bg-success" : "bg-destructive"}`} />
-                          {item.disabled ? "Disabled" : item.running ? "Running" : "Down"}
-                        </span>
-                      </td>
-                      <td className="px-5 py-3 tabular-nums">{formatBytes(item.rxByte)}</td>
-                      <td className="px-5 py-3 tabular-nums">{formatBytes(item.txByte)}</td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </section>
-          <section className="live-panel overflow-x-auto">
-            <div className="live-panel-header">
-              <h2>
-                <span className="live-dot" aria-hidden="true" />
-                Health
-              </h2>
-              <p className="text-caption tabular text-muted-foreground">{live.health?.drops.length ?? 0} drops</p>
-            </div>
-            <HealthTrend
-              range={healthRange}
-              trend={(healthRange === "live" ? live.health?.trend : live.health?.trends?.[healthRange] ?? healthTrends[healthRange]) ?? []}
-              onRange={setHealthRange}
-            />
-            <table className="data-table min-w-[36rem]">
-              <thead className="text-xs text-muted-foreground">
-                <tr>
-                  <th className="px-5 py-2.5 font-medium">Where</th>
-                  <th className="px-5 py-2.5 font-medium">Reason</th>
-                  <th className="px-5 py-2.5 font-medium">Time</th>
-                  <th className="px-5 py-2.5 font-medium">Duration</th>
-                </tr>
-              </thead>
-              <tbody>
-                {(live.health?.drops.length ?? 0) === 0 ? (
+                  ) : (
+                    live.interfaces.map((item) => {
+                      const state = interfaceState(item);
+                      const StateIcon = state.Icon;
+                      return (
+                        <tr key={item.name} className="border-t border-border">
+                          <td className="px-5 py-3">
+                            <span className="inline-flex items-center gap-2 font-medium">
+                              <span
+                                className={cn(
+                                  "flex h-7 w-7 shrink-0 items-center justify-center rounded-lg",
+                                  item.disabled
+                                    ? "bg-muted text-muted-foreground"
+                                    : item.running
+                                      ? "bg-success-soft text-success"
+                                      : "bg-destructive-soft text-destructive",
+                                )}
+                                aria-hidden="true"
+                              >
+                                <StateIcon className="h-3.5 w-3.5" />
+                              </span>
+                              {item.name}
+                            </span>
+                            {item.comment ? <span className="mt-0.5 block pl-9 text-xs text-muted-foreground">{item.comment}</span> : null}
+                          </td>
+                          <td className="px-5 py-3 text-muted-foreground">{item.type || "—"}</td>
+                          <td className="px-5 py-3">
+                            <StatusBadge tone={state.tone}>{state.label}</StatusBadge>
+                          </td>
+                          <td className="px-5 py-3 tabular">{formatBytes(item.rxByte)}</td>
+                          <td className="px-5 py-3 tabular">{formatBytes(item.txByte)}</td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </section>
+            <section className="live-panel overflow-x-auto">
+              <div className="live-panel-header">
+                <h2>
+                  <LivePulse />
+                  Health
+                </h2>
+                <p className="text-caption tabular text-muted-foreground">{live.health?.drops.length ?? 0} drops</p>
+              </div>
+              <HealthTrend
+                range={healthRange}
+                trend={(healthRange === "live" ? live.health?.trend : live.health?.trends?.[healthRange] ?? healthTrends[healthRange]) ?? []}
+                onRange={setHealthRange}
+              />
+              <table className="data-table min-w-[36rem]">
+                <thead className="text-xs text-muted-foreground">
                   <tr>
-                    <td className="px-5 py-4 text-muted-foreground" colSpan={4}>
-                      No drops are recorded.
-                    </td>
+                    <th className="px-5 py-2.5 font-medium">Where</th>
+                    <th className="px-5 py-2.5 font-medium">Reason</th>
+                    <th className="px-5 py-2.5 font-medium">Time</th>
+                    <th className="px-5 py-2.5 font-medium">Duration</th>
                   </tr>
-                ) : (
-                  live.health?.drops.map((drop) => (
-                    <tr key={`${drop.subject}-${drop.startedAt}`} className="border-t border-border">
-                      <td className="px-5 py-3 font-medium">{drop.subject}</td>
-                      <td className="px-5 py-3">{drop.reason}</td>
-                      <td className="px-5 py-3 tabular-nums">{drop.startedAt}</td>
-                      <td className="px-5 py-3 tabular-nums">{drop.open ? `${drop.duration} and ongoing` : drop.duration}</td>
+                </thead>
+                <tbody>
+                  {(live.health?.drops.length ?? 0) === 0 ? (
+                    <tr>
+                      <td className="px-5 py-4 text-muted-foreground" colSpan={4}>
+                        No drops are recorded.
+                      </td>
                     </tr>
-                  ))
-                )}
-              </tbody>
-            </table>
-          </section>
+                  ) : (
+                    live.health?.drops.map((drop) => (
+                      <tr key={`${drop.subject}-${drop.startedAt}`} className="border-t border-border">
+                        <td className="px-5 py-3 font-medium">{drop.subject}</td>
+                        <td className="px-5 py-3">{drop.reason}</td>
+                        <td className="px-5 py-3 tabular">{drop.startedAt}</td>
+                        <td className="px-5 py-3 tabular">{drop.open ? `${drop.duration} and ongoing` : drop.duration}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </section>
           </div>
           <aside className="live-panel order-1 h-fit p-5 lg:sticky lg:top-24 lg:order-2">
-            <p className="text-xs font-medium text-muted-foreground">MikroTik profile</p>
-            <h2 className="mt-1 text-lg font-semibold tracking-tight">{title}</h2>
-            <dl className="mt-5 grid gap-3 text-sm">
+            <div className="flex items-center gap-2">
+              <span className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary/10 text-primary" aria-hidden="true">
+                <Router className="h-4 w-4" />
+              </span>
+              <div className="min-w-0">
+                <p className="text-xs font-medium text-muted-foreground">MikroTik profile</p>
+                <h2 className="truncate text-base font-semibold tracking-tight">{title}</h2>
+              </div>
+            </div>
+            <dl className="mt-5 grid gap-0 text-sm">
               {[
                 ["Site", live.site || ""],
                 ["Identity", live.identity && live.identity !== title ? live.identity : ""],
@@ -952,13 +1149,13 @@ export function MikrotikLivePage() {
               ]
                 .filter(([, value]) => value)
                 .map(([label, value]) => (
-                <div key={label} className="grid gap-0.5 border-t border-border pt-3">
-                  <dt className="text-xs text-muted-foreground">{label}</dt>
-                  <dd className="font-medium">{value}</dd>
-                </div>
-              ))}
+                  <div key={label} className="grid gap-0.5 border-t border-border py-3">
+                    <dt className="text-xs text-muted-foreground">{label}</dt>
+                    <dd className="font-medium">{value}</dd>
+                  </div>
+                ))}
             </dl>
-            <div className="mt-5 border-t border-border pt-4">
+            <div className="mt-2 border-t border-border pt-4">
               {confirmRestart ? (
                 <div className="grid gap-2">
                   <p className="text-xs text-muted-foreground">Restarting drops every connected session for a minute or two.</p>

@@ -1,5 +1,5 @@
-import { useState } from "react";
-import { Router, Wifi, WifiOff } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { HeartPulse, MapPin, Router, Wifi, WifiOff } from "lucide-react";
 import { PageHeader } from "@/components/ui/DetailGrid";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { StatusBadge } from "@/components/ui/StatusBadge";
@@ -16,8 +16,11 @@ type Device = {
   site: string;
   status: string;
   tunnelStatus: "up" | "down" | "unknown" | string;
+  healthPercent?: number;
   routerosVersion?: string;
   role?: string;
+  latitude?: number | null;
+  longitude?: number | null;
 };
 
 type DevicePage = {
@@ -26,6 +29,15 @@ type DevicePage = {
   limit: number;
   offset: number;
 };
+
+type LocationGroup = {
+  key: string;
+  label: string;
+  devices: Device[];
+};
+
+/** Nearby routers share one category: every 0.10° of lat/lon is one cell (~11 km). */
+const LOCATION_STEP = 0.1;
 
 function connectionState(tunnelStatus: Device["tunnelStatus"]) {
   if (tunnelStatus === "up") {
@@ -49,17 +61,144 @@ function connectionState(tunnelStatus: Device["tunnelStatus"]) {
   };
 }
 
+function healthTone(percent: number) {
+  if (percent >= 90) return "text-success";
+  if (percent >= 70) return "text-warning";
+  return "text-destructive";
+}
+
+function healthTrack(percent: number) {
+  if (percent >= 90) return "stroke-success";
+  if (percent >= 70) return "stroke-warning";
+  return "stroke-destructive";
+}
+
+function HealthMeter({ percent }: { percent: number }) {
+  const value = Math.max(0, Math.min(100, Math.round(percent)));
+  const radius = 18;
+  const circumference = 2 * Math.PI * radius;
+  const offset = circumference * (1 - value / 100);
+  return (
+    <div className="flex shrink-0 flex-col items-center gap-1" title={`Health ${value}% over the last 24 hours`}>
+      <div className="relative h-12 w-12">
+        <svg viewBox="0 0 44 44" className="h-12 w-12 -rotate-90" aria-hidden="true">
+          <circle cx="22" cy="22" r={radius} fill="none" className="stroke-border" strokeWidth="4" />
+          <circle
+            cx="22"
+            cy="22"
+            r={radius}
+            fill="none"
+            className={cn("transition-[stroke-dashoffset] duration-500 ease-out", healthTrack(value))}
+            strokeWidth="4"
+            strokeLinecap="round"
+            strokeDasharray={circumference}
+            strokeDashoffset={offset}
+          />
+        </svg>
+        <span className={cn("absolute inset-0 flex items-center justify-center text-[0.7rem] font-bold tabular", healthTone(value))}>
+          {value}%
+        </span>
+      </div>
+      <span className="inline-flex items-center gap-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-muted-foreground">
+        <HeartPulse className="h-3 w-3" aria-hidden="true" />
+        Health
+      </span>
+      <span className="sr-only">Health {value} percent over the last 24 hours</span>
+    </div>
+  );
+}
+
+function floorStep(value: number, step: number) {
+  return Math.floor(value / step) * step;
+}
+
+function formatStep(value: number) {
+  return value.toFixed(1);
+}
+
+function locationKey(device: Device) {
+  const lat = device.latitude;
+  const lon = device.longitude;
+  if (typeof lat !== "number" || typeof lon !== "number" || Number.isNaN(lat) || Number.isNaN(lon)) {
+    return "unlocated";
+  }
+  const lat0 = floorStep(lat, LOCATION_STEP);
+  const lon0 = floorStep(lon, LOCATION_STEP);
+  return `${formatStep(lat0)}:${formatStep(lon0)}`;
+}
+
+function commonSite(devices: Device[]) {
+  const counts = new Map<string, number>();
+  for (const device of devices) {
+    const site = device.site.trim();
+    if (!site) continue;
+    counts.set(site, (counts.get(site) ?? 0) + 1);
+  }
+  let best = "";
+  let bestCount = 0;
+  for (const [site, count] of counts) {
+    if (count > bestCount || (count === bestCount && site.localeCompare(best) < 0)) {
+      best = site;
+      bestCount = count;
+    }
+  }
+  return best;
+}
+
+function locationLabel(key: string, devices: Device[]) {
+  const site = commonSite(devices);
+  if (key === "unlocated") return site || "Unlocated";
+  return site || `Area ${key.replace(":", ", ")}`;
+}
+
+function groupByLocation(devices: Device[]): LocationGroup[] {
+  const buckets = new Map<string, Device[]>();
+  for (const device of devices) {
+    const key = locationKey(device);
+    const list = buckets.get(key) ?? [];
+    list.push(device);
+    buckets.set(key, list);
+  }
+  const groups: LocationGroup[] = [];
+  for (const [key, items] of buckets) {
+    groups.push({
+      key,
+      label: locationLabel(key, items),
+      devices: items,
+    });
+  }
+  groups.sort((a, b) => {
+    if (a.key === "unlocated") return 1;
+    if (b.key === "unlocated") return -1;
+    return a.label.localeCompare(b.label) || a.key.localeCompare(b.key);
+  });
+  return groups;
+}
+
 export function MikrotiksPage() {
   usePageMeta("Mikrotiks — ISP CENTRIC", "Saved MikroTik records.");
   const { user } = useAuth();
   const [offset, setOffset] = useState(0);
   const [reload, setReload] = useState(0);
+  const [locationFilter, setLocationFilter] = useState("all");
   const saved = useSavedQuery<DevicePage>(`/api/mikrotiks?limit=50&offset=${offset}&reload=${reload}`);
   const page = saved.data;
   const [actionError, setActionError] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
   const href = (path: string) => (user ? clientPage(user, path) : path);
+
+  const groups = useMemo(() => groupByLocation(page?.devices ?? []), [page?.devices]);
+  const visibleGroups = useMemo(
+    () => (locationFilter === "all" ? groups : groups.filter((group) => group.key === locationFilter)),
+    [groups, locationFilter],
+  );
+
+  useEffect(() => {
+    if (locationFilter !== "all" && !groups.some((group) => group.key === locationFilter)) {
+      setLocationFilter("all");
+    }
+  }, [groups, locationFilter]);
 
   async function setSuspended(device: Device, suspended: boolean) {
     setActionError("");
@@ -126,77 +265,165 @@ export function MikrotiksPage() {
       ) : null}
 
       {page && page.devices.length > 0 ? (
-        <ul className="mt-6 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-          {page.devices.map((device) => {
-            const suspended = device.status === "suspended";
-            const busy = busyId === device.id;
-            const connection = connectionState(device.tunnelStatus);
-            const StatusIcon = connection.Icon;
-            return (
-              <li key={device.id}>
-                <article className="card flex h-full flex-col p-5 transition-transform duration-fast ease-out hover:-translate-y-0.5">
-                  <div className="flex items-start justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex flex-wrap items-center gap-2">
-                        <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border bg-surface-muted text-muted-foreground">
-                          <Router className="h-4 w-4" aria-hidden="true" />
-                        </span>
-                        <div className="min-w-0">
-                          <h2 className="truncate text-base font-semibold">{device.name}</h2>
-                          {device.site ? <p className="mt-0.5 truncate text-sm text-muted-foreground">{device.site}</p> : null}
-                        </div>
-                      </div>
-                      <div className="mt-3 flex flex-wrap items-center gap-2">
-                        {suspended ? <StatusBadge tone="suspended">Suspended</StatusBadge> : null}
-                        {device.routerosVersion ? (
-                          <span className="text-xs text-muted-foreground">RouterOS {device.routerosVersion}</span>
-                        ) : null}
-                      </div>
-                    </div>
-
-                    <div
-                      className={cn(
-                        "flex shrink-0 flex-col items-center gap-1 rounded-xl px-2.5 py-2 text-center",
-                        connection.iconClass,
-                      )}
-                      title={connection.label}
-                    >
-                      <StatusIcon className="h-5 w-5" aria-hidden="true" />
-                      <span className="text-[0.65rem] font-semibold uppercase tracking-wide">{connection.label}</span>
-                      <span className="sr-only">
-                        {device.name} is {connection.label.toLowerCase()}
-                      </span>
-                    </div>
-                  </div>
-
-                  <div className="mt-auto flex flex-wrap gap-2 pt-5">
-                    <PrimaryButton to={href(`/mikrotiks/${device.id}`)}>View live</PrimaryButton>
-                    <SecondaryButton type="button" disabled={busy} onClick={() => void setSuspended(device, !suspended)}>
-                      {suspended ? "Unsuspend" : "Suspend"}
-                    </SecondaryButton>
-                    {confirmingId === device.id ? (
-                      <SecondaryButton type="button" disabled={busy} onClick={() => void remove(device.id)}>
-                        {busy ? "Deleting" : "Confirm delete"}
-                      </SecondaryButton>
-                    ) : (
-                      <SecondaryButton type="button" disabled={busyId !== null} onClick={() => setConfirmingId(device.id)}>
-                        Delete
-                      </SecondaryButton>
+        <div className="mt-6 grid gap-6">
+          {groups.length > 1 ? (
+            <div className="flex flex-wrap gap-2" aria-label="Location categories">
+              <button
+                type="button"
+                onClick={() => setLocationFilter("all")}
+                className={cn(
+                  "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition duration-fast ease-out",
+                  locationFilter === "all"
+                    ? "border-primary bg-primary/10 text-primary"
+                    : "border-border bg-surface text-muted-foreground hover:border-primary/50 hover:text-foreground",
+                )}
+              >
+                All
+                <span
+                  className={cn(
+                    "inline-flex min-h-4 min-w-4 items-center justify-center rounded-full px-1 text-[0.6rem] font-bold leading-none",
+                    locationFilter === "all" ? "bg-primary text-white" : "bg-foreground/10 text-muted-foreground",
+                  )}
+                >
+                  {page.devices.length}
+                </span>
+              </button>
+              {groups.map((group) => {
+                const active = locationFilter === group.key;
+                return (
+                  <button
+                    key={group.key}
+                    type="button"
+                    onClick={() => setLocationFilter(group.key)}
+                    className={cn(
+                      "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-xs font-semibold transition duration-fast ease-out",
+                      active
+                        ? "border-primary bg-primary/10 text-primary"
+                        : "border-border bg-surface text-muted-foreground hover:border-primary/50 hover:text-foreground",
                     )}
-                  </div>
-                </article>
-              </li>
-            );
-          })}
-        </ul>
+                  >
+                    <MapPin className="h-3.5 w-3.5" aria-hidden="true" />
+                    {group.label}
+                    <span
+                      className={cn(
+                        "inline-flex min-h-4 min-w-4 items-center justify-center rounded-full px-1 text-[0.6rem] font-bold leading-none",
+                        active ? "bg-primary text-white" : "bg-foreground/10 text-muted-foreground",
+                      )}
+                    >
+                      {group.devices.length}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          ) : null}
+
+          {visibleGroups.map((group) => (
+            <section key={group.key} className="grid gap-3">
+              <div className="flex flex-wrap items-end justify-between gap-2">
+                <div className="min-w-0">
+                  <h2 className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                    <MapPin className="h-4 w-4 shrink-0 text-muted-foreground" aria-hidden="true" />
+                    <span className="truncate">{group.label}</span>
+                  </h2>
+                  <p className="mt-0.5 text-xs text-muted-foreground">
+                    {group.devices.length} router{group.devices.length === 1 ? "" : "s"}
+                    {group.key !== "unlocated" ? " in this area" : ""}
+                  </p>
+                </div>
+              </div>
+              <ul className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                {group.devices.map((device) => {
+                  const suspended = device.status === "suspended";
+                  const busy = busyId === device.id;
+                  const connection = connectionState(device.tunnelStatus);
+                  const StatusIcon = connection.Icon;
+                  const healthPercent = typeof device.healthPercent === "number" ? device.healthPercent : 100;
+                  return (
+                    <li key={device.id}>
+                      <article className="card flex h-full flex-col p-5 transition-transform duration-fast ease-out hover:-translate-y-0.5">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="flex flex-wrap items-center gap-2">
+                              <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl border border-border bg-surface-muted text-muted-foreground">
+                                <Router className="h-4 w-4" aria-hidden="true" />
+                              </span>
+                              <div className="min-w-0">
+                                <h3 className="truncate text-base font-semibold">{device.name}</h3>
+                                {device.site ? <p className="mt-0.5 truncate text-sm text-muted-foreground">{device.site}</p> : null}
+                              </div>
+                            </div>
+                            <div className="mt-3 flex flex-wrap items-center gap-2">
+                              {suspended ? <StatusBadge tone="suspended">Suspended</StatusBadge> : null}
+                              {device.routerosVersion ? (
+                                <span className="text-xs text-muted-foreground">RouterOS {device.routerosVersion}</span>
+                              ) : null}
+                            </div>
+                          </div>
+
+                          <div className="flex shrink-0 items-start gap-2">
+                            <HealthMeter percent={healthPercent} />
+                            <div
+                              className={cn(
+                                "flex flex-col items-center gap-1 rounded-xl px-2.5 py-2 text-center",
+                                connection.iconClass,
+                              )}
+                              title={connection.label}
+                            >
+                              <StatusIcon className="h-5 w-5" aria-hidden="true" />
+                              <span className="text-[0.65rem] font-semibold uppercase tracking-wide">{connection.label}</span>
+                              <span className="sr-only">
+                                {device.name} is {connection.label.toLowerCase()}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        <div className="mt-auto flex flex-wrap gap-2 pt-5">
+                          <PrimaryButton to={href(`/mikrotiks/${device.id}`)}>View live</PrimaryButton>
+                          <SecondaryButton type="button" disabled={busy} onClick={() => void setSuspended(device, !suspended)}>
+                            {suspended ? "Unsuspend" : "Suspend"}
+                          </SecondaryButton>
+                          {confirmingId === device.id ? (
+                            <SecondaryButton type="button" disabled={busy} onClick={() => void remove(device.id)}>
+                              {busy ? "Deleting" : "Confirm delete"}
+                            </SecondaryButton>
+                          ) : (
+                            <SecondaryButton type="button" disabled={busyId !== null} onClick={() => setConfirmingId(device.id)}>
+                              Delete
+                            </SecondaryButton>
+                          )}
+                        </div>
+                      </article>
+                    </li>
+                  );
+                })}
+              </ul>
+            </section>
+          ))}
+        </div>
       ) : null}
 
       {page && page.total > page.limit ? (
         <div className="mt-4 flex gap-3">
-          <PrimaryButton type="button" disabled={offset === 0} onClick={() => setOffset(Math.max(0, offset - page.limit))}>
+          <PrimaryButton
+            type="button"
+            disabled={offset === 0}
+            onClick={() => {
+              setLocationFilter("all");
+              setOffset(Math.max(0, offset - page.limit));
+            }}
+          >
             Previous
           </PrimaryButton>
-          <PrimaryButton type="button" disabled={offset + page.limit >= page.total} onClick={() => setOffset(offset + page.limit)}>
+          <PrimaryButton
+            type="button"
+            disabled={offset + page.limit >= page.total}
+            onClick={() => {
+              setLocationFilter("all");
+              setOffset(offset + page.limit);
+            }}
+          >
             Next
           </PrimaryButton>
         </div>
