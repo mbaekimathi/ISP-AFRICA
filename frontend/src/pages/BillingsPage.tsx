@@ -1,5 +1,7 @@
 import {
+  ArrowDownLeft,
   ArrowRight,
+  ArrowUpRight,
   CircleAlert,
   Filter,
   Inbox,
@@ -12,6 +14,7 @@ import {
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { EmptyState } from "@/components/ui/EmptyState";
+import { StatusBadge, type StatusTone } from "@/components/ui/StatusBadge";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
 import { clientPage } from "@/lib/accounts";
@@ -48,6 +51,14 @@ const serviceFilters: Array<{ value: ServiceFilter; label: string }> = [
   { value: "hotspot", label: "Hotspot" },
 ];
 
+const periodFilters: Array<{ value: PeriodMode; label: string }> = [
+  { value: "all", label: "All time" },
+  { value: "day", label: "Day" },
+  { value: "month", label: "Month" },
+  { value: "year", label: "Year" },
+  { value: "period", label: "Custom" },
+];
+
 function paymentMode(item: Transaction): string {
   const method = String(item.method || "").trim().toLowerCase();
   if (item.kind === "stk" || item.kind === "purchase" || item.kind === "gateway" || method === "stk" || method === "mpesa") {
@@ -79,6 +90,44 @@ function monthRange(value: string) {
   return { from: `${value}-01`, to: `${value}-${last}` };
 }
 
+function isCredit(item: Transaction) {
+  if (item.status === "failed" || item.status === "void") return false;
+  if (item.kind === "invoice") return false;
+  return item.status === "paid" || item.kind === "payment" || item.kind === "stk" || item.kind === "purchase" || item.kind === "gateway";
+}
+
+function statusTone(status: string): StatusTone {
+  if (status === "paid") return "active";
+  if (status === "failed" || status === "void") return "critical";
+  if (status === "pending" || status === "due") return "due";
+  return "pending";
+}
+
+function statusLabel(status: string) {
+  if (!status) return "Open";
+  return status.charAt(0).toUpperCase() + status.slice(1);
+}
+
+function dayKey(createdAt: string) {
+  const match = createdAt.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (match) return match[1];
+  const parsed = new Date(createdAt);
+  if (Number.isNaN(parsed.getTime())) return createdAt;
+  return localDay(parsed);
+}
+
+function dayHeading(key: string) {
+  const today = localDay();
+  const yesterdayDate = new Date();
+  yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+  const yesterday = localDay(yesterdayDate);
+  if (key === today) return "Today";
+  if (key === yesterday) return "Yesterday";
+  const parsed = new Date(`${key}T12:00:00`);
+  if (Number.isNaN(parsed.getTime())) return key;
+  return parsed.toLocaleDateString("en-KE", { weekday: "short", day: "numeric", month: "short", year: "numeric" });
+}
+
 function PackageAction({
   to,
   icon,
@@ -95,7 +144,7 @@ function PackageAction({
       to={to}
       className="group flex items-start gap-4 px-5 py-4 transition hover:bg-surface-muted focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-ring"
     >
-      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary">
+      <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary transition duration-brand ease-brand group-hover:scale-105">
         {icon}
       </span>
       <span className="min-w-0 flex-1">
@@ -110,99 +159,128 @@ function PackageAction({
   );
 }
 
-function StatCard({
-  icon,
-  iconClass,
+function MetricChip({
   label,
   value,
-  hint,
-  valueClass,
-  hintClass,
+  tone = "neutral",
 }: {
-  icon: ReactNode;
-  iconClass?: string;
   label: string;
   value: ReactNode;
-  hint?: ReactNode;
-  valueClass?: string;
-  hintClass?: string;
+  tone?: "neutral" | "success" | "danger";
 }) {
   return (
-    <div className="rounded-xl border border-border bg-surface p-2.5 shadow-card sm:rounded-2xl sm:p-4">
-      <div className="flex items-center justify-between gap-1.5">
-        <p className="truncate text-[10px] font-semibold uppercase tracking-wide text-muted-foreground sm:text-[11px]">
-          {label}
-        </p>
-        <span
-          className={`flex h-6 w-6 shrink-0 items-center justify-center rounded-md sm:h-7 sm:w-7 sm:rounded-lg ${iconClass ?? "bg-primary/10 text-primary"}`}
-          aria-hidden="true"
-        >
-          {icon}
-        </span>
-      </div>
-      <div
-        className={`mt-1.5 flex min-w-0 items-center gap-1.5 truncate text-sm font-semibold tracking-tight sm:mt-2 sm:text-lg ${valueClass ?? ""}`}
-      >
-        {value}
-      </div>
-      {hint != null && hint !== "" ? (
-        <p className={`mt-0.5 truncate text-[10px] sm:text-xs ${hintClass ?? "text-muted-foreground"}`}>{hint}</p>
-      ) : null}
-    </div>
-  );
-}
-
-function CardHeader({
-  icon,
-  title,
-  children,
-}: {
-  icon: ReactNode;
-  title: ReactNode;
-  children?: ReactNode;
-}) {
-  return (
-    <div className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
-      <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
-        {icon}
-      </span>
-      <h2 className="text-sm font-semibold">{title}</h2>
-      {children ? <div className="ml-auto flex flex-wrap items-center gap-2">{children}</div> : null}
-    </div>
-  );
-}
-
-function amountClass(status: string) {
-  if (status === "paid") return "text-success";
-  if (status === "failed" || status === "void") return "text-destructive";
-  return "text-warning";
-}
-
-const transactionGrid =
-  "grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 px-3 py-3 sm:grid-cols-[8.5rem_minmax(0,1.1fr)_minmax(0,0.7fr)_minmax(0,1fr)_auto] sm:items-center sm:gap-x-4 sm:px-5";
-
-function TransactionRow({ item }: { item: Transaction }) {
-  return (
-    <li className={transactionGrid}>
-      <p className="order-1 truncate text-[11px] tabular text-muted-foreground sm:order-none sm:text-sm">
-        {item.createdAt}
-      </p>
-      <p className="order-3 col-span-2 truncate text-sm font-medium sm:order-none sm:col-span-1">
-        {item.customer || "—"}
-      </p>
-      <p className="order-4 truncate text-sm sm:order-none">{paymentMode(item)}</p>
+    <div className="min-w-0 rounded-xl border border-white/10 bg-white/5 px-3.5 py-3 backdrop-blur-sm">
+      <p className="truncate text-[10px] font-semibold uppercase tracking-[0.14em] text-white/55">{label}</p>
       <p
         className={cn(
-          "order-5 truncate font-mono text-[11px] sm:order-none sm:text-xs",
-          item.reference ? "text-foreground" : "text-muted-foreground",
+          "mt-1 truncate text-sm font-semibold tabular tracking-tight sm:text-base",
+          tone === "success" && "text-emerald-300",
+          tone === "danger" && "text-rose-300",
+          tone === "neutral" && "text-white",
         )}
-        title={item.reference || undefined}
       >
-        {item.reference || "—"}
+        {value}
       </p>
-      <p className={cn("order-2 text-sm font-semibold tabular sm:order-none sm:text-right", amountClass(item.status))}>
-        {money(item.amount)}
-      </p>
+    </div>
+  );
+}
+
+function SegmentedControl<T extends string>({
+  label,
+  value,
+  options,
+  onChange,
+}: {
+  label: string;
+  value: T;
+  options: Array<{ value: T; label: string }>;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div className="grid gap-1.5">
+      <span className="text-xs font-medium text-muted-foreground">{label}</span>
+      <div
+        role="group"
+        aria-label={label}
+        className="inline-flex w-full flex-wrap items-center gap-0.5 rounded-xl border border-border bg-surface-muted/60 p-0.5 sm:w-max"
+      >
+        {options.map((option) => (
+          <button
+            key={option.value}
+            type="button"
+            aria-pressed={value === option.value}
+            onClick={() => onChange(option.value)}
+            className={cn(
+              "min-h-9 flex-1 rounded-lg px-3 py-1.5 text-xs font-semibold transition duration-fast ease-out sm:flex-none sm:px-3.5",
+              value === option.value
+                ? "bg-surface text-foreground shadow-xs ring-1 ring-border"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {option.label}
+          </button>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function TransactionRow({ item }: { item: Transaction }) {
+  const credit = isCredit(item);
+  const Icon = credit ? ArrowDownLeft : ArrowUpRight;
+
+  return (
+    <li className="group grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3.5 transition hover:bg-surface-muted/70 sm:gap-4 sm:px-5">
+      <span
+        className={cn(
+          "flex h-10 w-10 shrink-0 items-center justify-center rounded-full transition duration-fast ease-out group-hover:scale-105",
+          credit ? "bg-success-soft/80 text-success" : "bg-warning-soft/80 text-warning",
+        )}
+        aria-hidden="true"
+      >
+        <Icon className="h-4 w-4" />
+      </span>
+
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <p className="truncate text-sm font-semibold tracking-tight">{item.customer || paymentMode(item)}</p>
+          <StatusBadge tone={statusTone(item.status)}>{statusLabel(item.status)}</StatusBadge>
+        </div>
+        <div className="mt-0.5 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-muted-foreground">
+          <span className="tabular">{item.createdAt}</span>
+          <span aria-hidden="true" className="hidden text-border sm:inline">
+            ·
+          </span>
+          <span>{paymentMode(item)}</span>
+          <span className="hidden uppercase tracking-wide sm:inline">{item.service}</span>
+          {item.reference ? (
+            <>
+              <span aria-hidden="true" className="hidden text-border sm:inline">
+                ·
+              </span>
+              <span className="truncate font-mono text-[11px] text-foreground/80" title={item.reference}>
+                {item.reference}
+              </span>
+            </>
+          ) : null}
+        </div>
+        {item.detail ? <p className="mt-1 truncate text-xs text-muted-foreground">{item.detail}</p> : null}
+      </div>
+
+      <div className="text-right">
+        <p
+          className={cn(
+            "text-sm font-semibold tabular tracking-tight sm:text-[15px]",
+            credit ? "text-success" : item.status === "failed" || item.status === "void" ? "text-destructive" : "text-warning",
+          )}
+        >
+          {credit ? "+" : "−"}
+          {money(item.amount)}
+        </p>
+        <p className="mt-0.5 text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+          {credit ? "In" : "Out"}
+        </p>
+      </div>
     </li>
   );
 }
@@ -211,12 +289,13 @@ function TransactionSkeletonRows() {
   return (
     <>
       {Array.from({ length: 6 }, (_, index) => (
-        <li key={index} className={`${transactionGrid} gap-y-1.5`} aria-hidden="true">
-          <div className="skeleton h-3 w-24" />
-          <div className="skeleton h-3.5 w-14 justify-self-end" />
-          <div className="skeleton col-span-2 h-3 w-2/5 sm:col-span-1 sm:w-28" />
-          <div className="skeleton h-3 w-16 sm:w-14" />
-          <div className="skeleton h-3 w-24 sm:w-28" />
+        <li key={index} className="grid grid-cols-[auto_minmax(0,1fr)_auto] items-center gap-3 px-4 py-3.5 sm:gap-4 sm:px-5" aria-hidden="true">
+          <div className="skeleton h-10 w-10 rounded-full" />
+          <div className="min-w-0 space-y-2">
+            <div className="skeleton h-3.5 w-2/5" />
+            <div className="skeleton h-3 w-3/5" />
+          </div>
+          <div className="skeleton h-3.5 w-16 justify-self-end" />
         </li>
       ))}
     </>
@@ -227,6 +306,7 @@ export function BillingsPage() {
   const { user } = useAuth();
   usePageMeta("Billings — ISP CENTRIC", "Every transaction on this account, filtered by service and date.");
   const packagesTo = user ? clientPage(user, "/account/settings/isp-package") : "/account/settings/isp-package";
+  const accountNumber = user?.clientCode ?? "";
 
   const [report, setReport] = useState<TransactionReport | null>(null);
   const [message, setMessage] = useState("");
@@ -267,6 +347,18 @@ export function BillingsPage() {
 
   const transactions = report?.transactions ?? [];
   const outstandingDue = report ? Number(report.outstanding) > 0 : false;
+  const accountClear = report ? Number(report.outstanding) <= 0 : false;
+
+  const grouped = useMemo(() => {
+    const map = new Map<string, Transaction[]>();
+    for (const item of transactions) {
+      const key = dayKey(item.createdAt);
+      const bucket = map.get(key);
+      if (bucket) bucket.push(item);
+      else map.set(key, [item]);
+    }
+    return Array.from(map.entries());
+  }, [transactions]);
 
   return (
     <div className="page-shell py-6 sm:py-8">
@@ -274,7 +366,7 @@ export function BillingsPage() {
         <div className="page-header-text">
           <h1 className="text-xl font-semibold tracking-tight sm:text-2xl">Billings</h1>
           <p className="mt-1 text-sm leading-6 text-muted-foreground">
-            Every payment, invoice, and hotspot sale on this account. Filter by service, or pick a day, month, year, or custom period.
+            Account statement for payments, invoices, and hotspot sales.
           </p>
         </div>
       </div>
@@ -285,104 +377,121 @@ export function BillingsPage() {
         </p>
       ) : null}
 
-      <div className="mt-4 grid grid-cols-3 gap-2 sm:gap-3">
-        <StatCard
-          icon={<ReceiptText className="h-4 w-4" />}
-          label="Transactions"
-          value={report ? String(report.total) : "…"}
-          hint="In the selected period"
+      <section
+        className="relative mt-5 overflow-hidden rounded-2xl border border-border shadow-lift sm:rounded-3xl"
+        style={{
+          background:
+            "radial-gradient(ellipse 80% 70% at 12% 0%, rgb(var(--accent-rgb) / 0.28), transparent 55%), radial-gradient(ellipse 60% 50% at 100% 100%, rgb(var(--primary-rgb) / 0.35), transparent 50%), linear-gradient(145deg, #0e1322 0%, #151b2e 48%, #1a2340 100%)",
+        }}
+      >
+        <div
+          className="pointer-events-none absolute inset-0 opacity-[0.12]"
+          style={{
+            backgroundImage:
+              "linear-gradient(rgb(255 255 255 / 0.06) 1px, transparent 1px), linear-gradient(90deg, rgb(255 255 255 / 0.06) 1px, transparent 1px)",
+            backgroundSize: "28px 28px",
+          }}
+          aria-hidden="true"
         />
-        <StatCard
-          icon={<Wallet className="h-4 w-4" />}
-          iconClass="bg-success-soft/70 text-success"
-          label="Collected"
-          value={report ? money(report.collected) : "…"}
-          valueClass="text-success"
-          hint="Paid and settled"
-        />
-        <StatCard
-          icon={<CircleAlert className="h-4 w-4" />}
-          iconClass={outstandingDue ? "bg-destructive-soft/70 text-destructive" : "bg-success-soft/70 text-success"}
-          label="Outstanding"
-          value={report ? money(report.outstanding) : "…"}
-          valueClass={outstandingDue ? "text-destructive" : "text-success"}
-          hint={outstandingDue ? "Awaiting payment" : "Nothing owed"}
-        />
-      </div>
-
-      <section className="card mt-4 overflow-hidden">
-        <CardHeader icon={<Filter className="h-4 w-4" />} title="Filters" />
-        <form
-          className="grid grid-cols-1 gap-3 px-4 pb-4 pt-3 sm:grid-cols-2 sm:px-5 sm:pb-5 sm:pt-4 md:grid-cols-[auto_minmax(0,11rem)_minmax(0,11rem)] md:items-end"
-          onSubmit={(event) => event.preventDefault()}
-        >
-          <div className="grid gap-1.5 sm:col-span-2 md:col-span-1">
-            <span className="text-xs font-medium text-muted-foreground">Service</span>
-            <div
-              role="group"
-              aria-label="Service"
-              className="inline-flex w-full items-center gap-0.5 rounded-lg border border-border bg-surface-muted/60 p-0.5 sm:w-max"
-            >
-              {serviceFilters.map(({ value, label }) => (
-                <button
-                  key={value}
-                  type="button"
-                  aria-pressed={service === value}
-                  onClick={() => setService(value)}
+        <div className="relative grid gap-6 p-5 text-white sm:p-7 lg:grid-cols-[minmax(0,1.35fr)_minmax(0,1fr)] lg:items-end lg:gap-8">
+          <div className="min-w-0">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="inline-flex items-center gap-1.5 rounded-full border border-white/15 bg-white/10 px-2.5 py-1 text-[11px] font-semibold tracking-wide text-white/85">
+                <Wallet className="h-3.5 w-3.5" aria-hidden="true" />
+                Account balance
+              </span>
+              {accountNumber ? (
+                <span className="rounded-full border border-white/10 bg-black/20 px-2.5 py-1 font-mono text-[11px] tracking-[0.16em] text-white/70">
+                  {accountNumber}
+                </span>
+              ) : null}
+              {report ? (
+                <span
                   className={cn(
-                    "min-h-9 flex-1 rounded-md px-3 py-1.5 text-xs font-semibold transition duration-fast ease-out sm:flex-none sm:px-3.5",
-                    service === value
-                      ? "bg-surface text-foreground shadow-xs ring-1 ring-border"
-                      : "text-muted-foreground hover:text-foreground",
+                    "inline-flex items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] font-semibold",
+                    outstandingDue
+                      ? "border-rose-400/30 bg-rose-500/15 text-rose-200"
+                      : "border-emerald-400/30 bg-emerald-500/15 text-emerald-200",
                   )}
                 >
-                  {label}
-                </button>
-              ))}
+                  <span
+                    className={cn("h-1.5 w-1.5 rounded-full", outstandingDue ? "bg-rose-300" : "bg-emerald-300")}
+                    aria-hidden="true"
+                  />
+                  {outstandingDue ? "Balance due" : "Settled"}
+                </span>
+              ) : null}
             </div>
+
+            <p className="mt-5 text-xs font-semibold uppercase tracking-[0.18em] text-white/50">Outstanding</p>
+            <p className="mt-1.5 text-4xl font-semibold tracking-tight tabular sm:text-5xl">
+              {report ? money(report.outstanding) : "…"}
+            </p>
+            <p className="mt-2 max-w-md text-sm leading-6 text-white/60">
+              {report
+                ? outstandingDue
+                  ? "Amount still awaiting payment on this account."
+                  : "Nothing owed for the selected period."
+                : "Loading the latest account position…"}
+            </p>
           </div>
-          <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-            Period
-            <select
-              className="field h-9 min-h-9 w-full py-0 text-sm"
-              value={mode}
-              onChange={(event) => setMode(event.target.value as PeriodMode)}
-            >
-              <option value="all">All time</option>
-              <option value="day">Day</option>
-              <option value="month">Month</option>
-              <option value="year">Year</option>
-              <option value="period">Custom period</option>
-            </select>
-          </label>
+
+          <div className="grid grid-cols-3 gap-2 sm:gap-3">
+            <MetricChip label="Collected" value={report ? money(report.collected) : "…"} tone="success" />
+            <MetricChip label="Activity" value={report ? String(report.total) : "…"} />
+            <MetricChip
+              label="Status"
+              value={report ? (accountClear ? "Clear" : "Due") : "…"}
+              tone={report ? (accountClear ? "success" : "danger") : "neutral"}
+            />
+          </div>
+        </div>
+      </section>
+
+      <section className="card mt-4 overflow-hidden" style={{ animation: "port-rise 420ms var(--ease-out) both" }}>
+        <div className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
+            <Filter className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold">Statement filters</h2>
+            <p className="text-xs text-muted-foreground">Narrow the ledger by service or period</p>
+          </div>
+        </div>
+        <form className="grid gap-4 px-4 py-4 sm:px-5 sm:pb-5" onSubmit={(event) => event.preventDefault()}>
+          <div className="grid gap-4 lg:grid-cols-[auto_minmax(0,1fr)] lg:items-start">
+            <SegmentedControl label="Service" value={service} options={serviceFilters} onChange={setService} />
+            <SegmentedControl label="Period" value={mode} options={periodFilters} onChange={setMode} />
+          </div>
+
           {mode === "day" ? (
-            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+            <label className="grid max-w-xs gap-1.5 text-xs font-medium text-muted-foreground">
               Day
               <input
                 type="date"
-                className="field h-9 min-h-9 w-full py-0 text-sm"
+                className="field h-10 min-h-10 w-full py-0 text-sm"
                 value={day}
                 onChange={(event) => setDay(event.target.value)}
               />
             </label>
           ) : null}
           {mode === "month" ? (
-            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+            <label className="grid max-w-xs gap-1.5 text-xs font-medium text-muted-foreground">
               Month
               <input
                 type="month"
-                className="field h-9 min-h-9 w-full py-0 text-sm"
+                className="field h-10 min-h-10 w-full py-0 text-sm"
                 value={month}
                 onChange={(event) => setMonth(event.target.value)}
               />
             </label>
           ) : null}
           {mode === "year" ? (
-            <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+            <label className="grid max-w-xs gap-1.5 text-xs font-medium text-muted-foreground">
               Year
               <input
                 type="number"
-                className="field h-9 min-h-9 w-full py-0 text-sm"
+                className="field h-10 min-h-10 w-full py-0 text-sm"
                 min={2000}
                 max={2100}
                 inputMode="numeric"
@@ -392,43 +501,46 @@ export function BillingsPage() {
             </label>
           ) : null}
           {mode === "period" ? (
-            <>
+            <div className="grid gap-3 sm:grid-cols-2 sm:max-w-lg">
               <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 From
                 <input
                   type="date"
-                  className="field h-9 min-h-9 w-full py-0 text-sm"
+                  className="field h-10 min-h-10 w-full py-0 text-sm"
                   value={from}
                   onChange={(event) => setFrom(event.target.value)}
                 />
               </label>
-              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground md:col-start-2">
+              <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
                 To
                 <input
                   type="date"
-                  className="field h-9 min-h-9 w-full py-0 text-sm"
+                  className="field h-10 min-h-10 w-full py-0 text-sm"
                   value={to}
                   onChange={(event) => setTo(event.target.value)}
                 />
               </label>
-            </>
+            </div>
           ) : null}
         </form>
       </section>
 
-      <section className="mt-6">
-        <div className="flex flex-wrap items-center justify-between gap-2">
-          <h2 className="inline-flex items-center gap-2 text-sm font-semibold">
-            <span
-              className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary"
-              aria-hidden="true"
-            >
-              <ReceiptText className="h-3.5 w-3.5" />
-            </span>
-            Transactions
-          </h2>
+      <section className="mt-6" style={{ animation: "port-rise 480ms var(--ease-out) 60ms both" }}>
+        <div className="flex flex-wrap items-end justify-between gap-2">
+          <div>
+            <h2 className="inline-flex items-center gap-2 text-sm font-semibold">
+              <span
+                className="flex h-7 w-7 items-center justify-center rounded-lg bg-primary/10 text-primary"
+                aria-hidden="true"
+              >
+                <ReceiptText className="h-3.5 w-3.5" />
+              </span>
+              Activity
+            </h2>
+            <p className="mt-1 text-xs text-muted-foreground">Newest first · money in and out on this account</p>
+          </div>
           {report ? (
-            <p className="text-xs tabular-nums text-muted-foreground">{report.total} in this period</p>
+            <p className="text-xs tabular-nums text-muted-foreground">{report.total} transaction{report.total === 1 ? "" : "s"}</p>
           ) : null}
         </div>
 
@@ -442,32 +554,43 @@ export function BillingsPage() {
           </div>
         ) : (
           <div className="panel mt-3 overflow-hidden">
-            <div className="hidden border-b border-border px-5 py-2.5 text-xs font-medium uppercase tracking-wide text-muted-foreground sm:grid sm:grid-cols-[8.5rem_minmax(0,1.1fr)_minmax(0,0.7fr)_minmax(0,1fr)_auto] sm:gap-x-4">
-              <span>When</span>
-              <span>Customer</span>
-              <span>Payment</span>
-              <span>M-Pesa ref</span>
-              <span className="text-right">Amount</span>
-            </div>
-            <ul className="divide-y divide-border">
-              {!report && !message ? (
-                <>
-                  <TransactionSkeletonRows />
-                  <li className="sr-only">Loading transactions…</li>
-                </>
-              ) : null}
-              {transactions.map((item) => (
-                <TransactionRow key={item.id} item={item} />
-              ))}
-            </ul>
+            {!report && !message ? (
+              <ul className="divide-y divide-border">
+                <TransactionSkeletonRows />
+                <li className="sr-only">Loading transactions…</li>
+              </ul>
+            ) : (
+              <div className="divide-y divide-border">
+                {grouped.map(([key, rows]) => (
+                  <div key={key}>
+                    <div className="sticky top-[calc(var(--header-height)+0.25rem)] z-10 border-b border-border/70 bg-surface-muted/90 px-4 py-2 backdrop-blur-md sm:px-5">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.14em] text-muted-foreground">
+                        {dayHeading(key)}
+                      </p>
+                    </div>
+                    <ul className="divide-y divide-border/80">
+                      {rows.map((item) => (
+                        <TransactionRow key={item.id} item={item} />
+                      ))}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
       </section>
 
-      <section className="card mt-4 overflow-hidden">
-        <CardHeader icon={<Package className="h-4 w-4" />} title="Packages">
-          <p className="text-xs text-muted-foreground">Choose how this account is billed</p>
-        </CardHeader>
+      <section className="card mt-4 overflow-hidden" style={{ animation: "port-rise 520ms var(--ease-out) 100ms both" }}>
+        <div className="flex flex-wrap items-center gap-2.5 border-b border-border px-5 py-4">
+          <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-primary/10 text-primary" aria-hidden="true">
+            <Package className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <h2 className="text-sm font-semibold">Packages</h2>
+            <p className="text-xs text-muted-foreground">Choose how this account is billed</p>
+          </div>
+        </div>
         <div className="grid divide-y divide-border md:grid-cols-2 md:divide-x md:divide-y-0">
           <PackageAction
             to={`${packagesTo}#registered-packages`}
@@ -483,6 +606,13 @@ export function BillingsPage() {
           />
         </div>
       </section>
+
+      {outstandingDue ? (
+        <p className="mt-4 flex items-start gap-2 text-xs text-muted-foreground" role="status">
+          <CircleAlert className="mt-0.5 h-3.5 w-3.5 shrink-0 text-warning" aria-hidden="true" />
+          Outstanding balances stay visible until matching payments clear them on this statement.
+        </p>
+      ) : null}
     </div>
   );
 }

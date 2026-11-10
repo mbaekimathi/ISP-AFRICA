@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { HeartPulse, MapPin, Router, Wifi, WifiOff } from "lucide-react";
 import { PageHeader } from "@/components/ui/DetailGrid";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
@@ -28,6 +28,7 @@ type DevicePage = {
   total: number;
   limit: number;
   offset: number;
+  generatedAt?: string;
 };
 
 type LocationGroup = {
@@ -61,49 +62,111 @@ function connectionState(tunnelStatus: Device["tunnelStatus"]) {
   };
 }
 
-function healthTone(percent: number) {
+function healthTone(percent: number, liveDown?: boolean) {
+  if (liveDown) return "text-destructive";
   if (percent >= 90) return "text-success";
   if (percent >= 70) return "text-warning";
   return "text-destructive";
 }
 
-function healthTrack(percent: number) {
+function healthTrack(percent: number, liveDown?: boolean) {
+  if (liveDown) return "stroke-destructive";
   if (percent >= 90) return "stroke-success";
   if (percent >= 70) return "stroke-warning";
   return "stroke-destructive";
 }
 
-function HealthMeter({ percent }: { percent: number }) {
+function HealthMeter({
+  percent,
+  tunnelStatus,
+  checking,
+  tick,
+  checkedAt,
+}: {
+  percent: number;
+  tunnelStatus: Device["tunnelStatus"];
+  checking?: boolean;
+  tick?: number;
+  checkedAt?: string;
+}) {
   const value = Math.max(0, Math.min(100, Math.round(percent)));
+  const liveDown = tunnelStatus === "down";
+  const liveUp = tunnelStatus === "up";
   const radius = 18;
   const circumference = 2 * Math.PI * radius;
   const offset = circumference * (1 - value / 100);
+  const title = liveDown
+    ? `Live check: tunnel down · ${value}% uptime over the last 24 hours`
+    : liveUp
+      ? `Live check: online · ${value}% uptime over the last 24 hours`
+      : `Health ${value}% over the last 24 hours`;
   return (
-    <div className="flex shrink-0 flex-col items-center gap-1" title={`Health ${value}% over the last 24 hours`}>
+    <div
+      className="flex shrink-0 flex-col items-center gap-1"
+      title={checkedAt ? `${title} · Checked ${checkedAt}` : title}
+    >
       <div className="relative h-12 w-12">
-        <svg viewBox="0 0 44 44" className="h-12 w-12 -rotate-90" aria-hidden="true">
+        {liveUp ? (
+          <span
+            className="pointer-events-none absolute inset-0 rounded-full bg-success/15 animate-badge-ping"
+            aria-hidden="true"
+          />
+        ) : null}
+        <svg
+          key={tick}
+          viewBox="0 0 44 44"
+          className={cn("relative h-12 w-12 -rotate-90", checking && "opacity-80")}
+          aria-hidden="true"
+        >
           <circle cx="22" cy="22" r={radius} fill="none" className="stroke-border" strokeWidth="4" />
           <circle
             cx="22"
             cy="22"
             r={radius}
             fill="none"
-            className={cn("transition-[stroke-dashoffset] duration-500 ease-out", healthTrack(value))}
+            className={cn("transition-[stroke-dashoffset] duration-500 ease-out", healthTrack(value, liveDown))}
             strokeWidth="4"
             strokeLinecap="round"
             strokeDasharray={circumference}
             strokeDashoffset={offset}
           />
+          {checking ? (
+            <circle
+              cx="22"
+              cy="22"
+              r={radius}
+              fill="none"
+              className="stroke-primary/40"
+              strokeWidth="4"
+              strokeLinecap="round"
+              strokeDasharray={`${circumference * 0.22} ${circumference}`}
+              style={{ animation: "spin 1.1s linear infinite" }}
+            />
+          ) : null}
         </svg>
-        <span className={cn("absolute inset-0 flex items-center justify-center text-[0.7rem] font-bold tabular", healthTone(value))}>
+        <span
+          className={cn(
+            "absolute inset-0 flex items-center justify-center text-[0.7rem] font-bold tabular",
+            healthTone(value, liveDown),
+          )}
+        >
           {value}%
         </span>
       </div>
-      <span className="inline-flex items-center gap-0.5 text-[0.65rem] font-semibold uppercase tracking-wide text-muted-foreground">
-        <HeartPulse className="h-3 w-3" aria-hidden="true" />
-        Health
+      <span
+        className={cn(
+          "inline-flex items-center gap-1 text-[0.65rem] font-semibold uppercase tracking-wide",
+          liveDown ? "text-destructive" : liveUp ? "text-success" : "text-muted-foreground",
+        )}
+      >
+        <HeartPulse className={cn("h-3 w-3", (liveUp || checking) && "animate-pulse")} aria-hidden="true" />
+        {checking ? "Checking" : liveDown ? "Down" : liveUp ? "Live" : "Health"}
+        {liveUp && !checking ? <span className="live-dot scale-75" aria-hidden="true" /> : null}
       </span>
-      <span className="sr-only">Health {value} percent over the last 24 hours</span>
+      <span className="sr-only">
+        {title}
+        {checking ? " Checking now." : ""}
+      </span>
     </div>
   );
 }
@@ -151,6 +214,10 @@ function locationLabel(key: string, devices: Device[]) {
   return site || `Area ${key.replace(":", ", ")}`;
 }
 
+function deviceHealth(device: Device) {
+  return typeof device.healthPercent === "number" ? device.healthPercent : 100;
+}
+
 function groupByLocation(devices: Device[]): LocationGroup[] {
   const buckets = new Map<string, Device[]>();
   for (const device of devices) {
@@ -161,10 +228,15 @@ function groupByLocation(devices: Device[]): LocationGroup[] {
   }
   const groups: LocationGroup[] = [];
   for (const [key, items] of buckets) {
+    const sorted = [...items].sort((a, b) => {
+      const healthDelta = deviceHealth(a) - deviceHealth(b);
+      if (healthDelta !== 0) return healthDelta;
+      return a.name.localeCompare(b.name);
+    });
     groups.push({
       key,
-      label: locationLabel(key, items),
-      devices: items,
+      label: locationLabel(key, sorted),
+      devices: sorted,
     });
   }
   groups.sort((a, b) => {
@@ -186,6 +258,9 @@ export function MikrotiksPage() {
   const [actionError, setActionError] = useState("");
   const [busyId, setBusyId] = useState<string | null>(null);
   const [confirmingId, setConfirmingId] = useState<string | null>(null);
+  const [healthTick, setHealthTick] = useState(0);
+  const [healthChecking, setHealthChecking] = useState(false);
+  const lastHealthAt = useRef("");
   const href = (path: string) => (user ? clientPage(user, path) : path);
 
   const groups = useMemo(() => groupByLocation(page?.devices ?? []), [page?.devices]);
@@ -199,6 +274,21 @@ export function MikrotiksPage() {
       setLocationFilter("all");
     }
   }, [groups, locationFilter]);
+
+  useEffect(() => {
+    const stamp = page?.generatedAt || "";
+    if (!stamp || stamp === lastHealthAt.current) return;
+    lastHealthAt.current = stamp;
+    setHealthTick((current) => current + 1);
+    setHealthChecking(false);
+  }, [page?.generatedAt]);
+
+  useEffect(() => {
+    if (!page) return;
+    // useSavedQuery refreshes every 10s; show the probe spinner shortly before each pass.
+    const timer = window.setInterval(() => setHealthChecking(true), 9000);
+    return () => window.clearInterval(timer);
+  }, [page]);
 
   async function setSuspended(device: Device, suspended: boolean) {
     setActionError("");
@@ -362,15 +452,31 @@ export function MikrotiksPage() {
                           </div>
 
                           <div className="flex shrink-0 items-start gap-2">
-                            <HealthMeter percent={healthPercent} />
+                            <HealthMeter
+                              percent={healthPercent}
+                              tunnelStatus={device.tunnelStatus}
+                              checking={healthChecking || saved.loading}
+                              tick={healthTick}
+                              checkedAt={page.generatedAt}
+                            />
                             <div
                               className={cn(
-                                "flex flex-col items-center gap-1 rounded-xl px-2.5 py-2 text-center",
+                                "relative flex flex-col items-center gap-1 rounded-xl px-2.5 py-2 text-center",
                                 connection.iconClass,
                               )}
-                              title={connection.label}
+                              title={
+                                page.generatedAt
+                                  ? `${connection.label} · Live check ${page.generatedAt}`
+                                  : connection.label
+                              }
                             >
-                              <StatusIcon className="h-5 w-5" aria-hidden="true" />
+                              {device.tunnelStatus === "up" ? (
+                                <span className="live-dot absolute right-1.5 top-1.5 scale-75" aria-hidden="true" />
+                              ) : null}
+                              <StatusIcon
+                                className={cn("h-5 w-5", healthChecking && device.tunnelStatus === "unknown" && "animate-pulse")}
+                                aria-hidden="true"
+                              />
                               <span className="text-[0.65rem] font-semibold uppercase tracking-wide">{connection.label}</span>
                               <span className="sr-only">
                                 {device.name} is {connection.label.toLowerCase()}
