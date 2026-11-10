@@ -11,6 +11,7 @@ from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
 import pppoe_service
+import remote_access
 import routeros_api
 
 CHECKS = {}
@@ -196,6 +197,24 @@ def ensure_schema(cursor):
           reason VARCHAR(160) NOT NULL DEFAULT '',
           created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
           KEY idx_pppoe_event (subscriber_id, created_at)
+        )
+        """
+    )
+    cursor.execute(
+        """
+        CREATE TABLE IF NOT EXISTS pppoe_move_notices (
+          id CHAR(36) NOT NULL PRIMARY KEY,
+          client_id CHAR(36) NOT NULL,
+          transfer_id CHAR(36) NOT NULL,
+          from_router VARCHAR(120) NOT NULL DEFAULT '',
+          to_router VARCHAR(120) NOT NULL DEFAULT '',
+          moved_count INT NOT NULL DEFAULT 0,
+          failed_count INT NOT NULL DEFAULT 0,
+          detail VARCHAR(255) NOT NULL DEFAULT '',
+          created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+          updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+          UNIQUE KEY uq_move_transfer (client_id, transfer_id),
+          KEY idx_move_client (client_id, created_at)
         )
         """
     )
@@ -1140,6 +1159,74 @@ def require_owned(cursor, client_id, subscriber_id):
     cursor.execute("SELECT COUNT(*) AS any_sessions FROM radacct WHERE username = %s", (row["pppoe_username"],))
     row["any_sessions"] = cursor.fetchone()["any_sessions"]
     return row
+
+
+def remote_access_target(cursor, row):
+    """NAS tunnel IP + CPE framed IP for a temporary management-side forward."""
+    live = current_session(cursor, row["pppoe_username"])
+    cpe_ip = ((live or {}).get("ip") or row.get("static_ip") or "").strip()
+    tunnel_ip = (row.get("tunnel_ip") or "").strip()
+    cursor.execute(
+        """
+        SELECT nasipaddress FROM radacct
+        WHERE username = %s AND acctstoptime IS NULL
+        ORDER BY acctstarttime DESC LIMIT 1
+        """,
+        (row["pppoe_username"],),
+    )
+    session = cursor.fetchone()
+    nas = ((session or {}).get("nasipaddress") or "").strip()
+    if nas:
+        cursor.execute(
+            "SELECT tunnel_ip, api_secret, tunnel_status FROM isp_mikrotik_devices WHERE tunnel_ip = %s LIMIT 1",
+            (nas,),
+        )
+        device = cursor.fetchone()
+        if device and device.get("tunnel_ip"):
+            return {
+                "cpeIp": cpe_ip,
+                "tunnelIp": device["tunnel_ip"],
+                "apiSecret": device.get("api_secret") or "",
+                "tunnelStatus": device.get("tunnel_status") or "unknown",
+            }
+    return {
+        "cpeIp": cpe_ip,
+        "tunnelIp": tunnel_ip,
+        "apiSecret": row.get("api_secret") or "",
+        "tunnelStatus": row.get("tunnel_status") or "unknown",
+    }
+
+
+def open_remote_access(cursor, client_id, subscriber_id, payload):
+    row = require_owned(cursor, client_id, subscriber_id)
+    target = remote_access_target(cursor, row)
+    if not target["cpeIp"]:
+        raise PppoeError(400, "This client has no router address yet. Wait until their session is online.")
+    if not target["tunnelIp"]:
+        raise PppoeError(400, "This client is not on a MikroTik with a management tunnel.")
+    if target["tunnelStatus"] != "up":
+        raise PppoeError(503, "The management tunnel to this client's MikroTik is down.")
+    try:
+        api_password = routeros_api.open_password(target["apiSecret"]) if target["apiSecret"] else ""
+    except routeros_api.RouterError as error:
+        raise PppoeError(503, str(error)) from error
+    try:
+        session = remote_access.open_session(
+            client_id=client_id,
+            subscriber_id=subscriber_id,
+            tunnel_ip=target["tunnelIp"],
+            api_password=api_password,
+            cpe_ip=target["cpeIp"],
+            cpe_user=str(payload.get("username") or "admin"),
+            cpe_password=str(payload.get("password") or ""),
+            cpe_port=int(payload.get("port") or 80),
+        )
+    except remote_access.RemoteAccessError as error:
+        raise PppoeError(error.status, str(error)) from error
+    except (TypeError, ValueError) as error:
+        raise PppoeError(400, "Enter a valid CPE web port.") from error
+    log_event(cursor, client_id, subscriber_id, client_id, "remote-access", target["cpeIp"])
+    return {"remoteAccess": session}
 
 
 def subscriber_detail(cursor, client_id, subscriber_id):
@@ -2395,6 +2482,53 @@ def upgrade(cursor, client_id, subscriber_id, payload):
     return body
 
 
+def ensure_package_on_router(cursor, client_id, package_id, router_id):
+    """Link a package to a router when needed so a move never forces a plan change."""
+    package = load_package(cursor, client_id, package_id)
+    if not package:
+        raise PppoeError(400, "That package was not found.")
+    if router_id in {str(item) for item in package["routers"]}:
+        return package
+    cursor.execute(
+        "UPDATE isp_packages SET availability_routers = %s WHERE id = %s AND client_id = %s",
+        (json.dumps([str(item) for item in package["routers"]] + [router_id]), package_id, client_id),
+    )
+    package = load_package(cursor, client_id, package_id)
+    if not package or router_id not in {str(item) for item in package["routers"]}:
+        raise PppoeError(400, "That package could not be linked to the target MikroTik.")
+    return package
+
+
+def record_move_notice(cursor, client_id, transfer_id, from_router, to_router, moved_delta, failed_delta, sample_names):
+    """Upsert one feed notice per transfer session so chunked moves stay as one alert."""
+    notice_id = str(transfer_id or "").strip() or str(uuid.uuid4())
+    from_name = str(from_router or "").strip()[:120]
+    to_name = str(to_router or "").strip()[:120]
+    sample = ", ".join(str(name).strip() for name in (sample_names or []) if str(name).strip())[:180]
+    cursor.execute(
+        """
+        INSERT INTO pppoe_move_notices
+          (id, client_id, transfer_id, from_router, to_router, moved_count, failed_count, detail)
+        VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON DUPLICATE KEY UPDATE
+          from_router = IF(VALUES(from_router) <> '', VALUES(from_router), from_router),
+          to_router = IF(VALUES(to_router) <> '', VALUES(to_router), to_router),
+          moved_count = moved_count + VALUES(moved_count),
+          failed_count = failed_count + VALUES(failed_count),
+          detail = IF(VALUES(detail) <> '', VALUES(detail), detail)
+        """,
+        (notice_id, client_id, notice_id, from_name, to_name, int(moved_delta or 0), int(failed_delta or 0), sample),
+    )
+    finish(cursor)
+    try:
+        import api as api_mod
+
+        api_mod.notify_push_now()
+    except Exception:
+        pass
+    return notice_id
+
+
 def migrate(cursor, client_id, subscriber_id, payload):
     """Move one client to another MikroTik.
 
@@ -2406,27 +2540,22 @@ def migrate(cursor, client_id, subscriber_id, payload):
     router = load_router(cursor, client_id, str(payload.get("routerId") or ""))
     if not router or router["status"] != "active":
         raise PppoeError(400, "Choose an active MikroTik.")
-    if str(row["router_id"]) == router["id"]:
+    if str(row["router_id"] or "") == router["id"]:
         raise PppoeError(400, f"Already on {router['name']}.")
-    package_id = str(payload.get("packageId") or row["package_id"])
-    package = load_package(cursor, client_id, package_id)
-    if not package:
-        raise PppoeError(400, "That package was not found.")
-    if router["id"] not in {str(item) for item in package["routers"]}:
-        cursor.execute(
-            "UPDATE isp_packages SET availability_routers = %s WHERE id = %s AND client_id = %s",
-            (json.dumps([str(item) for item in package["routers"]] + [router["id"]]), package_id, client_id),
-        )
-        package = load_package(cursor, client_id, package_id)
-        if not package or router["id"] not in {str(item) for item in package["routers"]}:
-            raise PppoeError(400, "That package could not be linked to the target MikroTik.")
+    package_id = str(payload.get("packageId") or row["package_id"] or "").strip()
+    if not package_id:
+        raise PppoeError(400, "Assign a package before moving this client.")
+    package = ensure_package_on_router(cursor, client_id, package_id, router["id"])
     old_nas = row["router_id"]
+    old_name = str(row.get("router_name") or "").strip() or "previous MikroTik"
     begin(cursor)
     try:
         cursor.execute(
-            "UPDATE pppoe_subscribers SET router_id = %s, package_id = %s, static_ip = NULL WHERE id = %s",
-            (router["id"], package["id"], subscriber_id),
+            "UPDATE pppoe_subscribers SET router_id = %s, package_id = %s, static_ip = NULL WHERE id = %s AND client_id = %s",
+            (router["id"], package["id"], subscriber_id, client_id),
         )
+        if cursor.rowcount != 1:
+            raise PppoeError(400, "The MikroTik move was not saved.")
         cursor.execute(
             "UPDATE pppoe_subscriptions SET package_id = %s, price = %s WHERE subscriber_id = %s",
             (package["id"], package["price"], subscriber_id),
@@ -2436,14 +2565,43 @@ def migrate(cursor, client_id, subscriber_id, payload):
         row["static_ip"] = None
         row["upload_mbps"] = package["uploadMbps"]
         row["download_mbps"] = package["downloadMbps"]
-        apply_plan(cursor, row, subscription_can_surf(row, date.today()))
+        try:
+            apply_plan(cursor, row, subscription_can_surf(row, date.today()))
+        except routeros_api.RouterError:
+            # Keep the assignment even when the sealed password cannot be opened —
+            # reconcile can rewrite RADIUS later; the router move itself must stick.
+            print(f"event=pppoe-migrate result=radius-skipped subscriber={subscriber_id}", flush=True)
         log_event(cursor, client_id, subscriber_id, client_id, "migrate", router["name"])
         finish(cursor)
+    except PppoeError:
+        abort(cursor)
+        raise
     except Exception as error:
         abort(cursor)
         raise PppoeError(400, "The MikroTik move was not saved.") from error
-    row["router_id"] = old_nas
-    coa_for(cursor, row, row["pppoe_username"])
+    cursor.execute(
+        "SELECT router_id FROM pppoe_subscribers WHERE id = %s AND client_id = %s AND deleted = 0",
+        (subscriber_id, client_id),
+    )
+    saved = cursor.fetchone()
+    if not saved or str(saved["router_id"]) != router["id"]:
+        raise PppoeError(400, "The MikroTik move was not saved.")
+    # Disconnect any live session on the previous NAS so the CPE redials onto the new router.
+    kick = dict(row)
+    kick["router_id"] = old_nas
+    coa_for(cursor, kick, row["pppoe_username"])
+    if not payload.get("_bulk"):
+        name = f"{row['first_name']} {row['last_name']}".strip() or row["pppoe_username"]
+        record_move_notice(
+            cursor,
+            client_id,
+            str(uuid.uuid4()),
+            old_name,
+            router["name"],
+            1,
+            0,
+            [name],
+        )
     return subscriber_detail(cursor, client_id, subscriber_id)
 
 
@@ -2453,20 +2611,21 @@ def transfer_subscribers(cursor, client_id, payload):
     When a client's package is not yet sold on the target router it is linked
     there automatically, so the move never changes what the client pays for.
     Each client is migrated on its own transaction — one failure does not stop
-    the rest.
+    the rest. Chunked UI calls share a transferId so the notice stays one item.
     """
     router = load_router(cursor, client_id, str(payload.get("routerId") or ""))
     if not router or router["status"] != "active":
         raise PppoeError(400, "Choose an active router.")
     raw_ids = payload.get("subscriberIds")
     ids = (
-        list(dict.fromkeys(str(item).strip() for item in raw_ids if str(item).strip()))[:200]
+        list(dict.fromkeys(str(item).strip() for item in raw_ids if str(item).strip()))[:500]
         if isinstance(raw_ids, list)
         else []
     )
     if not ids:
         raise PppoeError(400, "Choose at least one client.")
-    linked_packages = set()
+    transfer_id = str(payload.get("transferId") or "").strip() or str(uuid.uuid4())
+    from_names = set()
     moved = []
     failed = []
     for subscriber_id in ids:
@@ -2476,26 +2635,46 @@ def transfer_subscribers(cursor, client_id, payload):
             failed.append({"id": subscriber_id, "name": "", "error": "That PPPoE client was not found."})
             continue
         name = f"{row['first_name']} {row['last_name']}".strip() or row["pppoe_username"]
-        if str(row["router_id"]) == router["id"]:
-            failed.append({"id": subscriber_id, "name": name, "error": f"Already on {router['name']}."})
+        if str(row["router_id"] or "") == router["id"]:
+            # Already on the target — treat as success so a retry finishes cleanly.
+            moved.append({"id": subscriber_id, "name": name})
             continue
-        package_id = str(row["package_id"])
+        if row.get("router_name"):
+            from_names.add(str(row["router_name"]).strip())
         try:
-            if package_id not in linked_packages:
-                package = load_package(cursor, client_id, package_id)
-                if package and router["id"] not in {str(item) for item in package["routers"]}:
-                    cursor.execute(
-                        "UPDATE isp_packages SET availability_routers = %s WHERE id = %s AND client_id = %s",
-                        (json.dumps([str(item) for item in package["routers"]] + [router["id"]]), package_id, client_id),
-                    )
-            migrate(cursor, client_id, subscriber_id, {"routerId": router["id"]})
-            linked_packages.add(package_id)
+            migrate(cursor, client_id, subscriber_id, {"routerId": router["id"], "_bulk": True})
+            cursor.execute(
+                "SELECT router_id FROM pppoe_subscribers WHERE id = %s AND client_id = %s AND deleted = 0",
+                (subscriber_id, client_id),
+            )
+            check = cursor.fetchone()
+            if not check or str(check["router_id"]) != router["id"]:
+                failed.append({"id": subscriber_id, "name": name, "error": "The MikroTik move was not saved."})
+                continue
             moved.append({"id": subscriber_id, "name": name})
         except PppoeError as error:
             failed.append({"id": subscriber_id, "name": name, "error": str(error)})
         except Exception:
             failed.append({"id": subscriber_id, "name": name, "error": "The move could not be saved."})
-    return {"router": router["name"], "moved": moved, "failed": failed}
+    from_label = ", ".join(sorted(from_names)) if from_names else "previous MikroTik"
+    if moved or failed:
+        record_move_notice(
+            cursor,
+            client_id,
+            transfer_id,
+            from_label,
+            router["name"],
+            len(moved),
+            len(failed),
+            [item["name"] for item in moved[:8]],
+        )
+    return {
+        "router": router["name"],
+        "from": from_label,
+        "transferId": transfer_id,
+        "moved": moved,
+        "failed": failed,
+    }
 
 
 IMPORT_FIELDS = {
@@ -4366,6 +4545,8 @@ def dispatch(cursor, method, path, payload, token, query):
         return {"connection": label, "live": live, "status": status, "billingStatus": billing, "rates": rates, "devices": devices}, None
     if method != "POST":
         return None
+    if action == "remote-access":
+        return open_remote_access(cursor, client_id, subscriber_id, payload or {}), None
     actions = {
         "renew": lambda: renew(cursor, client_id, subscriber_id, payload),
         "suspend": lambda: set_status(cursor, client_id, subscriber_id, "suspended", "suspended", str(payload.get("reason") or "Suspended."), False),

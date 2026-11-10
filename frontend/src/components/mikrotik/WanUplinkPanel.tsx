@@ -28,6 +28,9 @@ type Uplink = {
   uploadMbps: number;
   active: boolean;
   accountNumber: string;
+  cycleStartedOn: string;
+  cycleDays: number;
+  cycleEndsOn?: string;
 };
 
 type AuditRow = {
@@ -60,7 +63,18 @@ function healthOf(port: WanPort | undefined, sample: boolean, reported?: string)
 }
 
 function blank(name: string): Uplink {
-  return { interface: name, provider: "", method: "dhcp", gateway: "", downloadMbps: 100, uploadMbps: 100, active: false, accountNumber: "" };
+  return {
+    interface: name,
+    provider: "",
+    method: "dhcp",
+    gateway: "",
+    downloadMbps: 100,
+    uploadMbps: 100,
+    active: false,
+    accountNumber: "",
+    cycleStartedOn: "",
+    cycleDays: 0,
+  };
 }
 
 export function WanUplinkPanel({
@@ -275,6 +289,26 @@ export function WanUplinkPanel({
                 </FormField>
                 <FormField id={`wan-account-${uplink.interface}`} label="Account number" hint="Optional — the account this uplink buys internet on.">
                   <input id={`wan-account-${uplink.interface}`} className="field" value={uplink.accountNumber} maxLength={64} onChange={(event) => update(uplink.interface, { accountNumber: event.target.value })} />
+                </FormField>
+                <FormField id={`wan-cycle-start-${uplink.interface}`} label="Cycle started">
+                  <input
+                    id={`wan-cycle-start-${uplink.interface}`}
+                    className="field"
+                    type="date"
+                    value={uplink.cycleStartedOn || ""}
+                    onChange={(event) => update(uplink.interface, { cycleStartedOn: event.target.value })}
+                  />
+                </FormField>
+                <FormField id={`wan-cycle-days-${uplink.interface}`} label="Cycle days" hint={uplink.cycleEndsOn ? `Ends ${uplink.cycleEndsOn}` : "How long this uplink account runs."}>
+                  <input
+                    id={`wan-cycle-days-${uplink.interface}`}
+                    className="field"
+                    type="number"
+                    min={0}
+                    max={3650}
+                    value={uplink.cycleDays || 0}
+                    onChange={(event) => update(uplink.interface, { cycleDays: Number(event.target.value) })}
+                  />
                 </FormField>
                 <FormField id={`wan-down-${uplink.interface}`} label="Download Mbps">
                   <input id={`wan-down-${uplink.interface}`} className="field" type="number" min={1} value={uplink.downloadMbps} onChange={(event) => update(uplink.interface, { downloadMbps: Number(event.target.value) })} />

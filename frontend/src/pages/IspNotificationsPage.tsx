@@ -34,6 +34,9 @@ const kindLabels: Record<string, string> = {
   mikrotikUnreachable: "MikroTik down",
   mikrotikNoInternet: "No internet",
   clientCannotSurf: "Client offline",
+  clientsMoved: "Clients moved",
+  uplinkRenewalNear: "Uplink renewal",
+  usageLimitHit: "Usage limit",
   subscriptionEnding: "Subscription",
   communicationsFailed: "Communications",
   paymentsFailed: "Payments",
@@ -57,10 +60,16 @@ const categoryMeta: Record<
 const categoryOrder = ["mikrotik", "clients", "billing", "system"] as const;
 
 function categoryOf(kind: string): Exclude<CategoryKey, "all"> {
-  if (kind === "mikrotikOnboarded" || kind === "mikrotikUnreachable" || kind === "mikrotikNoInternet") {
+  if (
+    kind === "mikrotikOnboarded" ||
+    kind === "mikrotikUnreachable" ||
+    kind === "mikrotikNoInternet" ||
+    kind === "uplinkRenewalNear" ||
+    kind === "usageLimitHit"
+  ) {
     return "mikrotik";
   }
-  if (kind === "clientCannotSurf" || kind === "subscriptionEnding") {
+  if (kind === "clientCannotSurf" || kind === "clientsMoved" || kind === "subscriptionEnding") {
     return "clients";
   }
   if (kind === "paymentsFailed" || kind === "gateway") {

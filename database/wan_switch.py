@@ -7,6 +7,7 @@ manual switch. Standby uplinks stay configured.
 
 import json
 import re
+from datetime import datetime
 
 MODES = (
     "load-balance",
@@ -25,6 +26,28 @@ OVERRIDE_ROLES = {"director", "supervisor", "it-support"}
 
 class SwitchError(Exception):
     pass
+
+
+def clean_cycle_started(raw):
+    value = str(raw or "").strip()
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value[:10], "%Y-%m-%d").date().isoformat()
+    except ValueError as error:
+        raise SwitchError("Enter the uplink start date as YYYY-MM-DD.") from error
+
+
+def clean_cycle_days(raw):
+    if raw in (None, ""):
+        return 0
+    try:
+        days = int(raw)
+    except (TypeError, ValueError) as error:
+        raise SwitchError("Enter how many days the uplink runs.") from error
+    if not (0 <= days <= 3650):
+        raise SwitchError("Enter how many days the uplink runs (up to 3650).")
+    return days
 
 
 def clean_uplink(raw):
@@ -55,12 +78,20 @@ def clean_uplink(raw):
     health = str(raw.get("health") or "unknown")
     if health not in {"healthy", "unhealthy", "unreachable", "unknown"}:
         health = "unknown"
+    cycle_started = clean_cycle_started(raw.get("cycleStartedOn"))
+    cycle_days = clean_cycle_days(raw.get("cycleDays"))
+    if cycle_days and not cycle_started:
+        raise SwitchError("Enter the date this uplink account started.")
+    if cycle_started and not cycle_days:
+        raise SwitchError("Enter how many days this uplink account will run.")
     return {
         "interface": interface,
         "provider": provider,
         "method": method,
         "gateway": gateway,
         "accountNumber": account,
+        "cycleStartedOn": cycle_started or "",
+        "cycleDays": cycle_days,
         "downloadMbps": download,
         "uploadMbps": upload,
         "health": health,

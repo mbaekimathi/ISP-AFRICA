@@ -66,7 +66,8 @@ type TransferProgress = {
   target: string;
 };
 
-const TRANSFER_BATCH = 5;
+const TRANSFER_BATCH = 25;
+const PAGE_SIZE = 1000;
 
 const UNASSIGNED = "none";
 
@@ -315,9 +316,23 @@ export function ImportClientsPage() {
   const [importError, setImportError] = useState("");
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
   const [filter, setFilter] = useState("");
+  const resultRef = useRef<HTMLDivElement>(null);
+
+  async function loadAllSubscribers() {
+    const first = await apiRequest<ListPage>(`/api/pppoe/subscribers?limit=${PAGE_SIZE}&offset=0`);
+    const subscribers = [...first.subscribers];
+    let offset = subscribers.length;
+    while (offset < first.total) {
+      const next = await apiRequest<ListPage>(`/api/pppoe/subscribers?limit=${PAGE_SIZE}&offset=${offset}`);
+      if (!next.subscribers.length) break;
+      subscribers.push(...next.subscribers);
+      offset += next.subscribers.length;
+    }
+    return { ...first, subscribers, total: subscribers.length };
+  }
 
   function load() {
-    apiRequest<ListPage>("/api/pppoe/subscribers?limit=1000")
+    loadAllSubscribers()
       .then((body) => {
         setPage(body);
         setMessage("");
@@ -392,13 +407,18 @@ export function ImportClientsPage() {
     const ids = moving.map((client) => client.id);
     const routerId = targets[group.routerId] || "";
     if (!ids.length || !routerId || busy) return;
-    const target = page?.routers.find((router) => router.id === routerId)?.name || "";
+    const targetRouter = page?.routers.find((router) => router.id === routerId);
+    const target = targetRouter?.name || "";
     const nameOf = new Map(
       moving.map((client) => [
         client.id,
         `${client.firstName} ${client.lastName}`.trim() || client.username,
       ]),
     );
+    const transferId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `move-${Date.now()}-${Math.random().toString(16).slice(2)}`;
     setBusy(group.routerId);
     setMessage("");
     setResult(null);
@@ -421,7 +441,7 @@ export function ImportClientsPage() {
       try {
         const body = await apiRequest<{ result: TransferResult }>("/api/pppoe/transfer", {
           method: "POST",
-          body: JSON.stringify({ routerId, subscriberIds: chunk }),
+          body: JSON.stringify({ routerId, subscriberIds: chunk, transferId }),
         });
         to = body.result.router || to;
         moved.push(...body.result.moved);
@@ -438,6 +458,22 @@ export function ImportClientsPage() {
             ...Object.fromEntries(body.result.failed.map((item) => [item.id, item.error])),
           }));
         }
+        // Reflect successful moves in the local roster immediately so the source
+        // group empties as clients land on the destination MikroTik.
+        if (body.result.moved.length && targetRouter) {
+          const movedNow = new Set(body.result.moved.map((item) => item.id));
+          setPage((current) => {
+            if (!current) return current;
+            return {
+              ...current,
+              subscribers: current.subscribers.map((client) =>
+                movedNow.has(client.id)
+                  ? { ...client, routerId: targetRouter.id, routerName: targetRouter.name }
+                  : client,
+              ),
+            };
+          });
+        }
       } catch (cause) {
         const text = cause instanceof Error ? cause.message : "The clients could not be moved.";
         for (const id of chunk) failed.push({ id, name: nameOf.get(id) || "", error: text });
@@ -451,7 +487,7 @@ export function ImportClientsPage() {
           ...Object.fromEntries(chunk.map((id) => [id, text])),
         }));
       }
-      setProgress({ group: group.routerId, done: start + chunk.length, total: ids.length, target });
+      setProgress({ group: group.routerId, done: Math.min(start + chunk.length, ids.length), total: ids.length, target });
     }
     const stopped = cancelRef.current;
     if (stopped) {
@@ -466,6 +502,9 @@ export function ImportClientsPage() {
     setResult({ from: group.name, to, moved, failed, stopped });
     setBusy(null);
     setProgress(null);
+    requestAnimationFrame(() => {
+      resultRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
     load();
   }
 
@@ -637,41 +676,44 @@ export function ImportClientsPage() {
         </label>
       ) : null}
 
-      {message ? (
-        <p className="notice mt-4" role="alert">
-          {message}
-        </p>
-      ) : null}
-
-      {result ? (
-        <div className={`notice mt-4 ${result.failed.length ? "" : "notice-info"}`} role="status">
-          <p>
-            {result.moved.length} client{result.moved.length === 1 ? "" : "s"} moved from{" "}
-            {result.from} to {result.to}
-            {result.failed.length ? `, ${result.failed.length} could not be moved` : ""}
-            {result.stopped ? " — stopped early" : ""}.
+      <div ref={resultRef}>
+        {message ? (
+          <p className={`notice mt-4 ${result && !result.failed.length ? "notice-info" : ""}`} role="status">
+            {message}
           </p>
-          {result.moved.length ? (
-            <p className="mt-1.5 text-xs">
-              <span className="font-semibold">Moved:</span>{" "}
-              {result.moved
-                .slice(0, 15)
-                .map((item) => item.name || item.id)
-                .join(", ")}
-              {result.moved.length > 15 ? `, +${result.moved.length - 15} more` : ""}
+        ) : null}
+
+        {result ? (
+          <div className={`notice mt-4 ${result.failed.length ? "" : "notice-info"}`} role="status" aria-live="polite">
+            <p>
+              {result.moved.length} client{result.moved.length === 1 ? "" : "s"} moved from{" "}
+              {result.from} to {result.to}
+              {result.failed.length ? `, ${result.failed.length} could not be moved` : ""}
+              {result.stopped ? " — stopped early" : ""}.
+              {result.moved.length ? " A notification was added for this account." : ""}
             </p>
-          ) : null}
-          {result.failed.length ? (
-            <ul className="mt-1.5 grid gap-0.5 text-xs">
-              {result.failed.map((item) => (
-                <li key={item.id}>
-                  {item.name || item.id}: {item.error}
-                </li>
-              ))}
-            </ul>
-          ) : null}
-        </div>
-      ) : null}
+            {result.moved.length ? (
+              <p className="mt-1.5 text-xs">
+                <span className="font-semibold">Moved:</span>{" "}
+                {result.moved
+                  .slice(0, 15)
+                  .map((item) => item.name || item.id)
+                  .join(", ")}
+                {result.moved.length > 15 ? `, +${result.moved.length - 15} more` : ""}
+              </p>
+            ) : null}
+            {result.failed.length ? (
+              <ul className="mt-1.5 grid gap-0.5 text-xs">
+                {result.failed.map((item) => (
+                  <li key={`${item.id}-${item.error}`}>
+                    {item.name || item.id}: {item.error}
+                  </li>
+                ))}
+              </ul>
+            ) : null}
+          </div>
+        ) : null}
+      </div>
 
       {!page && !message ? (
         <div className="card mt-4 grid gap-3 p-5" aria-hidden="true">
@@ -692,7 +734,7 @@ export function ImportClientsPage() {
         </p>
       ) : null}
 
-      <div className="mt-4 grid items-start gap-4 xl:grid-cols-2">
+      <div className="mt-4 grid items-start gap-5">
       {visibleGroups.map((group) => {
         const roster = rosterOf(group);
         const picked = roster.filter((client) => selected.has(client.id)).length;
@@ -702,69 +744,108 @@ export function ImportClientsPage() {
         const destinations = page?.routers.filter((router) => router.id !== group.routerId) ?? [];
         const active = progress && progress.group === group.routerId ? progress : null;
         const unassigned = group.routerId === UNASSIGNED;
+        const visibleCount = group.clients.length;
         return (
           <section key={group.routerId} className="card overflow-hidden">
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-b border-border px-4 py-3">
-              <GroupCheckbox group={group} selected={selected} disabled={isBusy} onToggle={(on) => toggleGroup(group, on)} />
-              <div className="min-w-0 flex-1">
-                <h3 className="flex min-w-0 items-center gap-2 font-semibold">
-                  <span className="truncate">{group.name}</span>
-                  {unassigned ? <StatusBadge tone="due">Unassigned</StatusBadge> : null}
-                </h3>
-                <p className="text-xs text-muted-foreground">
-                  {term && group.clients.length !== roster.length ? `${group.clients.length} of ` : ""}
-                  {roster.length} client{roster.length === 1 ? "" : "s"}
-                  {mix.online ? ` · ${mix.online} online` : ""}
-                  {picked ? ` · ${picked} selected` : ""}
-                  {unassigned ? " · not linked to a router" : ""}
-                </p>
-                {roster.length ? (
-                  <div className="mt-1.5 flex h-1 w-40 max-w-full overflow-hidden rounded-full bg-muted" aria-hidden="true">
-                    {mix.online ? <span className="bg-success" style={{ width: `${(mix.online / roster.length) * 100}%` }} /> : null}
-                    {mix.offline ? <span className="bg-destructive" style={{ width: `${(mix.offline / roster.length) * 100}%` }} /> : null}
-                    {mix.unknown ? <span className="bg-warning" style={{ width: `${(mix.unknown / roster.length) * 100}%` }} /> : null}
+            <div className="border-b border-border bg-surface-muted/25 px-4 py-4 sm:px-5">
+              <div className="flex items-start gap-3">
+                <div className="pt-1">
+                  <GroupCheckbox group={group} selected={selected} disabled={isBusy} onToggle={(on) => toggleGroup(group, on)} />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-primary/10 text-primary" aria-hidden="true">
+                      {unassigned ? <Unlink className="h-4 w-4" /> : <Router className="h-4 w-4" />}
+                    </span>
+                    <div className="min-w-0">
+                      <h3 className="truncate text-base font-semibold tracking-tight sm:text-lg">{group.name}</h3>
+                      <p className="text-xs text-muted-foreground">
+                        {unassigned ? "Not linked to a MikroTik yet" : "PPPoE clients on this MikroTik"}
+                      </p>
+                    </div>
+                    {unassigned ? <StatusBadge tone="due">Unassigned</StatusBadge> : null}
                   </div>
-                ) : null}
+
+                  <div className="mt-3 flex flex-wrap gap-2">
+                    <span className="inline-flex items-center gap-1.5 rounded-lg bg-surface px-2.5 py-1 text-xs font-medium text-foreground shadow-sm ring-1 ring-border">
+                      <Users className="h-3.5 w-3.5 text-muted-foreground" aria-hidden="true" />
+                      {term && visibleCount !== roster.length ? `${visibleCount} of ${roster.length}` : roster.length}
+                      {" "}client{roster.length === 1 ? "" : "s"}
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 rounded-lg bg-success/10 px-2.5 py-1 text-xs font-medium text-success ring-1 ring-success/20">
+                      <span className="h-1.5 w-1.5 rounded-full bg-success" aria-hidden="true" />
+                      {mix.online} online
+                    </span>
+                    <span className="inline-flex items-center gap-1.5 rounded-lg bg-destructive/10 px-2.5 py-1 text-xs font-medium text-destructive ring-1 ring-destructive/20">
+                      <span className="h-1.5 w-1.5 rounded-full bg-destructive" aria-hidden="true" />
+                      {mix.offline} offline
+                    </span>
+                    {mix.unknown ? (
+                      <span className="inline-flex items-center gap-1.5 rounded-lg bg-warning/10 px-2.5 py-1 text-xs font-medium text-warning ring-1 ring-warning/25">
+                        <span className="h-1.5 w-1.5 rounded-full bg-warning" aria-hidden="true" />
+                        {mix.unknown} unknown
+                      </span>
+                    ) : null}
+                    {picked ? (
+                      <span className="inline-flex items-center gap-1.5 rounded-lg bg-primary/10 px-2.5 py-1 text-xs font-medium text-primary ring-1 ring-primary/20">
+                        {picked} selected
+                      </span>
+                    ) : null}
+                  </div>
+
+                  {roster.length ? (
+                    <div className="mt-3 flex h-1.5 w-full max-w-md overflow-hidden rounded-full bg-muted" aria-hidden="true">
+                      {mix.online ? <span className="bg-success" style={{ width: `${(mix.online / roster.length) * 100}%` }} /> : null}
+                      {mix.offline ? <span className="bg-destructive" style={{ width: `${(mix.offline / roster.length) * 100}%` }} /> : null}
+                      {mix.unknown ? <span className="bg-warning" style={{ width: `${(mix.unknown / roster.length) * 100}%` }} /> : null}
+                    </div>
+                  ) : null}
+                </div>
               </div>
-              <label className="flex items-center gap-2 text-sm font-medium">
-                {unassigned ? "Assign to" : "Move to"}
-                <select
-                  className="field min-h-9 w-auto py-1"
-                  value={target}
-                  disabled={isBusy || destinations.length === 0}
-                  onChange={(event) => setTargets((current) => ({ ...current, [group.routerId]: event.target.value }))}
+
+              <div className="mt-4 flex flex-col gap-3 border-t border-border/70 pt-4 sm:flex-row sm:items-end">
+                <label className="grid min-w-0 flex-1 gap-1.5 text-sm font-medium">
+                  <span className="text-muted-foreground">{unassigned ? "Assign to MikroTik" : "Move selected clients to"}</span>
+                  <select
+                    className="field min-h-10 w-full"
+                    value={target}
+                    disabled={isBusy || destinations.length === 0}
+                    onChange={(event) => setTargets((current) => ({ ...current, [group.routerId]: event.target.value }))}
+                  >
+                    <option value="">{destinations.length ? "Choose destination router…" : "No other router available"}</option>
+                    {destinations.map((router) => (
+                      <option key={router.id} value={router.id}>
+                        {router.name}
+                        {router.site ? ` · ${router.site}` : ""}
+                      </option>
+                    ))}
+                  </select>
+                </label>
+                <PrimaryButton
+                  className="min-h-10 w-full shrink-0 sm:w-auto"
+                  disabled={!target || picked === 0 || busy !== null}
+                  aria-busy={isBusy}
+                  onClick={() => void transfer(group)}
                 >
-                  <option value="">{destinations.length ? "Choose router…" : "No other router"}</option>
-                  {destinations.map((router) => (
-                    <option key={router.id} value={router.id}>
-                      {router.name}
-                      {router.site ? ` · ${router.site}` : ""}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <PrimaryButton
-                className="min-h-9"
-                disabled={!target || picked === 0 || busy !== null}
-                aria-busy={isBusy}
-                onClick={() => void transfer(group)}
-              >
-                {unassigned ? "Assign" : "Transfer"}{picked ? ` ${picked}` : ""}
-                <ArrowRight className="h-4 w-4" aria-hidden="true" />
-              </PrimaryButton>
+                  {unassigned ? "Assign" : "Transfer"}
+                  {picked ? ` ${picked}` : ""}
+                  <ArrowRight className="h-4 w-4" aria-hidden="true" />
+                </PrimaryButton>
+              </div>
             </div>
+
             {active ? (
               <div
-                className="flex items-center gap-3 border-b border-border bg-surface-muted/40 px-4 py-2.5"
+                className="flex items-center gap-3 border-b border-border bg-primary/5 px-4 py-3 sm:px-5"
                 role="status"
                 aria-live="polite"
               >
-                <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-primary" aria-hidden="true" />
+                <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" aria-hidden="true" />
                 <div className="min-w-0 flex-1">
-                  <p className="text-xs font-medium">
+                  <p className="text-sm font-medium">
                     {unassigned ? "Assigning" : "Moving"} to {active.target || "router"} — {active.done} of {active.total}
                   </p>
-                  <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-muted">
+                  <div className="mt-2 h-1.5 w-full overflow-hidden rounded-full bg-muted">
                     <div
                       className="h-full bg-primary transition-all duration-300 ease-out"
                       style={{ width: `${active.total ? Math.round((active.done / active.total) * 100) : 0}%` }}
@@ -776,63 +857,95 @@ export function ImportClientsPage() {
                 </SecondaryButton>
               </div>
             ) : null}
-            <ul className="divide-y divide-border">
-              {group.clients.map((client) => (
-                <li key={client.id}>
-                  <label className="flex cursor-pointer items-center gap-3 px-4 py-2.5 transition-colors duration-fast ease-out hover:bg-surface-muted/50">
-                    <input
-                      type="checkbox"
-                      checked={selected.has(client.id)}
-                      disabled={isBusy}
-                      onChange={(event) => toggle(client.id, event.target.checked)}
-                    />
-                    <span className="relative flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary to-primary/60 text-[11px] font-bold text-primary-foreground">
-                      {initials(client)}
-                      <span
-                        className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-surface ${connectionDot(client.connection)}`}
-                      />
-                    </span>
-                    <span className="min-w-0 flex-1">
-                      <span className="block truncate font-medium">
-                        {client.firstName} {client.lastName}
-                      </span>
-                      <span className="block truncate text-xs text-muted-foreground">
-                        {client.phone} · {client.username}
-                      </span>
-                    </span>
-                    <span className="hidden shrink-0 text-sm text-muted-foreground sm:block">{client.packageName || "—"}</span>
-                    {rowPhase[client.id] ? (
-                      <StatusBadge
-                        tone={
-                          rowPhase[client.id] === "moved"
-                            ? "active"
-                            : rowPhase[client.id] === "failed"
-                              ? "critical"
-                              : rowPhase[client.id] === "moving"
-                                ? "pending"
-                                : "neutral"
-                        }
-                      >
-                        {rowPhase[client.id] === "moving"
-                          ? "Moving…"
-                          : rowPhase[client.id] === "queued"
-                            ? "Queued"
-                            : rowPhase[client.id] === "moved"
-                              ? "Moved"
-                              : "Failed"}
-                      </StatusBadge>
-                    ) : (
-                      <StatusBadge tone={routerStatusTone[client.routerStatus]}>{routerStatusLabel[client.routerStatus]}</StatusBadge>
-                    )}
-                    {rowPhase[client.id] === "failed" && rowErrors[client.id] ? (
-                      <span className="hidden min-w-0 max-w-56 truncate text-xs text-destructive lg:block" title={rowErrors[client.id]}>
-                        {rowErrors[client.id]}
-                      </span>
-                    ) : null}
-                  </label>
-                </li>
-              ))}
-            </ul>
+
+            {group.clients.length === 0 ? (
+              <p className="px-4 py-8 text-center text-sm text-muted-foreground sm:px-5">No clients on this MikroTik.</p>
+            ) : (
+              <>
+                <div className="hidden grid-cols-[auto_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,0.9fr)_auto] items-center gap-3 border-b border-border bg-surface-muted/40 px-4 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground sm:grid sm:px-5">
+                  <span className="w-4" aria-hidden="true" />
+                  <span>Client</span>
+                  <span>Contact / login</span>
+                  <span>Package</span>
+                  <span className="text-right">Status</span>
+                </div>
+                <ul className="divide-y divide-border">
+                  {group.clients.map((client) => {
+                    const phase = rowPhase[client.id];
+                    const errorText = phase === "failed" ? rowErrors[client.id] : "";
+                    return (
+                      <li key={client.id}>
+                        <label className="grid cursor-pointer grid-cols-[auto_minmax(0,1fr)] items-center gap-3 px-4 py-3 transition-colors duration-fast ease-out hover:bg-surface-muted/45 sm:grid-cols-[auto_minmax(0,1.4fr)_minmax(0,1fr)_minmax(0,0.9fr)_auto] sm:px-5">
+                          <input
+                            type="checkbox"
+                            className="mt-0.5"
+                            checked={selected.has(client.id)}
+                            disabled={isBusy}
+                            onChange={(event) => toggle(client.id, event.target.checked)}
+                          />
+                          <span className="flex min-w-0 items-center gap-3">
+                            <span className="relative flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-primary to-primary/60 text-[11px] font-bold text-primary-foreground">
+                              {initials(client)}
+                              <span
+                                className={`absolute -bottom-0.5 -right-0.5 h-2.5 w-2.5 rounded-full border-2 border-surface ${connectionDot(client.connection)}`}
+                              />
+                            </span>
+                            <span className="min-w-0">
+                              <span className="block truncate font-medium">
+                                {client.firstName} {client.lastName}
+                              </span>
+                              <span className="mt-0.5 block truncate text-xs text-muted-foreground sm:hidden">
+                                {client.phone || "—"} · {client.username || "—"}
+                                {client.packageName ? ` · ${client.packageName}` : ""}
+                              </span>
+                            </span>
+                          </span>
+                          <span className="col-start-2 hidden min-w-0 sm:col-auto sm:block">
+                            <span className="block truncate text-sm">{client.phone || "—"}</span>
+                            <span className="block truncate font-mono text-xs text-muted-foreground">{client.username || "—"}</span>
+                          </span>
+                          <span className="col-start-2 hidden truncate text-sm text-muted-foreground sm:col-auto sm:block">
+                            {client.packageName || "—"}
+                          </span>
+                          <span className="col-start-2 flex flex-wrap items-center justify-start gap-2 sm:col-auto sm:justify-end">
+                            {phase ? (
+                              <StatusBadge
+                                tone={
+                                  phase === "moved"
+                                    ? "active"
+                                    : phase === "failed"
+                                      ? "critical"
+                                      : phase === "moving"
+                                        ? "pending"
+                                        : "neutral"
+                                }
+                              >
+                                {phase === "moving"
+                                  ? "Moving…"
+                                  : phase === "queued"
+                                    ? "Queued"
+                                    : phase === "moved"
+                                      ? "Moved"
+                                      : "Failed"}
+                              </StatusBadge>
+                            ) : (
+                              <StatusBadge tone={routerStatusTone[client.routerStatus]}>
+                                {routerStatusLabel[client.routerStatus]}
+                              </StatusBadge>
+                            )}
+                            {errorText ? (
+                              <span className="max-w-full truncate text-xs text-destructive" title={errorText}>
+                                {errorText}
+                              </span>
+                            ) : null}
+                          </span>
+                        </label>
+                      </li>
+                    );
+                  })}
+                </ul>
+              </>
+            )}
           </section>
         );
       })}

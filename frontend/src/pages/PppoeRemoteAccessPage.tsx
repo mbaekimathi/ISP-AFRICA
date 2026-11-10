@@ -12,11 +12,17 @@ import { useAuth } from "@/providers/AuthProvider";
 import type { Subscriber } from "@/pages/PppoeCustomerPage";
 
 const DEFAULT_USER = "admin";
-const DEFAULT_PROTOCOL = "http";
-const DEFAULT_PORT = "80";
 
 type SavedAccess = {
   password: string;
+};
+
+type RemoteAccessSession = {
+  url: string;
+  target: string;
+  expiresAt: number;
+  tunnelIp: string;
+  listenPort: number;
 };
 
 function savedAccessKey(subscriberId: string) {
@@ -39,21 +45,15 @@ function routerHost(subscriber: Subscriber) {
   return (subscriber.live.ip || subscriber.staticIp || cpe?.ip || "").trim();
 }
 
-function buildRouterUrl(host: string, password: string) {
-  const url = new URL(`${DEFAULT_PROTOCOL}://${host}`);
-  url.port = DEFAULT_PORT;
-  url.username = DEFAULT_USER;
-  if (password) url.password = password;
-  return url;
-}
-
 export function PppoeRemoteAccessPage() {
   const { subscriberId = "" } = useParams();
   const { user } = useAuth();
   const [subscriber, setSubscriber] = useState<Subscriber | null>(null);
   const [message, setMessage] = useState("");
   const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
   const [opened, setOpened] = useState(false);
+  const [session, setSession] = useState<RemoteAccessSession | null>(null);
   const [error, setError] = useState("");
 
   usePageMeta("Remote access — ISP CENTRIC", "Open the client's router page remotely.");
@@ -68,10 +68,11 @@ export function PppoeRemoteAccessPage() {
       .catch((error: unknown) => setMessage(error instanceof Error ? error.message : "That client could not be loaded."));
   }, [subscriberId]);
 
-  function connect(event: FormEvent<HTMLFormElement>) {
+  async function connect(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setError("");
     setOpened(false);
+    setSession(null);
     if (!subscriber) return;
 
     const host = routerHost(subscriber);
@@ -84,25 +85,32 @@ export function PppoeRemoteAccessPage() {
       return;
     }
 
-    let url: URL;
-    try {
-      url = buildRouterUrl(host, password);
-    } catch {
-      setError("The router address on this account is not valid.");
-      return;
-    }
-
     try {
       window.localStorage.setItem(savedAccessKey(subscriberId), JSON.stringify({ password } satisfies SavedAccess));
     } catch {
       // Storage unavailable — connecting still works.
     }
 
-    const tab = window.open(url.href, "_blank", "noopener,noreferrer");
-    if (tab) {
-      setOpened(true);
-    } else {
-      window.location.assign(url.href);
+    setBusy(true);
+    try {
+      const body = await apiRequest<{ remoteAccess: RemoteAccessSession }>(
+        `/api/pppoe/subscribers/${subscriberId}/remote-access`,
+        {
+          method: "POST",
+          body: JSON.stringify({ password, username: DEFAULT_USER }),
+        },
+      );
+      setSession(body.remoteAccess);
+      const tab = window.open(body.remoteAccess.url, "_blank", "noopener,noreferrer");
+      if (tab) {
+        setOpened(true);
+      } else {
+        window.location.assign(body.remoteAccess.url);
+      }
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Remote access could not be opened.");
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -116,7 +124,7 @@ export function PppoeRemoteAccessPage() {
   const home = (path: string) => (user ? clientPage(user, path) : path);
   const online = subscriber.connection === "online";
   const host = routerHost(subscriber);
-  const target = host ? `${DEFAULT_PROTOCOL}://${host}` : "";
+  const target = host ? `http://${host}` : "";
 
   return (
     <div className="page-shell py-8">
@@ -147,7 +155,8 @@ export function PppoeRemoteAccessPage() {
           <h2 className="text-sm font-semibold">Open router</h2>
         </div>
         <p className="mt-3 text-sm text-muted-foreground">
-          Opens this client's router page in a new tab. The address is taken from their session — enter the router password to sign in.
+          Opens this client's router page through the management tunnel. Your browser never talks to the private PPPoE
+          address — surfing clients and live MikroTik settings stay untouched.
         </p>
         {!online ? (
           <p className="notice mt-3">The client is offline right now — the router page may not answer until their session is up.</p>
@@ -156,11 +165,12 @@ export function PppoeRemoteAccessPage() {
           <p className="notice mt-3">No router address is available for this client yet.</p>
         ) : (
           <p className="mt-3 text-sm text-muted-foreground">
-            Target: <span className="font-medium text-foreground">{target}</span> · user <span className="font-medium text-foreground">{DEFAULT_USER}</span>
+            Target: <span className="font-medium text-foreground">{target}</span> · user{" "}
+            <span className="font-medium text-foreground">{DEFAULT_USER}</span>
           </p>
         )}
         <form className="mt-4 grid gap-3" onSubmit={connect}>
-          <FormField id="remote-password" label="Router password" hint="Remembered on this device. Only sent to the router page itself.">
+          <FormField id="remote-password" label="Router password" hint="Remembered on this device. Sent only to open a short-lived tunnel session.">
             <input
               id="remote-password"
               type="password"
@@ -177,15 +187,19 @@ export function PppoeRemoteAccessPage() {
             </p>
           ) : null}
           <div>
-            <PrimaryButton type="submit" disabled={!host || !password.trim()}>
+            <PrimaryButton type="submit" disabled={!host || !password.trim() || busy}>
               <ExternalLink className="h-4 w-4" aria-hidden="true" />
-              Open router page
+              {busy ? "Opening…" : "Open router page"}
             </PrimaryButton>
           </div>
         </form>
       </section>
 
-      {opened ? <p className="notice mt-4">Router page opened in a new tab.</p> : null}
+      {opened && session ? (
+        <p className="notice mt-4">
+          Router page opened through the tunnel toward {session.target}. Session expires automatically after idle use.
+        </p>
+      ) : null}
       {message ? (
         <p className="notice mt-4" role="alert">
           {message}

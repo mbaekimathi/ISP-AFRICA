@@ -15,7 +15,7 @@ import time
 import traceback
 import uuid
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -36,6 +36,7 @@ import pppoe_service
 import pppoe_store
 import portal_server
 import radius_server
+import remote_access
 import router_jobs
 import routeros_api
 import webpush
@@ -381,6 +382,101 @@ def stamp(value):
     if value is None:
         return None
     return value.isoformat(sep=" ") if hasattr(value, "isoformat") else str(value)
+
+
+def usage_byte_count(value):
+    try:
+        return max(0, int(str(value or "0").replace(" ", "").split(".")[0] or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def usage_since_reset(row):
+    baseline_rx = int((row or {}).get("baseline_rx") or 0)
+    baseline_tx = int((row or {}).get("baseline_tx") or 0)
+    last_rx = int((row or {}).get("last_rx") or 0)
+    last_tx = int((row or {}).get("last_tx") or 0)
+    carried_rx = int((row or {}).get("carried_rx") or 0)
+    carried_tx = int((row or {}).get("carried_tx") or 0)
+    return {
+        "downloadBytes": carried_rx + max(0, last_rx - baseline_rx),
+        "uploadBytes": carried_tx + max(0, last_tx - baseline_tx),
+    }
+
+
+def usage_alert_unit_bytes(amount, unit):
+    try:
+        value = float(amount)
+    except (TypeError, ValueError) as error:
+        raise ApiError(400, "Enter a usage alert amount.") from error
+    if value < 0:
+        raise ApiError(400, "Enter a usage alert amount of zero or more.")
+    label = str(unit or "GB").strip().upper()
+    if label == "TB":
+        return int(value * 1024 * 1024 * 1024 * 1024)
+    if label == "GB":
+        return int(value * 1024 * 1024 * 1024)
+    raise ApiError(400, "Choose GB or TB for the usage alert.")
+
+
+def usage_alert_public(bytes_value):
+    amount = int(bytes_value or 0)
+    if amount <= 0:
+        return None
+    tb = 1024 * 1024 * 1024 * 1024
+    gb = 1024 * 1024 * 1024
+    if amount % tb == 0:
+        return {"amount": amount // tb, "unit": "TB", "bytes": amount}
+    if amount % gb == 0:
+        return {"amount": amount // gb, "unit": "GB", "bytes": amount}
+    return {"amount": round(amount / gb, 3), "unit": "GB", "bytes": amount}
+
+
+def human_usage_bytes(value):
+    amount = max(0, int(value or 0))
+    if amount < 1024:
+        return f"{amount} B"
+    if amount < 1024 * 1024:
+        return f"{amount / 1024:.1f} KB"
+    if amount < 1024 * 1024 * 1024:
+        return f"{amount / (1024 * 1024):.1f} MB"
+    if amount < 1024 * 1024 * 1024 * 1024:
+        return f"{amount / (1024 * 1024 * 1024):.2f} GB"
+    return f"{amount / (1024 * 1024 * 1024 * 1024):.2f} TB"
+
+
+def uplink_cycle_end(started_on, days):
+    if not started_on or not days:
+        return None
+    started = started_on
+    if isinstance(started, str):
+        try:
+            started = datetime.strptime(started[:10], "%Y-%m-%d").date()
+        except ValueError:
+            return None
+    if hasattr(started, "date") and not isinstance(started, date):
+        started = started.date()
+    try:
+        return started + timedelta(days=int(days))
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def public_usage_row(row):
+    totals = usage_since_reset(row)
+    return {
+        "downloadBytes": totals["downloadBytes"],
+        "uploadBytes": totals["uploadBytes"],
+        "totalBytes": totals["downloadBytes"] + totals["uploadBytes"],
+        "dayDownloadBytes": int((row or {}).get("day_rx") or 0),
+        "dayUploadBytes": int((row or {}).get("day_tx") or 0),
+        "monthDownloadBytes": int((row or {}).get("month_rx") or 0),
+        "monthUploadBytes": int((row or {}).get("month_tx") or 0),
+        "dailyAlert": usage_alert_public((row or {}).get("daily_alert_bytes")),
+        "monthlyAlert": usage_alert_public((row or {}).get("monthly_alert_bytes")),
+        "resetAt": stamp((row or {}).get("reset_at")),
+        "updatedAt": stamp((row or {}).get("updated_at")),
+    }
 
 
 def jsonable(value):
@@ -1161,11 +1257,16 @@ ISP_NOTIFICATION_TOGGLES = {
     "mikrotikUnreachable": "mikrotik_unreachable",
     "mikrotikNoInternet": "mikrotik_no_internet",
     "clientCannotSurf": "client_cannot_surf",
+    "clientsMoved": "clients_moved",
+    "uplinkRenewalNear": "uplink_renewal_near",
+    "usageLimitHit": "usage_limit_hit",
     "subscriptionEnding": "subscription_ending",
     "communicationsFailed": "communications_failed",
     "paymentsFailed": "payments_failed",
     "serverUnreachable": "server_unreachable",
 }
+
+UPLINK_RENEWAL_NOTICE_DAYS = 3
 
 
 ISP_CLIENT_NOTIFICATION_TOGGLES = {
@@ -1203,6 +1304,9 @@ ISP_NOTIFICATION_DEFAULT_MESSAGES = {
     "mikrotikUnreachable": "{router} is unreachable: {reason}.",
     "mikrotikNoInternet": "{router} is online but has no internet on its uplinks.",
     "clientCannotSurf": "{name} on {router} is connected but cannot surf.",
+    "clientsMoved": "{count} client(s) moved from {from} to {to}.",
+    "uplinkRenewalNear": "{router} uplink {provider} renews on {expiry} ({days} day(s) left).",
+    "usageLimitHit": "{router} hit the {period} usage limit of {limit} ({used} used).",
     "subscriptionEnding": "{name}'s {package} package ends on {expiry}.",
     "communicationsFailed": "The communications API for this account stopped working. Check Communications settings.",
     "paymentsFailed": "The payments API for this account stopped working. Check payment settings.",
@@ -2078,6 +2182,40 @@ def ensure_schema():
                 cursor.execute(
                     "ALTER TABLE isp_wan_uplinks ADD COLUMN account_number VARCHAR(64) NOT NULL DEFAULT ''"
                 )
+            for column, definition in (
+                ("cycle_started_on", "cycle_started_on DATE NULL"),
+                ("cycle_days", "cycle_days INT NOT NULL DEFAULT 0"),
+            ):
+                cursor.execute("SHOW COLUMNS FROM isp_wan_uplinks LIKE %s", (column,))
+                if cursor.fetchone() is None:
+                    cursor.execute(f"ALTER TABLE isp_wan_uplinks ADD COLUMN {definition}")
+            cursor.execute(
+                """
+                CREATE TABLE IF NOT EXISTS isp_mikrotik_usage (
+                  device_id CHAR(36) NOT NULL PRIMARY KEY,
+                  client_id CHAR(36) NOT NULL,
+                  baseline_rx BIGINT NOT NULL DEFAULT 0,
+                  baseline_tx BIGINT NOT NULL DEFAULT 0,
+                  last_rx BIGINT NOT NULL DEFAULT 0,
+                  last_tx BIGINT NOT NULL DEFAULT 0,
+                  carried_rx BIGINT NOT NULL DEFAULT 0,
+                  carried_tx BIGINT NOT NULL DEFAULT 0,
+                  day_key DATE NULL,
+                  day_rx BIGINT NOT NULL DEFAULT 0,
+                  day_tx BIGINT NOT NULL DEFAULT 0,
+                  month_key CHAR(7) NULL,
+                  month_rx BIGINT NOT NULL DEFAULT 0,
+                  month_tx BIGINT NOT NULL DEFAULT 0,
+                  daily_alert_bytes BIGINT NOT NULL DEFAULT 0,
+                  monthly_alert_bytes BIGINT NOT NULL DEFAULT 0,
+                  daily_alerted_on DATE NULL,
+                  monthly_alerted_on CHAR(7) NULL,
+                  reset_at TIMESTAMP NULL,
+                  updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                  KEY idx_mikrotik_usage_client (client_id)
+                )
+                """
+            )
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS isp_wan_audit (
@@ -2551,6 +2689,9 @@ def ensure_schema():
                   mikrotik_unreachable TINYINT NOT NULL DEFAULT 1,
                   mikrotik_no_internet TINYINT NOT NULL DEFAULT 1,
                   client_cannot_surf TINYINT NOT NULL DEFAULT 1,
+                  clients_moved TINYINT NOT NULL DEFAULT 1,
+                  uplink_renewal_near TINYINT NOT NULL DEFAULT 1,
+                  usage_limit_hit TINYINT NOT NULL DEFAULT 1,
                   subscription_ending TINYINT NOT NULL DEFAULT 1,
                   communications_failed TINYINT NOT NULL DEFAULT 1,
                   payments_failed TINYINT NOT NULL DEFAULT 1,
@@ -2559,6 +2700,16 @@ def ensure_schema():
                 )
                 """
             )
+            for column in (
+                "clients_moved",
+                "uplink_renewal_near",
+                "usage_limit_hit",
+            ):
+                cursor.execute("SHOW COLUMNS FROM isp_notification_settings LIKE %s", (column,))
+                if cursor.fetchone() is None:
+                    cursor.execute(
+                        f"ALTER TABLE isp_notification_settings ADD COLUMN {column} TINYINT NOT NULL DEFAULT 1"
+                    )
             cursor.execute(
                 """
                 CREATE TABLE IF NOT EXISTS isp_client_notification_settings (
@@ -4039,6 +4190,80 @@ def client_notification_items(cursor, client_id):
                     "open": not ended,
                 }
             )
+    if prefs["clientsMoved"]:
+        cursor.execute(
+            """
+            SELECT id, from_router, to_router, moved_count, failed_count, detail, created_at, updated_at
+            FROM pppoe_move_notices
+            WHERE client_id = %s AND moved_count > 0
+            ORDER BY COALESCE(updated_at, created_at) DESC
+            LIMIT 30
+            """,
+            (client_id,),
+        )
+        for row in cursor.fetchall():
+            moved = int(row["moved_count"] or 0)
+            failed = int(row["failed_count"] or 0)
+            source = str(row["from_router"] or "").strip() or "previous MikroTik"
+            target = str(row["to_router"] or "").strip() or "MikroTik"
+            sample = str(row["detail"] or "").strip()
+            detail = f"{moved} client{'s' if moved != 1 else ''} moved from {source} to {target}."
+            if sample:
+                detail = f"{detail} {sample}."
+            if failed:
+                detail = f"{detail} {failed} could not be moved."
+            items.append(
+                {
+                    "id": f"moved-{row['id']}",
+                    "kind": "clientsMoved",
+                    "subject": f"{moved} client{'s' if moved != 1 else ''} moved to {target}",
+                    "detail": detail,
+                    "at": stamp(row.get("updated_at") or row["created_at"]),
+                    "open": False,
+                }
+            )
+    if prefs.get("uplinkRenewalNear"):
+        cursor.execute(
+            """
+            SELECT u.device_id, u.interface_name, u.provider, u.account_number, u.cycle_started_on, u.cycle_days,
+                   d.name AS device_name
+            FROM isp_wan_uplinks u
+            JOIN isp_mikrotik_devices d ON d.id = u.device_id AND d.client_id = u.client_id
+            WHERE u.client_id = %s AND u.cycle_started_on IS NOT NULL AND u.cycle_days > 0
+            """,
+            (client_id,),
+        )
+        today = date.today()
+        for row in cursor.fetchall():
+            ends = uplink_cycle_end(row.get("cycle_started_on"), row.get("cycle_days"))
+            if not ends:
+                continue
+            days_left = (ends - today).days
+            if days_left < 0 or days_left > UPLINK_RENEWAL_NOTICE_DAYS:
+                continue
+            provider = str(row.get("provider") or "").strip() or row["interface_name"]
+            account = str(row.get("account_number") or "").strip()
+            detail = fill_notification_message(
+                ISP_NOTIFICATION_DEFAULT_MESSAGES["uplinkRenewalNear"],
+                {
+                    "router": row["device_name"],
+                    "provider": provider,
+                    "expiry": ends.isoformat(),
+                    "days": days_left,
+                },
+            )
+            if account:
+                detail = f"{detail} Account {account}."
+            items.append(
+                {
+                    "id": f"uplink-renewal-{row['device_id']}-{row['interface_name']}-{ends.isoformat()}",
+                    "kind": "uplinkRenewalNear",
+                    "subject": f"{row['device_name']} uplink renews soon",
+                    "detail": detail,
+                    "at": stamp(datetime.combine(today, datetime.min.time())),
+                    "open": days_left >= 0,
+                }
+            )
     items += gateway_feed_items(cursor, "client", client_id=client_id)
     items.sort(key=lambda item: item["at"] or "", reverse=True)
     return items
@@ -4264,10 +4489,39 @@ class Handler(BaseHTTPRequestHandler):
             pass
 
     def do_GET(self):
+        if remote_access.proxy_request(self):
+            return
         self.route("GET")
 
     def do_POST(self):
+        if remote_access.proxy_request(self):
+            return
         self.route("POST")
+
+    def do_PUT(self):
+        if remote_access.proxy_request(self):
+            return
+        self.send_json(405, {"error": "That method is not supported."})
+
+    def do_DELETE(self):
+        if remote_access.proxy_request(self):
+            return
+        self.send_json(405, {"error": "That method is not supported."})
+
+    def do_PATCH(self):
+        if remote_access.proxy_request(self):
+            return
+        self.send_json(405, {"error": "That method is not supported."})
+
+    def do_HEAD(self):
+        if remote_access.proxy_request(self):
+            return
+        self.route("GET")
+
+    def do_OPTIONS(self):
+        if remote_access.proxy_request(self):
+            return
+        self.send_json(405, {"error": "That method is not supported."})
 
     def route(self, method):
         started = time.perf_counter()
@@ -4594,6 +4848,15 @@ class Handler(BaseHTTPRequestHandler):
         if method == "POST" and path.startswith("/api/mikrotiks/") and path.endswith("/wan"):
             device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/wan").strip("/")
             return self.save_wan(cursor, device_id, token.get("isp_client_session"), payload), None
+        if method == "GET" and path.startswith("/api/mikrotiks/") and path.endswith("/usage"):
+            device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/usage").strip("/")
+            return {"usage": self.read_mikrotik_usage(cursor, device_id, token.get("isp_client_session"))}, None
+        if method == "POST" and path.startswith("/api/mikrotiks/") and path.endswith("/usage/reset"):
+            device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/usage/reset").strip("/")
+            return {"usage": self.reset_mikrotik_usage(cursor, device_id, token.get("isp_client_session"))}, None
+        if method == "POST" and path.startswith("/api/mikrotiks/") and path.endswith("/usage/alerts"):
+            device_id = path.removeprefix("/api/mikrotiks/").removesuffix("/usage/alerts").strip("/")
+            return {"usage": self.save_mikrotik_usage_alerts(cursor, device_id, token.get("isp_client_session"), payload)}, None
         if method == "POST" and path.startswith("/api/jobs/") and path.endswith("/cancel"):
             job_id = path.removeprefix("/api/jobs/").removesuffix("/cancel").strip("/")
             return {"job": self.cancel_router_job(cursor, job_id, token.get("isp_client_session"))}, None
@@ -6221,27 +6484,35 @@ document.getElementById('pay').onclick=async function(){{
         settings = cursor.fetchone()
         cursor.execute(
             """
-            SELECT interface_name, provider, method, gateway, download_mbps, upload_mbps, active, account_number
+            SELECT interface_name, provider, method, gateway, download_mbps, upload_mbps, active,
+                   account_number, cycle_started_on, cycle_days
             FROM isp_wan_uplinks
             WHERE device_id = %s AND client_id = %s
             ORDER BY interface_name
             """,
             (device_id, client_id),
         )
-        uplinks = [
-            {
-                "interface": row["interface_name"],
-                "provider": row["provider"],
-                "method": row["method"],
-                "gateway": row["gateway"],
-                "downloadMbps": row["download_mbps"],
-                "uploadMbps": row["upload_mbps"],
-                "active": bool(row["active"]),
-                "accountNumber": row["account_number"] or "",
-                "eligible": True,
-            }
-            for row in cursor.fetchall()
-        ]
+        uplinks = []
+        for row in cursor.fetchall():
+            started = row.get("cycle_started_on")
+            days = int(row.get("cycle_days") or 0)
+            ends = uplink_cycle_end(started, days)
+            uplinks.append(
+                {
+                    "interface": row["interface_name"],
+                    "provider": row["provider"],
+                    "method": row["method"],
+                    "gateway": row["gateway"],
+                    "downloadMbps": row["download_mbps"],
+                    "uploadMbps": row["upload_mbps"],
+                    "active": bool(row["active"]),
+                    "accountNumber": row["account_number"] or "",
+                    "cycleStartedOn": started.isoformat() if hasattr(started, "isoformat") else (str(started or "")[:10]),
+                    "cycleDays": days,
+                    "cycleEndsOn": ends.isoformat() if ends else "",
+                    "eligible": True,
+                }
+            )
         cursor.execute(
             """
             SELECT previous_uplink, requested_uplink, outcome, detail_text, created_at
@@ -6303,8 +6574,8 @@ document.getElementById('pay').onclick=async function(){{
                     """
                     INSERT INTO isp_wan_uplinks (
                       id, client_id, device_id, interface_name, provider, method, gateway,
-                      download_mbps, upload_mbps, active, account_number
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                      download_mbps, upload_mbps, active, account_number, cycle_started_on, cycle_days
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                     """,
                     (
                         str(uuid.uuid4()),
@@ -6318,6 +6589,8 @@ document.getElementById('pay').onclick=async function(){{
                         item["uploadMbps"],
                         1 if item["active"] else 0,
                         item["accountNumber"],
+                        item.get("cycleStartedOn") or None,
+                        int(item.get("cycleDays") or 0),
                     ),
                 )
             saved = self.read_wan(cursor, device_id, token)
@@ -6422,6 +6695,268 @@ document.getElementById('pay').onclick=async function(){{
             raise ApiError(429, "That router is being polled too quickly. Wait a moment.")
         names = [item["interface"] for item in saved["uplinks"]]
         return self._uplink_health(cursor, device_id, token, names)
+
+    def ensure_mikrotik_usage_row(self, cursor, client_id, device_id):
+        cursor.execute(
+            """
+            INSERT INTO isp_mikrotik_usage (device_id, client_id)
+            VALUES (%s, %s)
+            ON DUPLICATE KEY UPDATE device_id = device_id
+            """,
+            (device_id, client_id),
+        )
+        cursor.execute(
+            "SELECT * FROM isp_mikrotik_usage WHERE device_id = %s AND client_id = %s",
+            (device_id, client_id),
+        )
+        return cursor.fetchone()
+
+    def read_mikrotik_usage(self, cursor, device_id, token):
+        client_id = self.require_client(cursor, token)
+        self.mikrotik_row(cursor, device_id, client_id)
+        return public_usage_row(self.ensure_mikrotik_usage_row(cursor, client_id, device_id))
+
+    def reset_mikrotik_usage(self, cursor, device_id, token):
+        client_id = self.require_client(cursor, token)
+        self.mikrotik_row(cursor, device_id, client_id)
+        row = self.ensure_mikrotik_usage_row(cursor, client_id, device_id)
+        cursor.execute(
+            """
+            UPDATE isp_mikrotik_usage
+            SET baseline_rx = last_rx,
+                baseline_tx = last_tx,
+                carried_rx = 0,
+                carried_tx = 0,
+                day_rx = 0,
+                day_tx = 0,
+                month_rx = 0,
+                month_tx = 0,
+                daily_alerted_on = NULL,
+                monthly_alerted_on = NULL,
+                reset_at = CURRENT_TIMESTAMP
+            WHERE device_id = %s AND client_id = %s
+            """,
+            (device_id, client_id),
+        )
+        cursor.execute(
+            "SELECT * FROM isp_mikrotik_usage WHERE device_id = %s AND client_id = %s",
+            (device_id, client_id),
+        )
+        return public_usage_row(cursor.fetchone() or row)
+
+    def save_mikrotik_usage_alerts(self, cursor, device_id, token, payload):
+        client_id = self.require_client(cursor, token)
+        self.mikrotik_row(cursor, device_id, client_id)
+        self.ensure_mikrotik_usage_row(cursor, client_id, device_id)
+
+        def alert_bytes(raw):
+            if raw in (None, "", False):
+                return 0
+            if isinstance(raw, dict):
+                amount = raw.get("amount")
+                if amount in (None, "", 0, "0"):
+                    return 0
+                return usage_alert_unit_bytes(amount, raw.get("unit") or "GB")
+            return usage_alert_unit_bytes(raw, "GB")
+
+        daily = alert_bytes(payload.get("dailyAlert"))
+        monthly = alert_bytes(payload.get("monthlyAlert"))
+        cursor.execute(
+            """
+            UPDATE isp_mikrotik_usage
+            SET daily_alert_bytes = %s,
+                monthly_alert_bytes = %s,
+                daily_alerted_on = CASE
+                  WHEN %s <= 0 OR %s <> daily_alert_bytes THEN NULL
+                  ELSE daily_alerted_on
+                END,
+                monthly_alerted_on = CASE
+                  WHEN %s <= 0 OR %s <> monthly_alert_bytes THEN NULL
+                  ELSE monthly_alerted_on
+                END
+            WHERE device_id = %s AND client_id = %s
+            """,
+            (daily, monthly, daily, daily, monthly, monthly, device_id, client_id),
+        )
+        return self.read_mikrotik_usage(cursor, device_id, token)
+
+    def wan_counter_totals(self, cursor, client_id, device_id, interfaces):
+        names = []
+        cursor.execute(
+            """
+            SELECT interface_name
+            FROM isp_wan_uplinks
+            WHERE client_id = %s AND device_id = %s
+            ORDER BY active DESC, interface_name
+            """,
+            (client_id, device_id),
+        )
+        configured = [row["interface_name"] for row in cursor.fetchall()]
+        if configured:
+            names = configured
+        else:
+            for item in interfaces or []:
+                name = str(item.get("name") or "")
+                kind = str(item.get("type") or "")
+                if not name or name == "isp-centric":
+                    continue
+                if kind in {"wg", "bridge", "vlan"}:
+                    continue
+                names.append(name)
+        by_name = {str(item.get("name") or ""): item for item in interfaces or []}
+        rx = 0
+        tx = 0
+        for name in names:
+            item = by_name.get(name)
+            if not item:
+                continue
+            rx += usage_byte_count(item.get("rxByte"))
+            tx += usage_byte_count(item.get("txByte"))
+        return rx, tx
+
+    def sync_mikrotik_usage(self, cursor, client_id, device_id, interfaces, router_name=""):
+        row = self.ensure_mikrotik_usage_row(cursor, client_id, device_id)
+        current_rx, current_tx = self.wan_counter_totals(cursor, client_id, device_id, interfaces)
+        today = date.today()
+        month_key = today.strftime("%Y-%m")
+        day_key = row.get("day_key")
+        if hasattr(day_key, "isoformat"):
+            day_key = day_key.isoformat()
+        day_key = str(day_key or "")[:10]
+        same_day = day_key == today.isoformat()
+        same_month = str(row.get("month_key") or "") == month_key
+
+        last_rx = int(row.get("last_rx") or 0)
+        last_tx = int(row.get("last_tx") or 0)
+        baseline_rx = int(row.get("baseline_rx") or 0)
+        baseline_tx = int(row.get("baseline_tx") or 0)
+        carried_rx = int(row.get("carried_rx") or 0)
+        carried_tx = int(row.get("carried_tx") or 0)
+        prev = usage_since_reset(row)
+
+        if current_rx < last_rx:
+            carried_rx += max(0, last_rx - baseline_rx)
+            baseline_rx = 0
+        if current_tx < last_tx:
+            carried_tx += max(0, last_tx - baseline_tx)
+            baseline_tx = 0
+        last_rx = current_rx
+        last_tx = current_tx
+        next_totals = {
+            "downloadBytes": carried_rx + max(0, last_rx - baseline_rx),
+            "uploadBytes": carried_tx + max(0, last_tx - baseline_tx),
+        }
+        delta_rx = max(0, next_totals["downloadBytes"] - prev["downloadBytes"])
+        delta_tx = max(0, next_totals["uploadBytes"] - prev["uploadBytes"])
+        day_rx = (int(row.get("day_rx") or 0) if same_day else 0) + delta_rx
+        day_tx = (int(row.get("day_tx") or 0) if same_day else 0) + delta_tx
+        month_rx = (int(row.get("month_rx") or 0) if same_month else 0) + delta_rx
+        month_tx = (int(row.get("month_tx") or 0) if same_month else 0) + delta_tx
+        daily_alerted = row.get("daily_alerted_on") if same_day else None
+        monthly_alerted = row.get("monthly_alerted_on") if same_month else None
+        if hasattr(daily_alerted, "isoformat"):
+            daily_alerted = daily_alerted.isoformat()
+        daily_alerted = str(daily_alerted or "")[:10] or None
+        monthly_alerted = str(monthly_alerted or "")[:7] or None
+
+        cursor.execute(
+            """
+            UPDATE isp_mikrotik_usage
+            SET baseline_rx = %s,
+                baseline_tx = %s,
+                last_rx = %s,
+                last_tx = %s,
+                carried_rx = %s,
+                carried_tx = %s,
+                day_key = %s,
+                day_rx = %s,
+                day_tx = %s,
+                month_key = %s,
+                month_rx = %s,
+                month_tx = %s,
+                daily_alerted_on = %s,
+                monthly_alerted_on = %s
+            WHERE device_id = %s AND client_id = %s
+            """,
+            (
+                baseline_rx,
+                baseline_tx,
+                last_rx,
+                last_tx,
+                carried_rx,
+                carried_tx,
+                today.isoformat(),
+                day_rx,
+                day_tx,
+                month_key,
+                month_rx,
+                month_tx,
+                daily_alerted,
+                monthly_alerted,
+                device_id,
+                client_id,
+            ),
+        )
+
+        daily_limit = int(row.get("daily_alert_bytes") or 0)
+        monthly_limit = int(row.get("monthly_alert_bytes") or 0)
+        day_total = day_rx + day_tx
+        month_total = month_rx + month_tx
+        notices = []
+        if daily_limit > 0 and day_total >= daily_limit and daily_alerted != today.isoformat():
+            notices.append(("daily", daily_limit, day_total))
+            daily_alerted = today.isoformat()
+        if monthly_limit > 0 and month_total >= monthly_limit and monthly_alerted != month_key:
+            notices.append(("monthly", monthly_limit, month_total))
+            monthly_alerted = month_key
+        if notices:
+            cursor.execute(
+                "SELECT usage_limit_hit FROM isp_notification_settings WHERE client_id = %s",
+                (client_id,),
+            )
+            prefs = cursor.fetchone()
+            enabled = True if not prefs else bool(prefs.get("usage_limit_hit", 1))
+            if enabled:
+                for period, limit, used in notices:
+                    gateway_notify.send(
+                        cursor,
+                        gateway_notify.notice(
+                            "client",
+                            "usageLimitHit",
+                            f"{router_name or 'Router'} hit {period} usage limit",
+                            fill_notification_message(
+                                resolve_notification_message(
+                                    cursor,
+                                    ISP_NOTIFICATION_DEFAULT_MESSAGES,
+                                    "usageLimitHit",
+                                    client_id=client_id,
+                                    audience="me",
+                                ),
+                                {
+                                    "router": router_name or "Router",
+                                    "period": period,
+                                    "limit": human_usage_bytes(limit),
+                                    "used": human_usage_bytes(used),
+                                },
+                            ),
+                            client_id=client_id,
+                        ),
+                    )
+            cursor.execute(
+                """
+                UPDATE isp_mikrotik_usage
+                SET daily_alerted_on = %s, monthly_alerted_on = %s
+                WHERE device_id = %s AND client_id = %s
+                """,
+                (daily_alerted, monthly_alerted, device_id, client_id),
+            )
+            notify_push_now()
+
+        cursor.execute(
+            "SELECT * FROM isp_mikrotik_usage WHERE device_id = %s AND client_id = %s",
+            (device_id, client_id),
+        )
+        return public_usage_row(cursor.fetchone())
 
     def client_may_override(self, cursor, token):
         import wan_switch
@@ -7394,6 +7929,13 @@ document.getElementById('pay').onclick=async function(){{
                         live.pop("health", None)
                     else:
                         live["health"] = routeros_api.sample_health()
+                        live["usage"] = self.sync_mikrotik_usage(
+                            cursor,
+                            client_id,
+                            device_id,
+                            live.get("interfaces") or [],
+                            router_name=row["name"],
+                        )
                     return live
                 if ports_only:
                     return {
@@ -7458,6 +8000,13 @@ document.getElementById('pay').onclick=async function(){{
             for item in live.get("interfaces") or []:
                 observations.append((item.get("name") or "interface", routeros_api.interface_outage(item)))
             live["health"] = self.sync_router_health(cursor, client_id, device_id, observations)
+            live["usage"] = self.sync_mikrotik_usage(
+                cursor,
+                client_id,
+                device_id,
+                live.get("interfaces") or [],
+                router_name=row["name"],
+            )
         return live
 
     def setup_mikrotik(self, cursor, device_id, token):
@@ -7873,13 +8422,17 @@ document.getElementById('pay').onclick=async function(){{
             """
             INSERT INTO isp_notification_settings (
               client_id, mikrotik_onboarded, mikrotik_unreachable, mikrotik_no_internet, client_cannot_surf,
-              subscription_ending, communications_failed, payments_failed, server_unreachable
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+              clients_moved, uplink_renewal_near, usage_limit_hit, subscription_ending, communications_failed,
+              payments_failed, server_unreachable
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
             ON DUPLICATE KEY UPDATE
               mikrotik_onboarded = VALUES(mikrotik_onboarded),
               mikrotik_unreachable = VALUES(mikrotik_unreachable),
               mikrotik_no_internet = VALUES(mikrotik_no_internet),
               client_cannot_surf = VALUES(client_cannot_surf),
+              clients_moved = VALUES(clients_moved),
+              uplink_renewal_near = VALUES(uplink_renewal_near),
+              usage_limit_hit = VALUES(usage_limit_hit),
               subscription_ending = VALUES(subscription_ending),
               communications_failed = VALUES(communications_failed),
               payments_failed = VALUES(payments_failed),
@@ -7891,6 +8444,9 @@ document.getElementById('pay').onclick=async function(){{
                 fields["mikrotikUnreachable"],
                 fields["mikrotikNoInternet"],
                 fields["clientCannotSurf"],
+                fields["clientsMoved"],
+                fields["uplinkRenewalNear"],
+                fields["usageLimitHit"],
                 fields["subscriptionEnding"],
                 fields["communicationsFailed"],
                 fields["paymentsFailed"],
@@ -9926,6 +10482,35 @@ def cached_static(candidate):
     return body
 
 
+def remote_access_orphan_clear():
+    """After restart, drop leftover CPE forwards so dead sessions cannot linger."""
+    time.sleep(2)
+    try:
+        with connect() as db:
+            with db.cursor() as cursor:
+                cursor.execute(
+                    """
+                    SELECT tunnel_ip, api_secret FROM isp_mikrotik_devices
+                    WHERE status = 'active' AND tunnel_status = 'up'
+                      AND tunnel_ip <> '' AND api_secret IS NOT NULL AND api_secret <> ''
+                    """
+                )
+                devices = cursor.fetchall()
+    except pymysql.MySQLError as error:
+        print(f"event=remote-access orphan-clear error={error}", flush=True)
+        return
+    cleared = 0
+    for device in devices:
+        try:
+            password = routeros_api.open_password(device["api_secret"])
+        except routeros_api.RouterError:
+            continue
+        if remote_access.clear_orphaned_on_router(device["tunnel_ip"], password):
+            cleared += 1
+    if cleared:
+        print(f"event=remote-access orphan-clear routers={cleared}", flush=True)
+
+
 def publish_tunnel_peers_later():
     try:
         with connect() as db:
@@ -10412,6 +10997,8 @@ def main():
     threading.Thread(target=hotspot_limit_loop, daemon=True, name="hotspot-limit").start()
     threading.Thread(target=gateway_settlement_loop, daemon=True, name="gateway-settle").start()
     threading.Thread(target=push_dispatch_loop, daemon=True, name="push-dispatch").start()
+    remote_access._start_sweeper()
+    threading.Thread(target=remote_access_orphan_clear, daemon=True, name="remote-access-orphan").start()
     router_jobs.start_worker(connect)
     radius_server.start(connect)
     try:

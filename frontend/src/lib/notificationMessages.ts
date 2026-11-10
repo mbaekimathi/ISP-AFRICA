@@ -5,6 +5,9 @@ export type IspMeNotificationKey =
   | "mikrotikUnreachable"
   | "mikrotikNoInternet"
   | "clientCannotSurf"
+  | "clientsMoved"
+  | "uplinkRenewalNear"
+  | "usageLimitHit"
   | "subscriptionEnding"
   | "communicationsFailed"
   | "paymentsFailed"
@@ -66,6 +69,30 @@ export const meNotificationEvents: NotificationEventItem<IspMeNotificationKey>[]
     channel: "push",
     placeholders: ["name", "router"],
     defaultMessage: "{name} on {router} is connected but cannot surf.",
+  },
+  {
+    key: "clientsMoved",
+    label: "Clients are moved between MikroTiks",
+    detail: "Alert when PPPoE clients are transferred from one MikroTik to another on Import Clients.",
+    channel: "push",
+    placeholders: ["count", "from", "to"],
+    defaultMessage: "{count} client(s) moved from {from} to {to}.",
+  },
+  {
+    key: "uplinkRenewalNear",
+    label: "An uplink account is near renewal",
+    detail: "Alert within three days of a registered MikroTik uplink cycle ending.",
+    channel: "push",
+    placeholders: ["router", "provider", "expiry", "days"],
+    defaultMessage: "{router} uplink {provider} renews on {expiry} ({days} day(s) left).",
+  },
+  {
+    key: "usageLimitHit",
+    label: "A MikroTik hits a usage limit",
+    detail: "Alert when daily or monthly traffic on a router crosses the limit you set.",
+    channel: "push",
+    placeholders: ["router", "period", "limit", "used"],
+    defaultMessage: "{router} hit the {period} usage limit of {limit} ({used} used).",
   },
   {
     key: "subscriptionEnding",

@@ -1,5 +1,6 @@
-import { Cpu, MemoryStick, Network, Wifi } from "lucide-react";
-import { useEffect, useState, type ReactNode } from "react";
+import * as Dialog from "@radix-ui/react-dialog";
+import { Cpu, MemoryStick, Network, Wifi, X } from "lucide-react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { useParams } from "react-router-dom";
 import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { FormField } from "@/components/ui/FormField";
@@ -51,6 +52,23 @@ type LiveState = {
     trend?: TrendPoint[];
     trends?: Partial<Record<HealthRange, TrendPoint[]>>;
   };
+  usage?: UsageState;
+};
+
+type UsageAlert = { amount: number; unit: "GB" | "TB"; bytes: number } | null;
+
+type UsageState = {
+  downloadBytes: number;
+  uploadBytes: number;
+  totalBytes: number;
+  dayDownloadBytes: number;
+  dayUploadBytes: number;
+  monthDownloadBytes: number;
+  monthUploadBytes: number;
+  dailyAlert: UsageAlert;
+  monthlyAlert: UsageAlert;
+  resetAt: string | null;
+  updatedAt: string | null;
 };
 
 type WanUplink = {
@@ -62,6 +80,9 @@ type WanUplink = {
   uploadMbps: number;
   active: boolean;
   accountNumber: string;
+  cycleStartedOn: string;
+  cycleDays: number;
+  cycleEndsOn?: string;
   eligible?: boolean;
 };
 
@@ -146,13 +167,23 @@ function HealthTrend({
   );
 }
 
-function formatBytes(value: string) {
-  const amount = Number(value);
-  if (!Number.isFinite(amount)) return value || "0 B";
+function formatBytes(value: string | number) {
+  const amount = typeof value === "number" ? value : Number(value);
+  if (!Number.isFinite(amount)) return String(value || "0 B");
   if (amount < 1024) return `${amount} B`;
   if (amount < 1024 * 1024) return `${(amount / 1024).toFixed(1)} KB`;
   if (amount < 1024 * 1024 * 1024) return `${(amount / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(amount / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  if (amount < 1024 * 1024 * 1024 * 1024) return `${(amount / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+  return `${(amount / (1024 * 1024 * 1024 * 1024)).toFixed(2)} TB`;
+}
+
+function daysLeft(endsOn?: string) {
+  if (!endsOn) return null;
+  const ends = new Date(`${endsOn}T00:00:00`);
+  if (Number.isNaN(ends.getTime())) return null;
+  const today = new Date();
+  today.setHours(0, 0, 0, 0);
+  return Math.round((ends.getTime() - today.getTime()) / 86400000);
 }
 
 function amountOf(value?: string | null) {
@@ -207,11 +238,33 @@ export function MikrotikLivePage() {
   const [restartNote, setRestartNote] = useState("");
   const [grantCopied, setGrantCopied] = useState(false);
   const [wan, setWan] = useState<WanState | null>(null);
-  const [editingAccount, setEditingAccount] = useState(false);
+  const [usage, setUsage] = useState<UsageState | null>(null);
+  const [uplinkOpen, setUplinkOpen] = useState(false);
   const [accountDraft, setAccountDraft] = useState("");
+  const [cycleStartedDraft, setCycleStartedDraft] = useState("");
+  const [cycleDaysDraft, setCycleDaysDraft] = useState("");
   const [savingAccount, setSavingAccount] = useState(false);
   const [accountNote, setAccountNote] = useState("");
+  const [resettingUsage, setResettingUsage] = useState(false);
+  const [savingAlerts, setSavingAlerts] = useState(false);
+  const [usageNote, setUsageNote] = useState("");
+  const [dailyAmount, setDailyAmount] = useState("");
+  const [dailyUnit, setDailyUnit] = useState<"GB" | "TB">("GB");
+  const [monthlyAmount, setMonthlyAmount] = useState("");
+  const [monthlyUnit, setMonthlyUnit] = useState<"GB" | "TB">("GB");
+  const alertsReady = useRef(false);
   usePageMeta("MikroTik live — ISP CENTRIC", "Live running state read from the router.");
+
+  function applyAlertDrafts(next: UsageState) {
+    setDailyAmount(next.dailyAlert ? String(next.dailyAlert.amount) : "");
+    setDailyUnit(next.dailyAlert?.unit === "TB" ? "TB" : "GB");
+    setMonthlyAmount(next.monthlyAlert ? String(next.monthlyAlert.amount) : "");
+    setMonthlyUnit(next.monthlyAlert?.unit === "TB" ? "TB" : "GB");
+  }
+
+  useEffect(() => {
+    alertsReady.current = false;
+  }, [deviceId]);
 
   useEffect(() => {
     if (!deviceId) return;
@@ -242,6 +295,16 @@ export function MikrotikLivePage() {
         if (!stopped) setWan(body);
       })
       .catch(() => undefined);
+    apiRequest<{ usage: UsageState }>(`/api/mikrotiks/${deviceId}/usage`, { signal: controller.signal })
+      .then((body) => {
+        if (stopped) return;
+        if (!alertsReady.current) {
+          applyAlertDrafts(body.usage);
+          alertsReady.current = true;
+        }
+        setUsage(body.usage);
+      })
+      .catch(() => undefined);
     return () => {
       stopped = true;
       controller.abort();
@@ -261,6 +324,13 @@ export function MikrotikLivePage() {
         .then((body) => {
           if (stopped) return;
           setLive(body.live);
+          if (body.live.usage) {
+            if (!alertsReady.current) {
+              applyAlertDrafts(body.live.usage);
+              alertsReady.current = true;
+            }
+            setUsage(body.live.usage);
+          }
           setError("");
           if (body.live.reachable) {
             if (deviceId) tunnelAlert?.reportUp(deviceId);
@@ -345,8 +415,8 @@ export function MikrotikLivePage() {
     }
   }
 
-  async function saveAccount() {
-    if (!wan) return;
+  async function saveUplinkDetails() {
+    if (!wan || !sourceUplink) return;
     setSavingAccount(true);
     setError("");
     setAccountNote("");
@@ -356,17 +426,97 @@ export function MikrotikLivePage() {
         body: JSON.stringify({
           ...wan,
           uplinks: wan.uplinks.map((item) =>
-            item === sourceUplink ? { ...item, accountNumber: accountDraft.trim() } : item,
+            item.interface === sourceUplink.interface
+              ? {
+                  ...item,
+                  accountNumber: accountDraft.trim(),
+                  cycleStartedOn: cycleStartedDraft,
+                  cycleDays: Number(cycleDaysDraft || 0),
+                }
+              : item,
           ),
         }),
       });
       setWan(body);
-      setEditingAccount(false);
-      setAccountNote("Internet account saved.");
+      setUplinkOpen(false);
+      setAccountNote("Uplink details saved.");
     } catch (cause) {
-      setAccountNote(cause instanceof Error ? cause.message : "The internet account could not be saved.");
+      setAccountNote(cause instanceof Error ? cause.message : "The uplink details could not be saved.");
     } finally {
       setSavingAccount(false);
+    }
+  }
+
+  async function resetUplinkDetails() {
+    if (!wan || !sourceUplink) return;
+    setSavingAccount(true);
+    setError("");
+    setAccountNote("");
+    try {
+      const body = await apiRequest<WanState>(`/api/mikrotiks/${deviceId}/wan`, {
+        method: "POST",
+        body: JSON.stringify({
+          ...wan,
+          uplinks: wan.uplinks.map((item) =>
+            item.interface === sourceUplink.interface
+              ? { ...item, accountNumber: "", cycleStartedOn: "", cycleDays: 0, cycleEndsOn: "" }
+              : item,
+          ),
+        }),
+      });
+      setWan(body);
+      setAccountDraft("");
+      setCycleStartedDraft("");
+      setCycleDaysDraft("");
+      setUplinkOpen(false);
+      setAccountNote("Uplink details reset.");
+    } catch (cause) {
+      setAccountNote(cause instanceof Error ? cause.message : "The uplink details could not be reset.");
+    } finally {
+      setSavingAccount(false);
+    }
+  }
+
+  async function resetUsage() {
+    setResettingUsage(true);
+    setUsageNote("");
+    try {
+      const body = await apiRequest<{ usage: UsageState }>(`/api/mikrotiks/${deviceId}/usage/reset`, {
+        method: "POST",
+        body: "{}",
+      });
+      setUsage(body.usage);
+      applyAlertDrafts(body.usage);
+      setUsageNote("Data usage counters were reset.");
+    } catch (cause) {
+      setUsageNote(cause instanceof Error ? cause.message : "Usage could not be reset.");
+    } finally {
+      setResettingUsage(false);
+    }
+  }
+
+  async function saveUsageAlerts() {
+    setSavingAlerts(true);
+    setUsageNote("");
+    try {
+      const body = await apiRequest<{ usage: UsageState }>(`/api/mikrotiks/${deviceId}/usage/alerts`, {
+        method: "POST",
+        body: JSON.stringify({
+          dailyAlert: dailyAmount.trim()
+            ? { amount: Number(dailyAmount), unit: dailyUnit }
+            : null,
+          monthlyAlert: monthlyAmount.trim()
+            ? { amount: Number(monthlyAmount), unit: monthlyUnit }
+            : null,
+        }),
+      });
+      setUsage(body.usage);
+      applyAlertDrafts(body.usage);
+      setUsageNote("Usage alerts saved.");
+    } catch (cause) {
+      setUsageNote(cause instanceof Error ? cause.message : "Usage alerts could not be saved.");
+    } finally {
+      setSavingAlerts(false);
     }
   }
 
@@ -398,6 +548,7 @@ export function MikrotikLivePage() {
       ? live.message
       : "";
   const sourceUplink = wan?.uplinks.find((item) => item.active) ?? wan?.uplinks[0];
+  const uplinkDays = daysLeft(sourceUplink?.cycleEndsOn);
 
   return (
     <div className="page-shell py-8">
@@ -475,61 +626,143 @@ export function MikrotikLivePage() {
         </form>
       ) : null}
       {notice ? <p className="mt-4 text-sm text-muted-foreground">{notice}</p> : null}
-      {wan ? (
-        <section className="mt-6 max-w-md rounded-xl border border-border bg-surface p-5">
-          <h2 className="text-sm font-semibold">Internet account</h2>
+      <div className="mt-6 grid gap-4 lg:grid-cols-2">
+        <section className="rounded-xl border border-border bg-surface p-5">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div>
+              <h2 className="text-sm font-semibold">Data through this MikroTik</h2>
+              <p className="mt-1 text-sm text-muted-foreground">
+                Upload and download counted on the WAN uplink since the last reset.
+              </p>
+            </div>
+            <SecondaryButton type="button" disabled={resettingUsage || !deviceId} onClick={() => void resetUsage()}>
+              {resettingUsage ? "Resetting…" : "Reset data used"}
+            </SecondaryButton>
+          </div>
+          <dl className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+            <div className="rounded-lg bg-surface-muted px-3 py-3">
+              <dt className="text-xs text-muted-foreground">Download</dt>
+              <dd className="mt-1 text-lg font-semibold tabular-nums">{usage ? formatBytes(usage.downloadBytes) : "—"}</dd>
+            </div>
+            <div className="rounded-lg bg-surface-muted px-3 py-3">
+              <dt className="text-xs text-muted-foreground">Upload</dt>
+              <dd className="mt-1 text-lg font-semibold tabular-nums">{usage ? formatBytes(usage.uploadBytes) : "—"}</dd>
+            </div>
+            <div className="rounded-lg bg-surface-muted px-3 py-3 sm:col-span-1 col-span-2">
+              <dt className="text-xs text-muted-foreground">Total</dt>
+              <dd className="mt-1 text-lg font-semibold tabular-nums">{usage ? formatBytes(usage.totalBytes) : "—"}</dd>
+            </div>
+          </dl>
+          <p className="mt-3 text-xs text-muted-foreground">
+            Today {usage ? formatBytes(usage.dayDownloadBytes + usage.dayUploadBytes) : "—"} · This month{" "}
+            {usage ? formatBytes(usage.monthDownloadBytes + usage.monthUploadBytes) : "—"}
+            {usage?.resetAt ? ` · Reset ${usage.resetAt}` : ""}
+          </p>
+          <form
+            className="mt-4 grid gap-3 border-t border-border pt-4"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveUsageAlerts();
+            }}
+          >
+            <h3 className="text-sm font-medium">Usage alerts</h3>
+            <p className="text-xs text-muted-foreground">
+              Notify this ISP account when traffic hits a daily or monthly limit. Leave blank to turn an alert off.
+            </p>
+            <div className="grid gap-3 sm:grid-cols-2">
+              <FormField id="daily-usage-alert" label="Per day">
+                <div className="flex gap-2">
+                  <input
+                    id="daily-usage-alert"
+                    className="field"
+                    type="number"
+                    min={0}
+                    step="0.001"
+                    placeholder="Off"
+                    value={dailyAmount}
+                    onChange={(event) => setDailyAmount(event.target.value)}
+                  />
+                  <select className="field w-24" value={dailyUnit} onChange={(event) => setDailyUnit(event.target.value as "GB" | "TB")}>
+                    <option value="GB">GB</option>
+                    <option value="TB">TB</option>
+                  </select>
+                </div>
+              </FormField>
+              <FormField id="monthly-usage-alert" label="Per month">
+                <div className="flex gap-2">
+                  <input
+                    id="monthly-usage-alert"
+                    className="field"
+                    type="number"
+                    min={0}
+                    step="0.001"
+                    placeholder="Off"
+                    value={monthlyAmount}
+                    onChange={(event) => setMonthlyAmount(event.target.value)}
+                  />
+                  <select className="field w-24" value={monthlyUnit} onChange={(event) => setMonthlyUnit(event.target.value as "GB" | "TB")}>
+                    <option value="GB">GB</option>
+                    <option value="TB">TB</option>
+                  </select>
+                </div>
+              </FormField>
+            </div>
+            <div>
+              <PrimaryButton type="submit" disabled={savingAlerts}>
+                {savingAlerts ? "Saving…" : "Save alerts"}
+              </PrimaryButton>
+            </div>
+          </form>
+          {usageNote ? <p className="mt-2 text-xs text-muted-foreground">{usageNote}</p> : null}
+        </section>
+
+        <section className="rounded-xl border border-border bg-surface p-5">
+          <h2 className="text-sm font-semibold">Uplink account</h2>
           {sourceUplink ? (
             <>
               <p className="mt-1 text-sm text-muted-foreground">
                 {sourceUplink.provider || "Provider not set"} on {sourceUplink.interface}
                 {sourceUplink.active ? " supplies this router's internet." : " is the only saved uplink."}
               </p>
-              {editingAccount ? (
-                <form
-                  className="mt-3 grid gap-3"
-                  onSubmit={(event) => {
-                    event.preventDefault();
-                    void saveAccount();
+              <dl className="mt-4 grid gap-3 text-sm">
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
+                  <dt className="text-muted-foreground">Account number</dt>
+                  <dd className="font-medium tabular-nums">{sourceUplink.accountNumber || "Not registered"}</dd>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
+                  <dt className="text-muted-foreground">Started</dt>
+                  <dd className="font-medium tabular-nums">{sourceUplink.cycleStartedOn || "—"}</dd>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
+                  <dt className="text-muted-foreground">Runs for</dt>
+                  <dd className="font-medium tabular-nums">
+                    {sourceUplink.cycleDays ? `${sourceUplink.cycleDays} day${sourceUplink.cycleDays === 1 ? "" : "s"}` : "—"}
+                  </dd>
+                </div>
+                <div className="flex flex-wrap items-center justify-between gap-2 border-t border-border pt-3">
+                  <dt className="text-muted-foreground">Renews</dt>
+                  <dd className="font-medium tabular-nums">
+                    {sourceUplink.cycleEndsOn
+                      ? `${sourceUplink.cycleEndsOn}${uplinkDays == null ? "" : uplinkDays < 0 ? " · overdue" : ` · ${uplinkDays} day${uplinkDays === 1 ? "" : "s"} left`}`
+                      : "—"}
+                  </dd>
+                </div>
+              </dl>
+              <div className="mt-4">
+                <SecondaryButton
+                  type="button"
+                  onClick={() => {
+                    setAccountDraft(sourceUplink.accountNumber || "");
+                    setCycleStartedDraft(sourceUplink.cycleStartedOn || "");
+                    setCycleDaysDraft(sourceUplink.cycleDays ? String(sourceUplink.cycleDays) : "");
+                    setAccountNote("");
+                    setUplinkOpen(true);
                   }}
                 >
-                  <FormField
-                    id="internet-account"
-                    label="Account number"
-                    hint="Optional — the account this uplink buys internet on."
-                  >
-                    <input
-                      id="internet-account"
-                      className="field"
-                      value={accountDraft}
-                      maxLength={64}
-                      onChange={(event) => setAccountDraft(event.target.value)}
-                    />
-                  </FormField>
-                  <div className="flex flex-wrap gap-2">
-                    <PrimaryButton type="submit" disabled={savingAccount}>
-                      {savingAccount ? "Saving…" : "Save account"}
-                    </PrimaryButton>
-                    <SecondaryButton type="button" disabled={savingAccount} onClick={() => setEditingAccount(false)}>
-                      Cancel
-                    </SecondaryButton>
-                  </div>
-                </form>
-              ) : (
-                <div className="mt-3 flex flex-wrap items-center justify-between gap-3">
-                  <p className="text-sm font-medium tabular-nums">{sourceUplink.accountNumber || "Not registered"}</p>
-                  <SecondaryButton
-                    type="button"
-                    onClick={() => {
-                      setAccountDraft(sourceUplink.accountNumber);
-                      setAccountNote("");
-                      setEditingAccount(true);
-                    }}
-                  >
-                    {sourceUplink.accountNumber ? "Change" : "Register"}
-                  </SecondaryButton>
-                </div>
-              )}
-              {accountNote ? <p className="mt-2 text-xs text-muted-foreground">{accountNote}</p> : null}
+                  {sourceUplink.accountNumber || sourceUplink.cycleStartedOn ? "Edit uplink details" : "Register uplink details"}
+                </SecondaryButton>
+              </div>
+              {accountNote && !uplinkOpen ? <p className="mt-2 text-xs text-muted-foreground">{accountNote}</p> : null}
             </>
           ) : (
             <p className="mt-1 text-sm text-muted-foreground">
@@ -537,7 +770,79 @@ export function MikrotikLivePage() {
             </p>
           )}
         </section>
-      ) : null}
+      </div>
+
+      <Dialog.Root open={uplinkOpen} onOpenChange={(open) => !savingAccount && setUplinkOpen(open)}>
+        <Dialog.Portal>
+          <Dialog.Overlay className="dialog-overlay" />
+          <Dialog.Content className="dialog-content max-w-lg">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <Dialog.Title className="text-base font-semibold text-foreground">Uplink details</Dialog.Title>
+                <Dialog.Description className="mt-2 text-sm text-muted-foreground">
+                  Register the provider account, when it started, and how long it runs. Near renewal, this ISP account is notified.
+                </Dialog.Description>
+              </div>
+              <Dialog.Close asChild>
+                <button type="button" className="rounded-md p-1 text-muted-foreground hover:bg-surface-muted" aria-label="Close">
+                  <X className="h-4 w-4" />
+                </button>
+              </Dialog.Close>
+            </div>
+            <form
+              className="mt-4 grid gap-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void saveUplinkDetails();
+              }}
+            >
+              <FormField id="uplink-account" label="Account number" hint="Optional — the account this uplink buys internet on.">
+                <input
+                  id="uplink-account"
+                  className="field"
+                  value={accountDraft}
+                  maxLength={64}
+                  onChange={(event) => setAccountDraft(event.target.value)}
+                />
+              </FormField>
+              <FormField id="uplink-started" label="Date it started">
+                <input
+                  id="uplink-started"
+                  className="field"
+                  type="date"
+                  value={cycleStartedDraft}
+                  onChange={(event) => setCycleStartedDraft(event.target.value)}
+                />
+              </FormField>
+              <FormField id="uplink-days" label="How long it will run" hint="Number of days until this uplink account renews or resets.">
+                <input
+                  id="uplink-days"
+                  className="field"
+                  type="number"
+                  min={0}
+                  max={3650}
+                  value={cycleDaysDraft}
+                  onChange={(event) => setCycleDaysDraft(event.target.value)}
+                />
+              </FormField>
+              {accountNote && uplinkOpen ? <p className="text-sm text-destructive">{accountNote}</p> : null}
+              <div className="flex flex-wrap justify-between gap-2">
+                <SecondaryButton type="button" disabled={savingAccount} onClick={() => void resetUplinkDetails()}>
+                  {savingAccount ? "Working…" : "Reset details"}
+                </SecondaryButton>
+                <div className="flex flex-wrap gap-2">
+                  <SecondaryButton type="button" disabled={savingAccount} onClick={() => setUplinkOpen(false)}>
+                    Cancel
+                  </SecondaryButton>
+                  <PrimaryButton type="submit" disabled={savingAccount}>
+                    {savingAccount ? "Saving…" : "Save details"}
+                  </PrimaryButton>
+                </div>
+              </div>
+            </form>
+          </Dialog.Content>
+        </Dialog.Portal>
+      </Dialog.Root>
       {live?.reachable ? (
         <div className="mt-6 grid items-start gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
           <div className="order-2 grid min-w-0 gap-4 lg:order-1">
