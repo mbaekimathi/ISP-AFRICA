@@ -11,6 +11,7 @@ import os
 import shutil
 import socket
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -21,6 +22,86 @@ ROOT = Path(__file__).resolve().parent / "wg"
 KEY_FILE = ROOT / "server.key"
 CONFIG_FILE = ROOT / f"{TUNNEL_NAME}.conf"
 SYNC_FILE = ROOT / f"{TUNNEL_NAME}.sync.conf"
+
+# Short-lived CPE /32 routes for remote access. Peer → host/32 only; never the
+# shared 10.10.0.0/24 pool. Surfing clients are unaffected.
+_TEMP_HOSTS_LOCK = threading.Lock()
+_TEMP_HOSTS = {}  # tunnel_ip -> { "x.x.x.x/32", ... }
+_PEER_LOADER = None
+
+
+def set_peer_loader(loader):
+    """loader() -> rows with public_key + tunnel_ip for sync_peers."""
+    global _PEER_LOADER
+    _PEER_LOADER = loader
+
+
+def temporary_hosts(tunnel_ip):
+    with _TEMP_HOSTS_LOCK:
+        return set(_TEMP_HOSTS.get(str(tunnel_ip) or "", ()))
+
+
+def add_temporary_host(tunnel_ip, host_ip):
+    """Route one CPE address down a single MikroTik peer for remote access."""
+    if not local_server():
+        return False
+    tunnel = str(tunnel_ip or "").strip()
+    host = str(host_ip or "").strip()
+    try:
+        ip = ipaddress.ip_address(host)
+        if ip.version != 4 or not ip.is_private:
+            return False
+    except ValueError:
+        return False
+    key = f"{ip}/32"
+    with _TEMP_HOSTS_LOCK:
+        bucket = _TEMP_HOSTS.setdefault(tunnel, set())
+        if key in bucket:
+            return True
+        # One peer may own a given /32 — drop it from others first.
+        for other, hosts in list(_TEMP_HOSTS.items()):
+            if other != tunnel and key in hosts:
+                hosts.discard(key)
+        bucket.add(key)
+    if reload_peers():
+        return True
+    with _TEMP_HOSTS_LOCK:
+        bucket = _TEMP_HOSTS.get(tunnel)
+        if bucket is not None:
+            bucket.discard(key)
+            if not bucket:
+                _TEMP_HOSTS.pop(tunnel, None)
+    return False
+
+
+def remove_temporary_host(tunnel_ip, host_ip):
+    tunnel = str(tunnel_ip or "").strip()
+    host = str(host_ip or "").strip()
+    try:
+        key = f"{ipaddress.ip_address(host)}/32"
+    except ValueError:
+        return False
+    with _TEMP_HOSTS_LOCK:
+        bucket = _TEMP_HOSTS.get(tunnel)
+        if not bucket or key not in bucket:
+            return False
+        bucket.discard(key)
+        if not bucket:
+            _TEMP_HOSTS.pop(tunnel, None)
+    if not local_server():
+        return True
+    return reload_peers()
+
+
+def reload_peers():
+    if not local_server() or _PEER_LOADER is None:
+        return False
+    try:
+        sync_peers(_PEER_LOADER())
+        return True
+    except Exception as error:
+        print(f"event=wireguard temp-route error={error}", flush=True)
+        return False
 
 
 def tunnel_network():
@@ -170,7 +251,8 @@ def peer_networks(tunnel_ip):
     from routeros_api import portal_map_network
 
     mapped = portal_map_network(tunnel_ip)
-    return [f"{tunnel_ip}/32"] + ([mapped] if mapped else [])
+    extras = sorted(temporary_hosts(tunnel_ip))
+    return [f"{tunnel_ip}/32"] + ([mapped] if mapped else []) + extras
 
 
 def peer_lines(peers):

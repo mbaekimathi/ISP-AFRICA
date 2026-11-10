@@ -40,6 +40,18 @@ import { cn } from "@/lib/cn";
 import { clientPage } from "@/lib/accounts";
 import { useAuth } from "@/providers/AuthProvider";
 
+export type RemoteAccessStatus = {
+  state: string;
+  label: string;
+  ready: boolean;
+  tunnelStatus: string;
+  tunnelIp: string;
+  cpeIp: string;
+  connection: string;
+  routerName: string;
+  session: { url: string; target: string; expiresAt: number; mode?: string } | null;
+};
+
 export type Subscriber = {
   id: string;
   firstName: string;
@@ -49,6 +61,7 @@ export type Subscriber = {
   username: string;
   routerId: string;
   routerName: string;
+  routerTunnelStatus?: string;
   packageId: string;
   packageName: string;
   serial: string;
@@ -67,6 +80,7 @@ export type Subscriber = {
   usage: { days: { day: string; bytesIn: number; bytesOut: number }[]; monthBytesIn: number; monthBytesOut: number };
   sessions: { login: string | null; logout: string | null; duration: number; ip: string; bytesIn: number; bytesOut: number; cause: string }[];
   devices: { mac: string; ip: string; name?: string; kind?: "router" | "gadget"; via?: string; sessions: number; seconds: number; bytesIn: number; bytesOut: number; online: boolean; onlineFor: string; lastSeen: string | null }[];
+  remoteAccess?: RemoteAccessStatus;
   accessInterface?: string;
   billing: {
     invoices: { id: string; amount: string; purpose: string; status: string; reference: string; createdAt: string }[];
@@ -725,6 +739,19 @@ export function PppoeCustomerPage() {
                   {subscriber.firstName} {subscriber.lastName}
                 </h1>
                 <StatusBadge tone={status.tone}>{status.label}</StatusBadge>
+                {subscriber.remoteAccess ? (
+                  <StatusBadge
+                    tone={
+                      subscriber.remoteAccess.state === "ready" || subscriber.remoteAccess.state === "session-open"
+                        ? "online"
+                        : subscriber.remoteAccess.state === "tunnel-down" || subscriber.remoteAccess.state === "no-tunnel"
+                          ? "offline"
+                          : "due"
+                    }
+                  >
+                    {subscriber.remoteAccess.label}
+                  </StatusBadge>
+                ) : null}
               </div>
               <p className="mt-1.5 truncate text-sm text-primary-foreground/80">
                 {subscriber.phone || "—"}
@@ -1051,6 +1078,18 @@ export function PppoeCustomerPage() {
                 <InfoRow label="MAC">{subscriber.live.mac || "—"}</InfoRow>
                 <InfoRow label="Uptime">{subscriber.live.uptime || "—"}</InfoRow>
                 <InfoRow label="Last seen">{subscriber.live.lastSeen ?? "Never"}</InfoRow>
+                <InfoRow label="Tunnel">
+                  {subscriber.remoteAccess?.tunnelStatus === "up"
+                    ? `Up · ${subscriber.remoteAccess.tunnelIp || "—"}`
+                    : subscriber.remoteAccess?.tunnelStatus === "down"
+                      ? "Down"
+                      : subscriber.routerTunnelStatus === "up"
+                        ? "Up"
+                        : subscriber.routerTunnelStatus === "down"
+                          ? "Down"
+                          : "Unknown"}
+                </InfoRow>
+                <InfoRow label="Remote access">{subscriber.remoteAccess?.label || "—"}</InfoRow>
               </dl>
             </div>
 

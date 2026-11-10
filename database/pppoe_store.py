@@ -1197,6 +1197,44 @@ def remote_access_target(cursor, row):
     }
 
 
+def remote_access_status(cursor, client_id, subscriber_id):
+    """Tunnel + CPE readiness for the remote-access page (no live CPE probe)."""
+    row = require_owned(cursor, client_id, subscriber_id)
+    target = remote_access_target(cursor, row)
+    connection = pppoe_service.connection_label(
+        int(row.get("open_sessions") or 0),
+        int(row.get("any_sessions") or 0) > 0,
+        target.get("tunnelStatus") or row.get("tunnel_status") or "unknown",
+    )
+    session = remote_access.active_for_subscriber(subscriber_id)
+    tunnel_status = target.get("tunnelStatus") or "unknown"
+    cpe_ip = target.get("cpeIp") or ""
+    tunnel_ip = target.get("tunnelIp") or ""
+    if session:
+        state, label = "session-open", "Session open"
+    elif not tunnel_ip:
+        state, label = "no-tunnel", "No management tunnel"
+    elif tunnel_status != "up":
+        state, label = "tunnel-down", "Tunnel down"
+    elif not cpe_ip:
+        state, label = "no-address", "No router IP"
+    elif connection != "online":
+        state, label = "client-offline", "Client offline"
+    else:
+        state, label = "ready", "Ready"
+    return {
+        "state": state,
+        "label": label,
+        "ready": state in {"ready", "session-open"},
+        "tunnelStatus": tunnel_status,
+        "tunnelIp": tunnel_ip,
+        "cpeIp": cpe_ip,
+        "connection": connection,
+        "routerName": row.get("router_name") or "",
+        "session": session,
+    }
+
+
 def open_remote_access(cursor, client_id, subscriber_id, payload):
     row = require_owned(cursor, client_id, subscriber_id)
     target = remote_access_target(cursor, row)
@@ -1265,6 +1303,7 @@ def subscriber_detail(cursor, client_id, subscriber_id):
         "rates": live_rates(cursor, row) if body["connection"] == "online" else None,
     }
     body["devices"] = device_rows(cursor, row)
+    body["remoteAccess"] = remote_access_status(cursor, client_id, subscriber_id)
     return body
 
 
@@ -4543,6 +4582,8 @@ def dispatch(cursor, method, path, payload, token, query):
         status = effective_subscriber_status(row["status"], row.get("start_date"), row.get("expiry_date"))
         billing = effective_billing_status(row.get("billing_status"), row.get("next_due_date"))
         return {"connection": label, "live": live, "status": status, "billingStatus": billing, "rates": rates, "devices": devices}, None
+    if method == "GET" and action == "remote-access":
+        return {"remoteAccess": remote_access_status(cursor, client_id, subscriber_id)}, None
     if method != "POST":
         return None
     if action == "remote-access":

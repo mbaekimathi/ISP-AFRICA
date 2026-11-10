@@ -10482,6 +10482,13 @@ def cached_static(candidate):
     return body
 
 
+def remote_access_peer_rows():
+    with connect() as db:
+        with db.cursor() as cursor:
+            cursor.execute("SELECT public_key, tunnel_ip FROM isp_mikrotik_devices")
+            return cursor.fetchall()
+
+
 def remote_access_orphan_clear():
     """After restart, drop leftover CPE forwards so dead sessions cannot linger."""
     time.sleep(2)
@@ -10998,6 +11005,7 @@ def main():
     threading.Thread(target=gateway_settlement_loop, daemon=True, name="gateway-settle").start()
     threading.Thread(target=push_dispatch_loop, daemon=True, name="push-dispatch").start()
     remote_access._start_sweeper()
+    wg_host.set_peer_loader(remote_access_peer_rows)
     threading.Thread(target=remote_access_orphan_clear, daemon=True, name="remote-access-orphan").start()
     router_jobs.start_worker(connect)
     radius_server.start(connect)

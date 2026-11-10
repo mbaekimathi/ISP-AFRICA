@@ -56,8 +56,8 @@ class RemoteAccessTests(unittest.TestCase):
             done,  # login
             sentence("!re", "=.id=*9", "=comment=isp-centric-remote-access:old") + done,  # nat print (other session)
             done,  # filter print during clear (none for this comment)
-            sentence("!re", "=.id=*1", "=chain=forward", "=action=drop") + done,  # forward drop anchor
             done,  # dstnat add
+            done,  # connection-nat-state accept
             done,  # srcnat add
             done,  # forward accept out
             done,  # forward accept back
@@ -76,11 +76,13 @@ class RemoteAccessTests(unittest.TestCase):
         sent = b"".join(sock.sent)
         self.assertIn(b"/ip/firewall/nat/add", sent)
         self.assertIn(b"=action=dst-nat", sent)
+        self.assertIn(b"=dst-address=10.88.0.5", sent)
         self.assertIn(b"=to-addresses=10.10.0.247", sent)
         self.assertIn(b"=dst-port=41234", sent)
-        self.assertIn(b"=in-interface=isp-centric", sent)
+        self.assertIn(b"=connection-nat-state=dstnat", sent)
         self.assertIn(b"=action=masquerade", sent)
         self.assertIn(b"=src-address=10.88.0.1", sent)
+        self.assertIn(b"=out-interface=all-ppp", sent)
         self.assertIn(b"isp-centric-remote-access:ab12cd", sent)
         # Must not touch live PPPoE / portal / WireGuard surfaces.
         self.assertNotIn(b"/ppp/", sent)
@@ -90,6 +92,25 @@ class RemoteAccessTests(unittest.TestCase):
         self.assertNotIn(b"isp-centric-portal", sent)
         self.assertNotIn(b"AllowedIPs", sent)
         self.assertNotIn(b"10.10.0.0/24", sent)
+
+    def test_direct_mode_skips_dstnat(self):
+        done = sentence("!done")
+        replies = [done, done, done, done, done, done]
+        sock = ScriptedSocket(replies)
+        result = routeros_api.install_remote_access(
+            "10.88.0.5",
+            "secret-password",
+            "10.10.0.247",
+            None,
+            "isp-centric-remote-access:ab12cd",
+            server_ip="10.88.0.1",
+            opener=lambda _address, _timeout: sock,
+        )
+        self.assertTrue(result["installed"])
+        self.assertIsNone(result["listenPort"])
+        sent = b"".join(sock.sent)
+        self.assertNotIn(b"=action=dst-nat", sent)
+        self.assertIn(b"=action=masquerade", sent)
 
     def test_install_rejects_public_cpe_and_wrong_comment(self):
         with self.assertRaises(routeros_api.RouterError):
@@ -134,9 +155,12 @@ class RemoteAccessTests(unittest.TestCase):
 
     def test_open_session_uses_tunnel_proxy_url(self):
         with mock.patch("remote_access.routeros_api.install_remote_access") as install, mock.patch(
-            "remote_access._probe_forward", return_value=True
+            "remote_access.routeros_api.diagnose_cpe_web",
+            return_value={"pppActive": True, "pingOk": True, "webOk": True},
+        ), mock.patch("remote_access.wg_host.add_temporary_host", return_value=False), mock.patch(
+            "remote_access._probe_with_retries", return_value=True
         ):
-            install.return_value = {"installed": True}
+            install.return_value = {"installed": True, "listenPort": 41234}
             session = remote_access.open_session(
                 client_id="client-1",
                 subscriber_id="sub-1",
@@ -147,6 +171,7 @@ class RemoteAccessTests(unittest.TestCase):
             )
         self.assertTrue(session["url"].startswith("/api/pppoe/remote/"))
         self.assertEqual(session["target"], "http://10.10.0.247:80")
+        self.assertEqual(session["mode"], "forward")
         install.assert_called_once()
         kwargs = install.call_args
         self.assertEqual(kwargs.args[0], "10.88.0.5")

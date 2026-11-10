@@ -3056,6 +3056,61 @@ def clear_remote_access(host, password, comment=None, timeout=8, port=API_PORT, 
     return {"removed": True}
 
 
+def diagnose_cpe_web(host, password, cpe_ip, cpe_port=80, timeout=8, port=API_PORT, opener=None):
+    """Check the CPE from the NAS itself (ping + optional HTTP fetch). No config changes."""
+    try:
+        cpe = ipaddress.ip_address(str(cpe_ip))
+        if cpe.version != 4 or not cpe.is_private:
+            raise ValueError
+    except ValueError as error:
+        raise RouterError("The client router address is not a private IPv4.") from error
+    cpe_port = int(cpe_port)
+    connect = opener or socket.create_connection
+    try:
+        sock = connect((host, port), timeout)
+    except OSError as error:
+        raise RouterError("The management tunnel did not answer.") from error
+    try:
+        sock.settimeout(timeout)
+        reader = ByteReader(sock)
+        login = talk(sock, reader, ["/login", f"=name={API_USER}", f"=password={password}"])
+        if any(row.get("ret") for row in login):
+            raise RouterError("This router still uses the old API login. RouterOS 7 is required.")
+        active = False
+        try:
+            for row in talk(sock, reader, ["/ppp/active/print"]):
+                if (row.get("address") or "") == str(cpe):
+                    active = True
+                    break
+        except RouterError:
+            active = False
+        reachable = False
+        try:
+            reachable = ping_reaches(talk(sock, reader, ["/ping", f"=address={cpe}", "=count=2", "=interval=300ms"]))
+        except RouterError:
+            reachable = False
+        web = False
+        try:
+            talk(
+                sock,
+                reader,
+                [
+                    "/tool/fetch",
+                    f"=url=http://{cpe}:{cpe_port}/",
+                    "=mode=http",
+                    "=keep-result=no",
+                ],
+            )
+            web = True
+        except RouterError as error:
+            # Auth challenges and HTTP errors still prove the web UI is listening.
+            tip = str(error).lower()
+            web = any(mark in tip for mark in ("401", "403", "404", "302", "301", "http", "status"))
+    finally:
+        sock.close()
+    return {"pppActive": active, "pingOk": reachable, "webOk": web, "cpeIp": str(cpe), "cpePort": cpe_port}
+
+
 def install_remote_access(
     host,
     password,
@@ -3068,10 +3123,12 @@ def install_remote_access(
     port=API_PORT,
     opener=None,
 ):
-    """Forward one high TCP port on the tunnel to one CPE web port.
+    """Allow the management server to reach one CPE web port via the NAS.
 
-    Adds only comment-scoped dst-nat, masquerade, and forward accepts. Surfing
-    clients and live PPPoE/portal rules are left alone.
+    Always installs a narrow masquerade + forward accepts so PPPoE drop rules
+    and CPE WAN ACLs do not block the session. When listen_port is set, also
+    adds a dst-nat high-port forward (hosted WG path). Surfing clients, portal
+    NAT, WireGuard peers, and PPPoE profiles stay untouched.
     """
     try:
         cpe = ipaddress.ip_address(str(cpe_ip))
@@ -3079,10 +3136,7 @@ def install_remote_access(
             raise ValueError
     except ValueError as error:
         raise RouterError("The client router address is not a private IPv4.") from error
-    listen_port = int(listen_port)
     cpe_port = int(cpe_port)
-    if not (REMOTE_ACCESS_PORT_MIN <= listen_port <= REMOTE_ACCESS_PORT_MAX):
-        raise RouterError("The remote-access listen port is out of range.")
     if not (1 <= cpe_port <= 65535):
         raise RouterError("The CPE web port is not valid.")
     if not str(comment or "").startswith(f"{REMOTE_ACCESS_PREFIX}:"):
@@ -3092,6 +3146,15 @@ def install_remote_access(
         ipaddress.ip_address(source)
     except ValueError as error:
         raise RouterError("The management server address is not valid.") from error
+    try:
+        nas = ipaddress.ip_address(str(host))
+    except ValueError as error:
+        raise RouterError("The management tunnel address is not valid.") from error
+    forward_port = None
+    if listen_port is not None:
+        forward_port = int(listen_port)
+        if not (REMOTE_ACCESS_PORT_MIN <= forward_port <= REMOTE_ACCESS_PORT_MAX):
+            raise RouterError("The remote-access listen port is out of range.")
 
     connect = opener or socket.create_connection
     try:
@@ -3107,42 +3170,60 @@ def install_remote_access(
         # Replace only our own prior rules for this session comment.
         _remove_remote_comments(sock, reader, "/ip/firewall/nat", comment)
         _remove_remote_comments(sock, reader, "/ip/firewall/filter", comment)
-        filters = talk(sock, reader, ["/ip/firewall/filter/print"])
-        forward_anchor = next(
-            (_row_id(row) for row in filters if row.get("chain") == "forward" and row.get("action") == "drop" and _row_id(row)),
-            "0",
-        )
-        _add_placed(
-            sock,
-            reader,
-            [
-                "/ip/firewall/nat/add",
-                "=chain=dstnat",
-                "=action=dst-nat",
-                "=protocol=tcp",
-                "=in-interface=isp-centric",
-                f"=dst-port={listen_port}",
-                f"=to-addresses={cpe}",
-                f"=to-ports={cpe_port}",
-                f"=comment={comment}",
-            ],
-        )
+        if forward_port is not None:
+            # Hosted path: high port on the NAS tunnel address → CPE web port.
+            _add_placed(
+                sock,
+                reader,
+                [
+                    "/ip/firewall/nat/add",
+                    "=chain=dstnat",
+                    "=action=dst-nat",
+                    "=protocol=tcp",
+                    f"=dst-address={nas}",
+                    f"=dst-port={forward_port}",
+                    f"=to-addresses={cpe}",
+                    f"=to-ports={cpe_port}",
+                    f"=comment={comment}",
+                    "=place-before=0",
+                ],
+            )
+            _add_placed(
+                sock,
+                reader,
+                [
+                    "/ip/firewall/filter/add",
+                    "=chain=forward",
+                    "=action=accept",
+                    "=connection-nat-state=dstnat",
+                    f"=comment={comment}",
+                    "=place-before=0",
+                ],
+            )
         # Appear as the PPPoE local gateway so CPE WAN ACLs that allow the
         # ISP side keep working; scoped to this one CPE:port from the server.
-        _add_placed(
-            sock,
-            reader,
-            [
-                "/ip/firewall/nat/add",
-                "=chain=srcnat",
-                "=action=masquerade",
-                "=protocol=tcp",
-                f"=src-address={source}",
-                f"=dst-address={cpe}",
-                f"=dst-port={cpe_port}",
-                f"=comment={comment}",
-            ],
-        )
+        masquerade = [
+            "/ip/firewall/nat/add",
+            "=chain=srcnat",
+            "=action=masquerade",
+            "=protocol=tcp",
+            f"=src-address={source}",
+            f"=dst-address={cpe}",
+            f"=dst-port={cpe_port}",
+            "=out-interface=all-ppp",
+            f"=comment={comment}",
+            "=place-before=0",
+        ]
+        try:
+            _add_placed(sock, reader, masquerade)
+        except RouterError:
+            _add_placed(
+                sock,
+                reader,
+                [word for word in masquerade if not word.startswith("=out-interface=")],
+            )
+        # Sit above PPPoE drop-out-all-ppp so management can reach subscribed
+        # and non-list CPE addresses without opening general client traffic.
         _add_placed(
             sock,
             reader,
@@ -3155,7 +3236,7 @@ def install_remote_access(
                 f"=dst-address={cpe}",
                 f"=dst-port={cpe_port}",
                 f"=comment={comment}",
-                f"=place-before={forward_anchor}",
+                "=place-before=0",
             ],
         )
         _add_placed(
@@ -3170,14 +3251,14 @@ def install_remote_access(
                 f"=src-port={cpe_port}",
                 f"=dst-address={source}",
                 f"=comment={comment}",
-                f"=place-before={forward_anchor}",
+                "=place-before=0",
             ],
         )
     finally:
         sock.close()
     return {
         "installed": True,
-        "listenPort": listen_port,
+        "listenPort": forward_port,
         "cpeIp": str(cpe),
         "cpePort": cpe_port,
         "comment": comment,

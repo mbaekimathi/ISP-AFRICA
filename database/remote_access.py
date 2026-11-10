@@ -1,9 +1,9 @@
 """Server-side CPE remote access through the management tunnel.
 
-The browser never talks to private PPPoE addresses. Staff open a short-lived
-proxy URL; this module installs a comment-scoped port forward on the NAS and
-relays HTTP to the CPE. Surfing clients, portal NAT, WireGuard AllowedIPs, and
-PPPoE profiles are never modified.
+The browser never talks to private PPPoE addresses directly from the public
+internet. Staff open a short-lived proxy URL. Prefer a temporary WireGuard /32
+to the CPE (local WG server); otherwise fall back to a high-port dst-nat on the
+NAS. Surfing clients, portal NAT, and PPPoE profiles are never modified.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ SESSION_SECONDS = max(300, int(__import__("os").environ.get("ISP_REMOTE_ACCESS_S
 PORT_MIN = routeros_api.REMOTE_ACCESS_PORT_MIN
 PORT_MAX = routeros_api.REMOTE_ACCESS_PORT_MAX
 PREFIX = "/api/pppoe/remote/"
+CPE_WEB_PORTS = (80, 8080, 8888)
 HOP_BY_HOP = {
     "connection",
     "keep-alive",
@@ -95,6 +96,7 @@ def session_public(row):
         "expiresAt": int(row["expires_at"]),
         "tunnelIp": row["tunnel_ip"],
         "listenPort": row["listen_port"],
+        "mode": row["mode"],
     }
 
 
@@ -108,6 +110,17 @@ def get_session(token):
         return dict(row)
 
 
+def active_for_subscriber(subscriber_id):
+    with _LOCK:
+        token = _BY_SUBSCRIBER.get(subscriber_id)
+        if not token:
+            return None
+        row = _SESSIONS.get(token)
+        if not row or row["expires_at"] <= time.time():
+            return None
+        return session_public(row)
+
+
 def close_session(token, reason="closed"):
     with _LOCK:
         row = _SESSIONS.pop(token, None)
@@ -115,6 +128,8 @@ def close_session(token, reason="closed"):
             _BY_SUBSCRIBER.pop(row["subscriber_id"], None)
     if not row:
         return False
+    if row.get("mode") == "direct":
+        wg_host.remove_temporary_host(row["tunnel_ip"], row["cpe_ip"])
     try:
         routeros_api.clear_remote_access(row["tunnel_ip"], row["api_password"], row["comment"])
     except routeros_api.RouterError as error:
@@ -132,12 +147,55 @@ def _pick_listen_port(used):
     raise RemoteAccessError(503, "No free remote-access port is available right now.")
 
 
-def _probe_forward(tunnel_ip, listen_port, timeout=2.5):
+def _probe_tcp(host, port, timeout=2.5):
     try:
-        with socket.create_connection((tunnel_ip, listen_port), timeout=timeout):
+        with socket.create_connection((host, int(port)), timeout=timeout):
             return True
     except OSError:
         return False
+
+
+def _probe_with_retries(host, port, attempts=4, delay=0.35):
+    for index in range(attempts):
+        if _probe_tcp(host, port, timeout=2.0 + index):
+            return True
+        time.sleep(delay)
+    return False
+
+
+def _pick_cpe_port(tunnel_ip, api_password, cpe_ip, requested_port):
+    ports = [int(requested_port)]
+    for candidate in CPE_WEB_PORTS:
+        if candidate not in ports:
+            ports.append(candidate)
+    last = None
+    for port in ports:
+        try:
+            last = routeros_api.diagnose_cpe_web(tunnel_ip, api_password, cpe_ip, cpe_port=port)
+        except routeros_api.RouterError as error:
+            raise RemoteAccessError(502, str(error)) from error
+        if last.get("webOk"):
+            return port, last
+        if not last.get("pingOk") and not last.get("pppActive"):
+            break
+    return int(requested_port), last or {}
+
+
+def _failure_message(diag, cpe_ip, cpe_port):
+    if not diag.get("pppActive") and not diag.get("pingOk"):
+        return (
+            f"The MikroTik cannot reach {cpe_ip}. Confirm the PPPoE session is still online "
+            "and the framed IP matches this client."
+        )
+    if diag.get("pingOk") and not diag.get("webOk"):
+        return (
+            f"{cpe_ip} answers ping but its web UI did not answer on port {cpe_port}. "
+            "Enable WAN/remote HTTP on the CPE, or try the router's real web port."
+        )
+    return (
+        f"The management path to {cpe_ip}:{cpe_port} did not open. "
+        "Confirm the CPE is online and its web UI allows the ISP side."
+    )
 
 
 def open_session(
@@ -176,17 +234,22 @@ def open_session(
 
     with _LOCK:
         previous = _BY_SUBSCRIBER.get(subscriber_id)
-        used = {row["listen_port"] for row in _SESSIONS.values() if row["tunnel_ip"] == tunnel_ip}
+        used = {row["listen_port"] for row in _SESSIONS.values() if row["tunnel_ip"] == tunnel_ip and row.get("listen_port")}
     if previous:
         close_session(previous, reason="replaced")
 
+    cpe_port, diag = _pick_cpe_port(str(nas), api_password, str(cpe), cpe_port)
     token = secrets.token_urlsafe(18)
     comment_key = secrets.token_hex(6)
     comment = routeros_api.remote_access_comment(comment_key)
-    listen_port = _pick_listen_port(used)
+
+    # Prefer a temporary WG /32 to the CPE (local server). Fall back to dst-nat.
+    direct = wg_host.add_temporary_host(str(nas), str(cpe))
+    listen_port = None if direct else _pick_listen_port(used)
+    mode = "direct" if direct else "forward"
     try:
         routeros_api.install_remote_access(
-            tunnel_ip,
+            str(nas),
             api_password,
             str(cpe),
             listen_port,
@@ -195,18 +258,28 @@ def open_session(
             server_ip=wg_host.HOST_IP,
         )
     except routeros_api.RouterError as error:
+        if direct:
+            wg_host.remove_temporary_host(str(nas), str(cpe))
         raise RemoteAccessError(502, str(error)) from error
 
-    if not _probe_forward(tunnel_ip, listen_port):
+    if mode == "direct":
+        proxy_host, proxy_port = str(cpe), cpe_port
+    else:
+        proxy_host, proxy_port = str(nas), listen_port
+
+    if not _probe_with_retries(proxy_host, proxy_port):
         try:
-            routeros_api.clear_remote_access(tunnel_ip, api_password, comment)
+            routeros_api.clear_remote_access(str(nas), api_password, comment)
         except routeros_api.RouterError:
             pass
-        raise RemoteAccessError(
-            502,
-            "The management tunnel could not reach that client's router page. "
-            "Confirm the CPE is online and its web UI allows the ISP side.",
+        if direct:
+            wg_host.remove_temporary_host(str(nas), str(cpe))
+        print(
+            f"event=remote-access probe-failed mode={mode} cpe={cpe}:{cpe_port} "
+            f"diag={diag} via={proxy_host}:{proxy_port}",
+            flush=True,
         )
+        raise RemoteAccessError(502, _failure_message(diag, str(cpe), cpe_port))
 
     now = time.time()
     row = {
@@ -220,6 +293,9 @@ def open_session(
         "cpe_user": cpe_user,
         "cpe_password": cpe_password,
         "listen_port": listen_port,
+        "proxy_host": proxy_host,
+        "proxy_port": proxy_port,
+        "mode": mode,
         "comment": comment,
         "created_at": now,
         "expires_at": now + SESSION_SECONDS,
@@ -229,7 +305,7 @@ def open_session(
         _SESSIONS[token] = row
         _BY_SUBSCRIBER[subscriber_id] = token
     print(
-        f"event=remote-access open token={token[:8]} cpe={cpe} via={nas}:{listen_port}",
+        f"event=remote-access open mode={mode} token={token[:8]} cpe={cpe}:{cpe_port} via={proxy_host}:{proxy_port}",
         flush=True,
     )
     return session_public(row)
@@ -302,7 +378,6 @@ def proxy_request(handler):
         live = _SESSIONS.get(token)
         if live:
             live["last_used"] = time.time()
-            # Soft refresh while in use, capped at original window + one extension.
             live["expires_at"] = min(live["created_at"] + SESSION_SECONDS * 2, time.time() + SESSION_SECONDS)
 
     prefix = f"{PREFIX}{token}/"
@@ -329,7 +404,7 @@ def proxy_request(handler):
         f"{row['cpe_user']}:{row['cpe_password']}".encode()
     ).decode()
 
-    conn = http.client.HTTPConnection(row["tunnel_ip"], row["listen_port"], timeout=20)
+    conn = http.client.HTTPConnection(row["proxy_host"], row["proxy_port"], timeout=20)
     try:
         conn.request(handler.command, upstream_path, body=body or None, headers=headers)
         upstream = conn.getresponse()
