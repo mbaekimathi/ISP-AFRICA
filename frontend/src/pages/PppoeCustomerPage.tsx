@@ -40,6 +40,15 @@ import { cn } from "@/lib/cn";
 import { clientPage } from "@/lib/accounts";
 import { useAuth } from "@/providers/AuthProvider";
 
+export type RemoteAccessSession = {
+  url: string;
+  target: string;
+  expiresAt: number;
+  tunnelIp: string;
+  listenPort: number | null;
+  mode?: string;
+};
+
 export type RemoteAccessStatus = {
   state: string;
   label: string;
@@ -49,7 +58,7 @@ export type RemoteAccessStatus = {
   cpeIp: string;
   connection: string;
   routerName: string;
-  session: { url: string; target: string; expiresAt: number; mode?: string } | null;
+  session: RemoteAccessSession | null;
 };
 
 export type Subscriber = {

@@ -9,33 +9,12 @@ import { usePageMeta } from "@/hooks/usePageMeta";
 import { apiRequest } from "@/lib/api";
 import { clientPage } from "@/lib/accounts";
 import { useAuth } from "@/providers/AuthProvider";
-import type { Subscriber } from "@/pages/PppoeCustomerPage";
+import type { RemoteAccessSession, RemoteAccessStatus, Subscriber } from "@/pages/PppoeCustomerPage";
 
 const DEFAULT_USER = "admin";
 
 type SavedAccess = {
   password: string;
-};
-
-type RemoteAccessSession = {
-  url: string;
-  target: string;
-  expiresAt: number;
-  tunnelIp: string;
-  listenPort: number | null;
-  mode?: string;
-};
-
-type RemoteAccessStatus = {
-  state: "ready" | "session-open" | "tunnel-down" | "client-offline" | "no-address" | "no-tunnel" | string;
-  label: string;
-  ready: boolean;
-  tunnelStatus: "up" | "down" | "unknown" | string;
-  tunnelIp: string;
-  cpeIp: string;
-  connection: "online" | "offline" | "unknown" | string;
-  routerName: string;
-  session: RemoteAccessSession | null;
 };
 
 function savedAccessKey(subscriberId: string) {
