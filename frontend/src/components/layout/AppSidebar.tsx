@@ -89,6 +89,7 @@ const ITEM_ICONS: Record<string, { icon: LucideIcon; chip: string }> = {
   Onboarding: { icon: CirclePlus, chip: "bg-emerald-500/15 text-emerald-400" },
   "Pending activation": { icon: Package, chip: "bg-cyan-500/15 text-cyan-400" },
   "Pending approvals": { icon: UserRound, chip: "bg-amber-500/15 text-amber-400" },
+  Approvals: { icon: Users, chip: "bg-amber-500/15 text-amber-400" },
   Payroll: { icon: Wallet, chip: "bg-emerald-500/15 text-emerald-400" },
   "Add employee": { icon: CirclePlus, chip: "bg-emerald-500/15 text-emerald-400" },
   Performance: { icon: Gauge, chip: "bg-violet-500/15 text-violet-400" },

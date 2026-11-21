@@ -13,12 +13,13 @@ import { useEmployeeAuth } from "@/providers/EmployeeAuthProvider";
 export function IspClientsPage() {
   usePageMeta("ISP Clients — ISP CENTRIC", "Every ISP client registered in this system.");
   const { employee, ready } = useEmployeeAuth();
-  const { openAsClient } = useAuth();
+  const { approve, openAsClient } = useAuth();
   const navigate = useNavigate();
   const [clients, setClients] = useState<PublicAccount[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [message, setMessage] = useState("");
   const [openingId, setOpeningId] = useState("");
+  const [approvingId, setApprovingId] = useState("");
 
   useEffect(() => {
     if (employee?.role !== "director") return;
@@ -42,12 +43,35 @@ export function IspClientsPage() {
     return <Navigate to={employeeHomePath(employee)} replace />;
   }
 
+  function approveClient(client: PublicAccount) {
+    setApprovingId(client.id);
+    setMessage("");
+    approve(client.id)
+      .then(() => listAccountsForReview())
+      .then(setClients)
+      .catch((error: unknown) => {
+        setMessage(error instanceof Error ? error.message : "Could not approve that client.");
+      })
+      .finally(() => setApprovingId(""));
+  }
+
+  function openPortal(client: PublicAccount) {
+    setOpeningId(client.id);
+    setMessage("");
+    openAsClient(client.id)
+      .then((account) => navigate(clientHomePath(account)))
+      .catch((error: unknown) => {
+        setOpeningId("");
+        setMessage(error instanceof Error ? error.message : "Could not open that portal.");
+      });
+  }
+
   return (
     <div className="page-shell py-8">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <PageHeader
           title="ISP clients"
-          description="Every ISP client in this system. Access opens their portal in this browser as that client."
+          description="Every ISP client in this system. Approve a pending client to activate their account; access opens their portal in this browser as that client."
         />
         <SecondaryButton to={employeePage(employee, "/hr")}>Company HR</SecondaryButton>
       </div>
@@ -88,22 +112,24 @@ export function IspClientsPage() {
                     </StatusBadge>
                   </div>
                 </div>
-                <PrimaryButton
-                  type="button"
-                  disabled={openingId === client.id}
-                  onClick={() => {
-                    setOpeningId(client.id);
-                    setMessage("");
-                    openAsClient(client.id)
-                      .then((account) => navigate(clientHomePath(account)))
-                      .catch((error: unknown) => {
-                        setOpeningId("");
-                        setMessage(error instanceof Error ? error.message : "Could not open that portal.");
-                      });
-                  }}
-                >
-                  {openingId === client.id ? "Opening portal…" : "Open portal"}
-                </PrimaryButton>
+                <div className="flex flex-wrap items-center gap-2">
+                  {client.status !== "approved" ? (
+                    <PrimaryButton
+                      type="button"
+                      disabled={approvingId === client.id}
+                      onClick={() => approveClient(client)}
+                    >
+                      {approvingId === client.id ? "Approving…" : "Approve & activate"}
+                    </PrimaryButton>
+                  ) : null}
+                  <SecondaryButton
+                    type="button"
+                    disabled={openingId === client.id}
+                    onClick={() => openPortal(client)}
+                  >
+                    {openingId === client.id ? "Opening portal…" : "Open portal"}
+                  </SecondaryButton>
+                </div>
               </div>
               <div className="mt-3">
                 <DetailGrid

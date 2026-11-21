@@ -53,6 +53,18 @@ const dashboardLinks = [
   { label: "Billings", to: "/employee/company-settings/billings" },
 ];
 
+const staffLinks = [
+  { label: "My account", to: "/account" },
+  { label: "Approvals", to: "/reviews" },
+  { label: "Profile", to: "/company-settings/profile" },
+  { label: "Packages", to: "/company-settings/packages" },
+  { label: "Payments", to: "/company-settings/payments" },
+  { label: "Communications", to: "/company-settings/communications" },
+  { label: "Adverts", to: "/company-settings/adverts" },
+  { label: "Notifications", to: "/company-settings/notifications" },
+  { label: "Billings", to: "/employee/company-settings/billings" },
+];
+
 const hrLinks = [
   { label: "Company HR", to: "/hr" },
   { label: "Register employee", to: "/hr?add=1" },
@@ -71,8 +83,8 @@ const companyPaymentsLinks = [
 
 function employeeSidebarItems(pathname: string, director: boolean) {
   const path = pathname.replace(/^\/employee/, "").replace(/^\/[a-z-]+\/[A-Z0-9]+/, "");
-  if (path === "/dashboard" || path === "/performance" || path === "/clients") return director ? dashboardLinks : [];
-  if (path === "/hr") return director ? hrLinks : [];
+  if (path === "/dashboard" || path === "/performance" || path === "/clients") return director ? dashboardLinks : staffLinks;
+  if (path === "/hr") return director ? hrLinks : staffLinks;
   if (path.startsWith("/company-settings/billings")) return billingsLinks;
   if (path === "/company-settings/payments") return companyPaymentsLinks;
   if (path === "/company-settings/notifications/settings") return companyCommunicationsLinks;
@@ -81,7 +93,7 @@ function employeeSidebarItems(pathname: string, director: boolean) {
   if (path === "/company-settings/adverts") return companyAdvertsLinks;
   if (path === "/company-settings") return companyLinks;
   if (path === "/company-settings/profile") return companyProfileLinks;
-  return [];
+  return director ? [] : staffLinks;
 }
 
 export function EmployeeLayout() {
