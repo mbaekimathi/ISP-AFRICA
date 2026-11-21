@@ -7,15 +7,13 @@ import { PrimaryButton } from "@/components/ui/Buttons";
 import { LiveLoad } from "@/components/ui/LiveLoad";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { employeeHomePath } from "@/lib/employees";
-import { useAuth } from "@/providers/AuthProvider";
 import { useEmployeeAuth } from "@/providers/EmployeeAuthProvider";
 
 const codePattern = /^\d{6}$/;
 
 export function EmployeeLoginPage() {
   usePageMeta("Employee login — ISP CENTRIC", "Sign in as an ISP CENTRIC employee with a 6-digit code and password.");
-  const { user, ready: clientReady } = useAuth();
-  const { employee, login } = useEmployeeAuth();
+  const { employee, ready, login } = useEmployeeAuth();
   const navigate = useNavigate();
   const location = useLocation();
   const registered = Boolean((location.state as { registered?: boolean } | null)?.registered);
@@ -24,12 +22,8 @@ export function EmployeeLoginPage() {
   const [errors, setErrors] = useState<{ loginCode?: string; password?: string; form?: string }>({});
   const [pending, setPending] = useState(false);
 
-  if (!clientReady) {
+  if (!ready) {
     return <LiveLoad label="Loading account" />;
-  }
-
-  if (user && !employee) {
-    return <Navigate to="/account" replace />;
   }
 
   if (employee) {

@@ -7,9 +7,7 @@ import { PrimaryButton, SecondaryButton } from "@/components/ui/Buttons";
 import { LiveLoad } from "@/components/ui/LiveLoad";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { fileToProfilePhoto } from "@/lib/accounts";
-import { employeeHomePath } from "@/lib/employees";
 import { useAuth } from "@/providers/AuthProvider";
-import { useEmployeeAuth } from "@/providers/EmployeeAuthProvider";
 
 type SignUpValues = {
   firstName: string;
@@ -60,8 +58,7 @@ function validate(values: SignUpValues, photo: string) {
 
 export function SignUpPage() {
   usePageMeta("Sign up — ISP CENTRIC", "Create an ISP CENTRIC account with a 6-digit login code and password.");
-  const { user, register } = useAuth();
-  const { employee, ready: employeeReady } = useEmployeeAuth();
+  const { user, ready, register } = useAuth();
   const navigate = useNavigate();
   const [values, setValues] = useState<SignUpValues>(emptyValues);
   const [photo, setPhoto] = useState("");
@@ -69,12 +66,8 @@ export function SignUpPage() {
   const [pending, setPending] = useState(false);
   const [step, setStep] = useState(0);
 
-  if (!employeeReady) {
+  if (!ready) {
     return <LiveLoad label="Loading account" />;
-  }
-
-  if (employee) {
-    return <Navigate to={employeeHomePath(employee)} replace />;
   }
 
   if (user) {
@@ -129,7 +122,7 @@ export function SignUpPage() {
         <Logo />
         <h1 className="mt-6 text-2xl font-semibold tracking-tight sm:text-3xl">Sign up</h1>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          Create an account with your 6-digit login code and 6-digit password. It is saved in ISP-DB as pending. The username, email, phone number, and login code must be different from every employee account. The unique ISP client account opens only after approval.
+          Create an account with your 6-digit login code and 6-digit password. It is saved in ISP-DB as pending. The username, email, phone number, and login code only need to be unique among ISP client accounts — an employee account may reuse them. The account opens only after approval.
         </p>
         <form className="mt-2 grid gap-4" onSubmit={onSubmit} noValidate>
           <p className="text-xs font-medium text-muted-foreground">Step {step + 1} of 2 · {step === 0 ? "Your details" : "Sign in"}</p>

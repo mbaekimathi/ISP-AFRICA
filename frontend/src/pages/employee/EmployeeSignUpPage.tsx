@@ -8,7 +8,6 @@ import { LiveLoad } from "@/components/ui/LiveLoad";
 import { usePageMeta } from "@/hooks/usePageMeta";
 import { fileToProfilePhoto } from "@/lib/accounts";
 import { employeeHomePath } from "@/lib/employees";
-import { useAuth } from "@/providers/AuthProvider";
 import { useEmployeeAuth } from "@/providers/EmployeeAuthProvider";
 
 type SignUpValues = {
@@ -70,8 +69,7 @@ function mapRegisterError(message: string) {
 
 export function EmployeeSignUpPage() {
   usePageMeta("Employee sign up — ISP CENTRIC", "Create a pending ISP CENTRIC employee account.");
-  const { user, ready: clientReady } = useAuth();
-  const { employee, register } = useEmployeeAuth();
+  const { employee, ready, register } = useEmployeeAuth();
   const navigate = useNavigate();
   const [values, setValues] = useState<SignUpValues>(emptyValues);
   const [photo, setPhoto] = useState("");
@@ -79,12 +77,8 @@ export function EmployeeSignUpPage() {
   const [pending, setPending] = useState(false);
   const [step, setStep] = useState(0);
 
-  if (!clientReady) {
+  if (!ready) {
     return <LiveLoad label="Loading account" />;
-  }
-
-  if (user && !employee) {
-    return <Navigate to="/account" replace />;
   }
 
   if (employee) {
@@ -140,7 +134,7 @@ export function EmployeeSignUpPage() {
         <p className="mt-6 text-xs font-semibold uppercase tracking-[0.16em] text-accent">Employees</p>
         <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">Employee sign up</h1>
         <p className="mt-2 text-sm leading-6 text-muted-foreground">
-          The account is saved in ISP-DB as pending. The username, email, phone number, and login code must be different from every ISP client account. After approval, a role can be allocated: Director, Supervisor, Customer Care, Technician, IT Support, Dispatcher, or Sales.
+          The account is saved in ISP-DB as pending. The username, email, phone number, and login code only need to be unique among company employees — an ISP client account may reuse them. After approval, a role can be allocated: Director, Supervisor, Customer Care, Technician, IT Support, Dispatcher, or Sales.
         </p>
         <form className="mt-2 grid gap-4" onSubmit={onSubmit} noValidate>
           <p className="text-xs font-medium text-muted-foreground">Step {step + 1} of 2 · {step === 0 ? "Your details" : "Sign in"}</p>

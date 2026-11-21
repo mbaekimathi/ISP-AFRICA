@@ -3364,14 +3364,6 @@ def clean_registration(payload):
     }
 
 
-def other_table(kind):
-    return "isp_employees" if kind == "client" else "isp_clients"
-
-
-def other_label(kind):
-    return "employee" if kind == "client" else "ISP client"
-
-
 def clean_profile(payload, existing):
     photo = str(payload.get("photoDataUrl", "")).strip()
     if photo.startswith("data:image/svg"):
@@ -3409,24 +3401,18 @@ def unique_phone_taken(cursor, table, phone_digits, exclude_id):
 
 def assert_unique(cursor, kind, fields, exclude_id=None):
     table = "isp_clients" if kind == "client" else "isp_employees"
-    label = other_label(kind)
     checks = (
         (table, "username", fields["username"], "That username is already in use."),
         (table, "email", fields["email"], "That email is already registered."),
-        (other_table(kind), "username", fields["username"], f"That username is already used by an {label} account."),
-        (other_table(kind), "email", fields["email"], f"That email is already used by an {label} account."),
     )
     for target, column, value, message in checks:
         if unique_taken(cursor, target, column, value, exclude_id):
             raise ApiError(409, message)
     if unique_phone_taken(cursor, table, fields["phone_digits"], exclude_id):
         raise ApiError(409, "That phone number is already registered.")
-    if unique_phone_taken(cursor, other_table(kind), fields["phone_digits"], None):
-        raise ApiError(409, f"That phone number is already used by an {label} account.")
-    if unique_taken(cursor, "isp_employees", "login_code", fields["login_code"], exclude_id if kind == "employee" else None):
-        raise ApiError(409, "That login code is already in use by a company employee.")
-    if unique_taken(cursor, "isp_clients", "login_code", fields["login_code"], exclude_id if kind == "client" else None):
-        raise ApiError(409, "That login code is already in use by an ISP client account.")
+    if unique_taken(cursor, table, "login_code", fields["login_code"], exclude_id):
+        label = "an ISP client account" if kind == "client" else "a company employee"
+        raise ApiError(409, f"That login code is already in use by {label}.")
     if unique_taken(cursor, "isp_client_employees", "login_code", fields["login_code"], None):
         raise ApiError(409, "That login code is already in use by a staff account.")
 
